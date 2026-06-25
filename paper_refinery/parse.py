@@ -81,6 +81,7 @@ def parse_pdf(
         result_type="markdown",
         parse_mode=cfg.parse_mode,
         save_images=cfg.save_images,
+        extract_charts=cfg.extract_charts,
         inline_images_in_markdown=cfg.inline_images,
     )
     result = parser.parse(str(pdf_path))

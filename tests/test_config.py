@@ -21,5 +21,10 @@ def test_chart_to_table_is_off_by_default():
     assert "specialized_chart" not in ParseConfig().__dict__  # not even exposed as on
 
 
+def test_chart_images_are_extracted_by_default():
+    # we DO want chart images (so figures.py can describe the method-comparison plots)
+    assert ParseConfig().extract_charts is True
+
+
 def test_figure_prompt_forbids_fabricated_numbers():
     assert "Do NOT" in FigureConfig().prompt

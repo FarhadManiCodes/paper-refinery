@@ -21,11 +21,13 @@ class ParseConfig:
     """LlamaParse options."""
 
     parse_mode: str = "parse_page_with_agent"  # agentic: best equations/tables
-    save_images: bool = True  # extract figure/chart images to disk
+    save_images: bool = True  # extract figure images to disk
+    extract_charts: bool = True  # also extract chart IMAGES (method-comparison plots)
     inline_images: bool = True  # reference figures inline in the markdown
     api_key_env: str = "LLAMA_API_KEY"
-    # NOTE: specialized chart-to-table parsing is intentionally OFF — it fabricates
-    # precise numbers from plotted curves. Figure understanding is done in figures.py.
+    # NOTE: `extract_charts` only saves a chart as an image so figures.py can describe
+    # it. It is NOT `specialized_chart_parsing_*`, which fabricates precise numeric
+    # tables from plotted curves and is intentionally never enabled.
 
 
 @dataclass
