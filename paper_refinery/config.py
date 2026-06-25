@@ -21,13 +21,11 @@ class ParseConfig:
     """LlamaParse options."""
 
     parse_mode: str = "parse_page_with_agent"  # agentic: best equations/tables
-    save_images: bool = True  # extract figure images to disk
-    extract_charts: bool = True  # also extract chart IMAGES (method-comparison plots)
-    inline_images: bool = True  # reference figures inline in the markdown
+    save_images: bool = True  # save full-page renders (page_N.jpg) for figure description
+    inline_images: bool = True  # inline ![alt](src) placeholder at each figure
     api_key_env: str = "LLAMA_API_KEY"
-    # NOTE: `extract_charts` only saves a chart as an image so figures.py can describe
-    # it. It is NOT `specialized_chart_parsing_*`, which fabricates precise numeric
-    # tables from plotted curves and is intentionally never enabled.
+    # NOTE: we do NOT use LlamaParse's per-figure crops or specialized_chart_parsing_*;
+    # figures are described from the full-page render (see enrich.py / figures.py).
 
 
 @dataclass
@@ -36,17 +34,19 @@ class FigureConfig:
 
     model: str = "gemini-3-flash-preview"  # more accurate figure reading than 2.5-flash
     api_key_env: str = "GOOGLE_API_KEY"
-    skip_marker: str = "NOT_A_FIGURE"  # Gemini returns this for non-figures -> dropped
+    skip_marker: str = "NOT_A_FIGURE"  # Gemini returns this when the figure isn't found
     include_references: bool = False  # also feed in-text "Figure N" mentions as context
     # (off = caption-only context; cross-referencing is a future improvement)
-    # Describe trends/comparisons; never invent numeric values read off curves.
+    # The image is a full page; describe only the captioned figure. Trends, not numbers.
     prompt: str = (
-        "Describe this scientific figure for search and retrieval. State what is "
+        "The attached image is a full page from a scientific paper that may also "
+        "contain body text, other figures, or tables. Describe ONLY the figure "
+        "identified by the caption below, for search and retrieval: state what is "
         "compared, the variables/axes, and the qualitative trends or conclusions. "
         "Do NOT report precise numeric values read off plotted curves — give ranges "
         "or directions only. Be concise (2-4 sentences). "
-        "If the image is not a data figure (for example it is body text, a table of "
-        "numbers, or an equation), reply with exactly: NOT_A_FIGURE"
+        "If the page contains no figure matching that caption, reply with exactly: "
+        "NOT_A_FIGURE"
     )
 
 

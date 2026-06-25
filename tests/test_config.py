@@ -19,11 +19,8 @@ def test_refinery_config_composes_subconfigs():
 def test_chart_to_table_is_off_by_default():
     # specialized chart parsing fabricates numbers; must stay off (design decision)
     assert "specialized_chart" not in ParseConfig().__dict__  # not even exposed as on
-
-
-def test_chart_images_are_extracted_by_default():
-    # we DO want chart images (so figures.py can describe the method-comparison plots)
-    assert ParseConfig().extract_charts is True
+    # and we no longer rely on LlamaParse's per-figure crops either
+    assert "extract_charts" not in ParseConfig().__dict__
 
 
 def test_figure_prompt_forbids_fabricated_numbers():

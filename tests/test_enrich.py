@@ -1,4 +1,4 @@
-"""Tests for placeholder-anchored figure-description splicing (pure logic, injected describer)."""
+"""Tests for placeholder-anchored figure enrichment (pure logic, injected describer)."""
 
 from pathlib import Path
 
@@ -7,10 +7,9 @@ from paper_refinery.enrich import (
     _caption_after,
     _find_mentions,
     _find_placeholders,
-    _pick_image,
     enrich_markdown,
 )
-from paper_refinery.parse import Figure, ParseResult
+from paper_refinery.parse import ParseResult
 
 MD = (
     "<page_number>1</page_number>\n\n## Intro\n\nWe reference Figure 1 here.\n\n"
@@ -21,6 +20,7 @@ MD = (
     "![Alt for fig two.](image_url_placeholder)\n\n"
     "FIGURE 2. Second figure caption.\n\n"
 )
+RENDERS = {2: Path("page_2.jpg"), 3: Path("page_3.jpg")}
 
 
 def test_find_placeholders_with_pages():
@@ -37,47 +37,36 @@ def test_caption_after_placeholder():
     assert "comparison of methods A and B" in cap.text
 
 
-def test_pick_image_prefers_img_over_chart_and_by_page():
-    figs = [
-        Figure(Path("chart_p2_0.png"), 2),
-        Figure(Path("img_p2_1.png"), 2),
-        Figure(Path("img_p3_1.png"), 3),
-    ]
-    assert _pick_image(2, figs).image_path.name == "img_p2_1.png"  # img beats chart
-    assert _pick_image(3, figs).image_path.name == "img_p3_1.png"
-    assert _pick_image(10, figs) is None
-
-
-def test_pick_image_prefers_img_one_page_away_over_chart_on_page():
-    # figures float above their captions: caption on page 7, real image on page 6,
-    # junk chart crop on page 7 -> must pick the img on page 6, not the chart on page 7
-    figs = [Figure(Path("img_p6_1.png"), 6), Figure(Path("chart_p7_0.png"), 7)]
-    assert _pick_image(7, figs).image_path.name == "img_p6_1.png"
-
-
 def test_find_mentions_excludes_caption():
     mentions = _find_mentions(MD, "1")
     assert any("We reference Figure 1" in m for m in mentions)
     assert not any(m.startswith("FIGURE 1.") for m in mentions)
 
 
-def test_enrich_splices_after_each_caption():
-    figs = [Figure(Path("img_p2_1.png"), 2), Figure(Path("img_p3_1.png"), 3)]
-    descs = {Path("img_p2_1.png"): "DESC-ONE", Path("img_p3_1.png"): "DESC-TWO"}
-    out = enrich_markdown(ParseResult(MD, figs), describe=lambda p, c, cfg: descs[p])
+def test_enrich_sends_each_figures_page_render_and_splices_after_caption():
+    calls = {}
+
+    def fake(render, context, cfg):
+        calls[render.name] = context
+        return f"DESC-{render.name}"
+
+    out = enrich_markdown(ParseResult(MD, RENDERS), describe=fake)
+    # each figure described from its own page render, grounded on its caption
+    assert calls["page_2.jpg"].startswith("FIGURE 1.")
+    assert calls["page_3.jpg"].startswith("FIGURE 2.")
     i1, i2 = out.index("FIGURE 1."), out.index("FIGURE 2.")
-    assert i1 < out.index("DESC-ONE") < i2  # DESC-ONE under FIGURE 1
-    assert i2 < out.index("DESC-TWO")  # DESC-TWO under FIGURE 2
+    assert i1 < out.index("DESC-page_2.jpg") < i2  # fig 1 description under FIGURE 1
+    assert i2 < out.index("DESC-page_3.jpg")  # fig 2 description under FIGURE 2
 
 
 def test_enrich_context_is_caption_only_by_default():
     captured = {}
 
-    def fake(p, c, cfg):
-        captured["c"] = c
+    def fake(render, context, cfg):
+        captured["c"] = context
         return "D"
 
-    enrich_markdown(ParseResult(MD, [Figure(Path("img_p2_1.png"), 2)]), describe=fake)
+    enrich_markdown(ParseResult(MD, {2: Path("page_2.jpg")}), describe=fake)
     assert "comparison of methods A and B" in captured["c"]  # the caption
     assert "We reference Figure 1" not in captured["c"]  # mentions excluded by default
 
@@ -85,12 +74,12 @@ def test_enrich_context_is_caption_only_by_default():
 def test_enrich_includes_references_when_enabled():
     captured = {}
 
-    def fake(p, c, cfg):
-        captured["c"] = c
+    def fake(render, context, cfg):
+        captured["c"] = context
         return "D"
 
     enrich_markdown(
-        ParseResult(MD, [Figure(Path("img_p2_1.png"), 2)]),
+        ParseResult(MD, {2: Path("page_2.jpg")}),
         cfg=FigureConfig(include_references=True),
         describe=fake,
     )
@@ -98,15 +87,14 @@ def test_enrich_includes_references_when_enabled():
     assert "We reference Figure 1" in captured["c"]  # mentions now included
 
 
-def test_enrich_falls_back_to_alt_text_when_no_image_file():
-    # no extracted image -> describe is never reached -> use the placeholder's alt-text
-    out = enrich_markdown(ParseResult(MD, figures=[]), describe=lambda p, c, cfg: "X")
+def test_enrich_falls_back_to_alt_text_when_no_render():
+    # no page render for the figure's page -> describe never reached -> alt-text used
+    out = enrich_markdown(ParseResult(MD, page_renders={}), describe=lambda r, c, cfg: "X")
     assert "Figure description (auto):** Alt describing fig one" in out
     assert "Figure description (auto):** X" not in out
 
 
-def test_enrich_falls_back_when_gemini_drops_nonfigure():
-    figs = [Figure(Path("img_p2_1.png"), 2), Figure(Path("img_p3_1.png"), 3)]
-    out = enrich_markdown(ParseResult(MD, figs), describe=lambda p, c, cfg: "")  # all dropped
+def test_enrich_falls_back_when_gemini_returns_empty():
+    out = enrich_markdown(ParseResult(MD, RENDERS), describe=lambda r, c, cfg: "")
     assert "Figure description (auto):** Alt describing fig one" in out
     assert "Figure description (auto):** Alt for fig two" in out

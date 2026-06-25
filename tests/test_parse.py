@@ -1,26 +1,18 @@
 """Tests for the LlamaParse wrapper.
 
-The pure helpers (markdown assembly, figure collection) are tested directly; the
+The pure helpers (markdown assembly, page-render mapping) are tested directly; the
 network-bound ``parse_pdf`` is exercised separately with a recorded fixture (skipped).
 """
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from paper_refinery.parse import Figure, ParseResult, _build_markdown, _collect_figures
+from paper_refinery.parse import ParseResult, _build_markdown, _page_renders
 
 
-def test_dataclasses_construct():
-    fig = Figure(image_path=Path("a.png"), page=3, caption="Fig 1")
-    res = ParseResult(markdown="# x", figures=[fig])
-    assert res.markdown == "# x"
-    assert res.figures[0].page == 3 and res.figures[0].caption == "Fig 1"
-
-
-def test_parse_result_defaults_to_no_figures():
-    assert ParseResult(markdown="x").figures == []
+def test_parse_result_defaults_to_no_renders():
+    assert ParseResult(markdown="x").page_renders == {}
 
 
 def test_build_markdown_inserts_one_marker_per_page():
@@ -39,18 +31,15 @@ def test_build_markdown_replaces_stale_inline_tags():
     assert "<page_number>1</page_number>" in md
 
 
-def test_collect_figures_skips_screenshots_and_reads_page():
-    paths = ["/o/chart_p6_0.png", "/o/img_p8_1.png", "/o/page_3.jpg", "/o/page_10.png"]
-    figs = _collect_figures(paths)
-    assert [f.page for f in figs] == [6, 8]  # page screenshots dropped
-    assert all(f.image_path.name.startswith(("chart", "img")) for f in figs)
-
-
-def test_collect_figures_handles_unparseable_name():
-    figs = _collect_figures(["/o/weird.png"])
-    assert len(figs) == 1 and figs[0].page is None
+def test_page_renders_keeps_renders_and_ignores_figure_crops():
+    paths = ["/o/page_1.jpg", "/o/page_10.png", "/o/chart_p6_0.png", "/o/img_p8_1.png"]
+    renders = _page_renders(paths)
+    assert set(renders) == {1, 10}  # only page_N renders, crops dropped
+    assert renders[1].name == "page_1.jpg"
+    assert renders[10].name == "page_10.png"
 
 
 @pytest.mark.skip(reason="parse_pdf needs LlamaParse (network); add with a recorded fixture")
-def test_parse_pdf_inserts_authoritative_page_markers():
-    """When implemented: assert every page boundary yields one <page_number> marker."""
+def test_parse_pdf_builds_markers_and_page_renders():
+    """When implemented: assert one <page_number> per page and page_renders covers
+    every page."""

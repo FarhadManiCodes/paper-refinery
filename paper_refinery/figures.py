@@ -32,13 +32,12 @@ def _finalize(text: str | None, cfg: FigureConfig) -> str:
 
 
 def _prompt(context: str | None, cfg: FigureConfig) -> str:
-    """The instruction sent to Gemini, optionally grounded by the figure's caption
-    and how it is referenced in the paper's text."""
+    """The instruction sent to Gemini. ``context`` is the caption (plus optional in-text
+    references) that identifies which figure on the page to describe."""
     if context:
         return (
-            f"{cfg.prompt}\n\nUse this context from the paper to ground your "
-            f"description (the figure's caption and how it is referenced in the "
-            f"text):\n{context.strip()}"
+            f"{cfg.prompt}\n\nCaption of the figure to describe (use it to locate the "
+            f"figure on the page and to ground your description):\n{context.strip()}"
         )
     return cfg.prompt
 

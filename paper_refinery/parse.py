@@ -1,12 +1,14 @@
-"""LlamaParse: PDF -> clean markdown + extracted figure images + page markers.
+"""LlamaParse: PDF -> clean markdown (with inline figure placeholders + page markers)
+plus a full-page render per page.
 
-Uses agentic parse mode (best equations/tables). Specialized chart-to-table parsing
-is deliberately OFF (it fabricates precise numbers from plots); figure understanding
-is done separately in ``figures.py``.
+We deliberately do NOT use LlamaParse's per-figure image crops: that extraction is
+unreliable (it misses some figures entirely and mis-classifies text blocks as charts).
+Instead, enrichment works from the inline ``![alt](src)`` placeholders (a reliable
+figure list, each with its caption on the next line) and the full-page render for each
+figure's page, which always contains the figure.
 
 Page boundaries are marked authoritatively from LlamaParse's per-page output as
-``<page_number>N</page_number>`` (any inline tags LlamaParse emitted are replaced),
-so the chunker can resolve each chunk's page range.
+``<page_number>N</page_number>`` (any inline tags LlamaParse emitted are replaced).
 """
 
 from __future__ import annotations
@@ -18,26 +20,16 @@ from pathlib import Path
 
 from .config import ParseConfig
 
-# figure files are named like chart_p6_0.png / img_p8_1.png; page screenshots page_N.jpg
-_PAGE_FROM_NAME = re.compile(r"_p(\d+)_")
-_SCREENSHOT = re.compile(r"^page_\d+\.(?:jpe?g|png)$", re.IGNORECASE)
+_PAGE_RENDER = re.compile(r"^page_(\d+)\.(?:jpe?g|png)$", re.IGNORECASE)
 _EXISTING_PAGE_TAG = re.compile(r"<page_number>\s*\d+\s*</page_number>")
-
-
-@dataclass
-class Figure:
-    """An extracted figure image plus where it came from."""
-
-    image_path: Path
-    page: int | None = None
-    caption: str | None = None
 
 
 @dataclass
 class ParseResult:
     # markdown with one authoritative <page_number>N</page_number> per page boundary
+    # and inline ![alt](src) placeholders at each figure
     markdown: str
-    figures: list[Figure] = field(default_factory=list)
+    page_renders: dict[int, Path] = field(default_factory=dict)  # page number -> page_N.jpg
 
 
 def _build_markdown(pages) -> str:
@@ -50,23 +42,22 @@ def _build_markdown(pages) -> str:
     return "\n\n".join(parts)
 
 
-def _collect_figures(image_paths: list[str]) -> list[Figure]:
-    """Turn saved image paths into Figures, skipping full-page screenshots and
-    reading the page number from the filename (chart_pN_* / img_pN_*)."""
-    figures: list[Figure] = []
+def _page_renders(image_paths: list[str]) -> dict[int, Path]:
+    """Map page number -> full-page render (page_N.jpg), ignoring figure crops."""
+    renders: dict[int, Path] = {}
     for raw in image_paths:
         path = Path(raw)
-        if _SCREENSHOT.match(path.name):
-            continue
-        m = _PAGE_FROM_NAME.search(path.name)
-        figures.append(Figure(image_path=path, page=int(m.group(1)) if m else None))
-    return figures
+        m = _PAGE_RENDER.match(path.name)
+        if m:
+            renders[int(m.group(1))] = path
+    return renders
 
 
 def parse_pdf(
     pdf_path: Path, image_dir: Path, cfg: ParseConfig | None = None
 ) -> ParseResult:
-    """Parse a PDF into page-marked markdown plus extracted figures via LlamaParse."""
+    """Parse a PDF into page-marked markdown (with figure placeholders) plus a full-page
+    render per page, via LlamaParse."""
     from llama_cloud_services import LlamaParse
 
     cfg = cfg or ParseConfig()
@@ -81,11 +72,10 @@ def parse_pdf(
         result_type="markdown",
         parse_mode=cfg.parse_mode,
         save_images=cfg.save_images,
-        extract_charts=cfg.extract_charts,
         inline_images_in_markdown=cfg.inline_images,
     )
     result = parser.parse(str(pdf_path))
 
     markdown = _build_markdown(result.pages)
     image_paths = result.save_all_images(str(image_dir)) if cfg.save_images else []
-    return ParseResult(markdown=markdown, figures=_collect_figures(image_paths))
+    return ParseResult(markdown=markdown, page_renders=_page_renders(image_paths))
