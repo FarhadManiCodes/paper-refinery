@@ -34,7 +34,7 @@ class ParseConfig:
 class FigureConfig:
     """Gemini figure-description options."""
 
-    model: str = "gemini-2.5-flash"
+    model: str = "gemini-3-flash-preview"  # more accurate figure reading than 2.5-flash
     api_key_env: str = "GOOGLE_API_KEY"
     # Describe trends/comparisons; never invent numeric values read off curves.
     prompt: str = (
