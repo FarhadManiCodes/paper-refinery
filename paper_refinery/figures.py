@@ -25,6 +25,12 @@ def _mime_type(path: Path) -> str:
     return _MIME.get(path.suffix.lower(), "image/png")
 
 
+def _finalize(text: str | None, cfg: FigureConfig) -> str:
+    """Strip whitespace; return "" when Gemini flagged the image as a non-figure."""
+    text = (text or "").strip()
+    return "" if text.upper().startswith(cfg.skip_marker.upper()) else text
+
+
 def _prompt(context: str | None, cfg: FigureConfig) -> str:
     """The instruction sent to Gemini, optionally grounded by the figure's caption
     and how it is referenced in the paper's text."""
@@ -64,4 +70,4 @@ def describe_figure(
             _prompt(context, cfg),
         ],
     )
-    return (response.text or "").strip()
+    return _finalize(response.text, cfg)

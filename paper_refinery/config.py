@@ -36,12 +36,17 @@ class FigureConfig:
 
     model: str = "gemini-3-flash-preview"  # more accurate figure reading than 2.5-flash
     api_key_env: str = "GOOGLE_API_KEY"
+    skip_marker: str = "NOT_A_FIGURE"  # Gemini returns this for non-figures -> dropped
+    include_references: bool = False  # also feed in-text "Figure N" mentions as context
+    # (off = caption-only context; cross-referencing is a future improvement)
     # Describe trends/comparisons; never invent numeric values read off curves.
     prompt: str = (
         "Describe this scientific figure for search and retrieval. State what is "
         "compared, the variables/axes, and the qualitative trends or conclusions. "
         "Do NOT report precise numeric values read off plotted curves — give ranges "
-        "or directions only. Be concise (2-4 sentences)."
+        "or directions only. Be concise (2-4 sentences). "
+        "If the image is not a data figure (for example it is body text, a table of "
+        "numbers, or an equation), reply with exactly: NOT_A_FIGURE"
     )
 
 

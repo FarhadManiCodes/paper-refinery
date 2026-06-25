@@ -9,7 +9,15 @@ from pathlib import Path
 import pytest
 
 from paper_refinery.config import FigureConfig
-from paper_refinery.figures import _mime_type, _prompt
+from paper_refinery.figures import _finalize, _mime_type, _prompt
+
+
+def test_finalize_strips_and_drops_skip_marker():
+    cfg = FigureConfig()
+    assert _finalize("  A real description.  ", cfg) == "A real description."
+    assert _finalize("NOT_A_FIGURE", cfg) == ""
+    assert _finalize("not_a_figure: it's a table", cfg) == ""  # case-insensitive prefix
+    assert _finalize(None, cfg) == ""
 
 
 def test_mime_type_from_extension():
