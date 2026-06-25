@@ -20,12 +20,14 @@ class ChunkConfig:
 class ParseConfig:
     """LlamaParse options."""
 
-    parse_mode: str = "parse_page_with_agent"  # agentic: best equations/tables
-    save_images: bool = True  # save full-page renders (page_N.jpg) for figure description
-    inline_images: bool = True  # inline ![alt](src) placeholder at each figure
+    parse_mode: str = "parse_page_with_agent"  # agentic: best equations/tables (justified cost)
+    inline_images: bool = True  # ![alt](src) placeholder at each figure (reliable anchor)
+    take_screenshot: bool = True  # full-page renders (page_N.jpg) sent to Gemini per figure
+    disable_image_extraction: bool = True  # skip LlamaParse's unreliable per-figure crops
+    #   (independent of inline_images: placeholders still appear; only the crop files are skipped)
     api_key_env: str = "LLAMA_API_KEY"
-    # NOTE: we do NOT use LlamaParse's per-figure crops or specialized_chart_parsing_*;
-    # figures are described from the full-page render (see enrich.py / figures.py).
+    # Audited: we use only markdown + placeholders + page renders. No figure crops, charts,
+    # specialized parsing, vendor models, or HTML tables -- nothing we'd pay for and discard.
 
 
 @dataclass

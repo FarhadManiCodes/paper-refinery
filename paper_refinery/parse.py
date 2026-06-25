@@ -71,11 +71,12 @@ def parse_pdf(
         api_key=api_key,
         result_type="markdown",
         parse_mode=cfg.parse_mode,
-        save_images=cfg.save_images,
         inline_images_in_markdown=cfg.inline_images,
+        take_screenshot=cfg.take_screenshot,
+        disable_image_extraction=cfg.disable_image_extraction,
     )
     result = parser.parse(str(pdf_path))
 
     markdown = _build_markdown(result.pages)
-    image_paths = result.save_all_images(str(image_dir)) if cfg.save_images else []
+    image_paths = result.save_all_images(str(image_dir))
     return ParseResult(markdown=markdown, page_renders=_page_renders(image_paths))
