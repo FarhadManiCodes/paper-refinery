@@ -1,0 +1,26 @@
+[project]
+name = "paper-refinery"
+version = "0.1.0"
+description = "Parse, figure-enrich, and chunk papers into RAG-ready chunks for papis-ask."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+dependencies = [
+  "llama-cloud-services>=0.6.94", # LlamaParse: PDF -> markdown + figures + page markers
+  "llama-index-core>=0.14",       # MarkdownNodeParser / SentenceSplitter (chunking primitives)
+  "google-genai>=1.0",            # Gemini: figure descriptions
+  "click>=8.1",                   # CLI
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+refinery = "paper_refinery.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100

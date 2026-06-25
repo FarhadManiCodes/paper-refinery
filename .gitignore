@@ -1,0 +1,47 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+*.so
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+.python-version
+
+# ---- uv ----
+# keep uv.lock committed (this is an application); only ignore the cache
+.uv-cache/
+
+# ---- Secrets / credentials ----
+# never commit API keys (LlamaParse, Gemini, ...)
+.env
+.env.*
+*.secret
+secrets/
+
+# ---- Tooling caches ----
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ---- paper-refinery local outputs (parsed markdown, extracted images, manifests) ----
+# generated artifacts from local runs; real outputs go into the papis library, not here
+out/
+scratch/
+*.chunks.json
+*.refinery.md
+images/
