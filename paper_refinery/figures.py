@@ -1,8 +1,9 @@
 """Figure understanding via Gemini.
 
-Describes each extracted figure for retrieval (what is compared, axes/variables, and
-qualitative trends). Never invents precise numeric values read off plotted curves —
-those belong to the paper's own tables.
+Given a full-page render and a figure's caption, describe the captioned figure for
+retrieval (what is compared, axes/variables, qualitative trends). The caption tells
+Gemini which figure on the page to describe. Never invents precise numeric values read
+off plotted curves -- those belong to the paper's own tables.
 """
 
 from __future__ import annotations
@@ -43,18 +44,19 @@ def _prompt(context: str | None, cfg: FigureConfig) -> str:
 
 
 def describe_figure(
-    image_path: Path, context: str | None = None, cfg: FigureConfig | None = None
+    page_render: Path, context: str | None = None, cfg: FigureConfig | None = None
 ) -> str:
-    """Return a short, retrieval-oriented description of a figure image.
+    """Describe the captioned figure on a full-page render.
 
-    ``context`` should be the figure's caption plus any in-text references; it grounds
-    the description in the paper's own framing.
+    ``page_render`` is the full-page image (page_N.jpg); ``context`` is the figure's
+    caption (plus optional in-text references) telling Gemini which figure to describe.
+    Returns "" if Gemini reports no matching figure on the page.
     """
     from google import genai
     from google.genai import types
 
     cfg = cfg or FigureConfig()
-    image_path = Path(image_path)
+    page_render = Path(page_render)
     api_key = os.environ.get(cfg.api_key_env)
     if not api_key:
         raise RuntimeError(f"{cfg.api_key_env} is not set")
@@ -64,7 +66,7 @@ def describe_figure(
         model=cfg.model,
         contents=[
             types.Part.from_bytes(
-                data=image_path.read_bytes(), mime_type=_mime_type(image_path)
+                data=page_render.read_bytes(), mime_type=_mime_type(page_render)
             ),
             _prompt(context, cfg),
         ],
