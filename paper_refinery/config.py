@@ -36,19 +36,20 @@ class FigureConfig:
 
     model: str = "gemini-3-flash-preview"  # more accurate figure reading than 2.5-flash
     api_key_env: str = "GOOGLE_API_KEY"
-    skip_marker: str = "NOT_A_FIGURE"  # Gemini returns this when the figure isn't found
+    skip_marker: str = "NOT_A_FIGURE"  # Gemini omits / flags figures not on the page
     include_references: bool = False  # also feed in-text "Figure N" mentions as context
     # (off = caption-only context; cross-referencing is a future improvement)
-    # The image is a full page; describe only the captioned figure. Trends, not numbers.
+    max_image_px: int = 1024  # downscale the page render's long side before sending (saves tokens)
+    # One call per page: describe every listed figure, return JSON {number: description}.
     prompt: str = (
-        "The attached image is a full page from a scientific paper that may also "
-        "contain body text, other figures, or tables. Describe ONLY the figure "
-        "identified by the caption below, for search and retrieval: state what is "
-        "compared, the variables/axes, and the qualitative trends or conclusions. "
-        "Do NOT report precise numeric values read off plotted curves — give ranges "
-        "or directions only. Be concise (2-4 sentences). "
-        "If the page contains no figure matching that caption, reply with exactly: "
-        "NOT_A_FIGURE"
+        "The attached image is a full page from a scientific paper. It contains the "
+        "figure(s) listed below by caption. For EACH listed figure, write a 2-4 "
+        "sentence description for search and retrieval: what is compared, the "
+        "variables/axes, and the qualitative trends or conclusions. Do NOT report "
+        "precise numeric values read off plotted curves — give ranges or directions "
+        "only. Respond with ONLY a JSON object mapping each figure number (as a "
+        'string) to its description, e.g. {"4.1": "...", "4.2": "..."}. If a listed '
+        "figure is not actually present on the page, omit it from the JSON."
     )
 
 

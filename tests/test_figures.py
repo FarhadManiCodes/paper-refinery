@@ -1,46 +1,49 @@
-"""Tests for Gemini figure descriptions.
+"""Tests for Gemini figure descriptions (pure helpers; the network call is live-only)."""
 
-Pure helpers (mime detection, prompt building) are tested directly; the network call
-is exercised live only (skipped here).
-"""
-
-from pathlib import Path
-
-import pytest
+import io
 
 from paper_refinery.config import FigureConfig
-from paper_refinery.figures import _finalize, _mime_type, _prompt
+from paper_refinery.figures import _parse, _prompt, _render_bytes
 
 
-def test_finalize_strips_and_drops_skip_marker():
+def test_prompt_lists_each_figure_with_its_caption():
     cfg = FigureConfig()
-    assert _finalize("  A real description.  ", cfg) == "A real description."
-    assert _finalize("NOT_A_FIGURE", cfg) == ""
-    assert _finalize("not_a_figure: it's a table", cfg) == ""  # case-insensitive prefix
-    assert _finalize(None, cfg) == ""
-
-
-def test_mime_type_from_extension():
-    assert _mime_type(Path("a.png")) == "image/png"
-    assert _mime_type(Path("a.JPG")) == "image/jpeg"
-    assert _mime_type(Path("a.jpeg")) == "image/jpeg"
-    assert _mime_type(Path("a.unknown")) == "image/png"  # safe default
-
-
-def test_prompt_is_base_instructions_without_context():
-    cfg = FigureConfig()
-    assert _prompt(None, cfg) == cfg.prompt
-    assert "Do NOT" in _prompt(None, cfg)  # forbids fabricated numbers
-
-
-def test_prompt_grounds_on_context_when_present():
-    cfg = FigureConfig()
-    context = "FIGURE 4.3 Error evolution\nFigure 4.3 shows the evolution of errors."
-    p = _prompt(context, cfg)
-    assert context in p
+    p = _prompt([("4.1", "Gray-Scott evolution"), ("4.2", "Helmholtz coefficients")], cfg)
     assert cfg.prompt in p
+    assert "- 4.1: Gray-Scott evolution" in p
+    assert "- 4.2: Helmholtz coefficients" in p
 
 
-@pytest.mark.skip(reason="describe_figure needs Gemini (network); run live, not in CI")
-def test_describe_figure_returns_trend_text_without_fabricated_numbers():
-    """When run live: describe a real plot image and assert non-empty text."""
+def test_parse_reads_number_to_description_json():
+    out = _parse('{"4.1": "desc one", "4.2": "desc two"}', FigureConfig())
+    assert out == {"4.1": "desc one", "4.2": "desc two"}
+
+
+def test_parse_tolerates_fences_and_prose():
+    out = _parse('Sure:\n```json\n{"4.1": "d"}\n```', FigureConfig())
+    assert out == {"4.1": "d"}
+
+
+def test_parse_drops_skip_marker_and_handles_garbage():
+    cfg = FigureConfig()
+    assert _parse('{"4.1": "NOT_A_FIGURE", "4.2": "real"}', cfg) == {"4.2": "real"}
+    assert _parse("no json here", cfg) == {}
+    assert _parse(None, cfg) == {}
+
+
+def test_render_bytes_downscales_long_side(tmp_path):
+    from PIL import Image
+
+    src = tmp_path / "page.png"
+    Image.new("RGB", (2000, 2600), "white").save(src)
+    w, h = Image.open(io.BytesIO(_render_bytes(src, max_px=1024))).size
+    assert 1020 <= max(w, h) <= 1024  # long side at the cap
+    assert h > w  # portrait aspect preserved
+
+
+def test_render_bytes_does_not_upscale_small_images(tmp_path):
+    from PIL import Image
+
+    src = tmp_path / "small.png"
+    Image.new("RGB", (500, 400), "white").save(src)
+    assert Image.open(io.BytesIO(_render_bytes(src, max_px=1024))).size == (500, 400)

@@ -1,62 +1,75 @@
 """Figure understanding via Gemini.
 
-Given a full-page render and a figure's caption, describe the captioned figure for
-retrieval (what is compared, axes/variables, qualitative trends). The caption tells
-Gemini which figure on the page to describe. Never invents precise numeric values read
-off plotted curves -- those belong to the paper's own tables.
+Given a full-page render and the captions of the figure(s) on that page, describe every
+figure in a single call. One call per page (not per figure) keeps multi-figure pages
+cheap; the render is downscaled first to save image tokens. Never invents precise numeric
+values read off plotted curves -- those belong to the paper's own tables.
 """
 
 from __future__ import annotations
 
+import io
+import json
 import os
+import re
 from pathlib import Path
 
 from .config import FigureConfig
 
-_MIME = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-}
+_JSON = re.compile(r"\{.*\}", re.DOTALL)
 
 
-def _mime_type(path: Path) -> str:
-    return _MIME.get(path.suffix.lower(), "image/png")
+def _render_bytes(page_render: Path, max_px: int) -> bytes:
+    """JPEG bytes of the page render, downscaled so its long side <= max_px."""
+    from PIL import Image
+
+    img = Image.open(page_render).convert("RGB")
+    if max(img.size) > max_px:
+        img.thumbnail((max_px, max_px))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return buf.getvalue()
 
 
-def _finalize(text: str | None, cfg: FigureConfig) -> str:
-    """Strip whitespace; return "" when Gemini flagged the image as a non-figure."""
-    text = (text or "").strip()
-    return "" if text.upper().startswith(cfg.skip_marker.upper()) else text
+def _prompt(figures: list[tuple[str, str]], cfg: FigureConfig) -> str:
+    """cfg.prompt followed by '- <number>: <caption>' for each figure on the page."""
+    listing = "\n".join(f"- {number}: {caption}" for number, caption in figures)
+    return f"{cfg.prompt}\n\nFigures on this page:\n{listing}"
 
 
-def _prompt(context: str | None, cfg: FigureConfig) -> str:
-    """The instruction sent to Gemini. ``context`` is the caption (plus optional in-text
-    references) that identifies which figure on the page to describe."""
-    if context:
-        return (
-            f"{cfg.prompt}\n\nCaption of the figure to describe (use it to locate the "
-            f"figure on the page and to ground your description):\n{context.strip()}"
-        )
-    return cfg.prompt
+def _parse(text: str | None, cfg: FigureConfig) -> dict[str, str]:
+    """Parse Gemini's JSON {number: description}; tolerate fences / surrounding prose."""
+    m = _JSON.search(text or "")
+    if not m:
+        return {}
+    try:
+        data = json.loads(m.group(0))
+    except (ValueError, TypeError):
+        return {}
+    out: dict[str, str] = {}
+    for number, desc in (data or {}).items():
+        desc = str(desc).strip()
+        if desc and not desc.upper().startswith(cfg.skip_marker.upper()):
+            out[str(number).strip()] = desc
+    return out
 
 
-def describe_figure(
-    page_render: Path, context: str | None = None, cfg: FigureConfig | None = None
-) -> str:
-    """Describe the captioned figure on a full-page render.
+def describe_page_figures(
+    page_render: Path,
+    figures: list[tuple[str, str]],
+    cfg: FigureConfig | None = None,
+) -> dict[str, str]:
+    """Describe every figure on a page in one Gemini call.
 
-    ``page_render`` is the full-page image (page_N.jpg); ``context`` is the figure's
-    caption (plus optional in-text references) telling Gemini which figure to describe.
-    Returns "" if Gemini reports no matching figure on the page.
+    ``figures`` is a list of ``(number, caption)`` for the figures on this page. Returns
+    ``{number: description}``; figures Gemini does not find on the page are omitted.
     """
     from google import genai
     from google.genai import types
 
     cfg = cfg or FigureConfig()
-    page_render = Path(page_render)
+    if not figures:
+        return {}
     api_key = os.environ.get(cfg.api_key_env)
     if not api_key:
         raise RuntimeError(f"{cfg.api_key_env} is not set")
@@ -66,9 +79,10 @@ def describe_figure(
         model=cfg.model,
         contents=[
             types.Part.from_bytes(
-                data=page_render.read_bytes(), mime_type=_mime_type(page_render)
+                data=_render_bytes(Path(page_render), cfg.max_image_px),
+                mime_type="image/jpeg",
             ),
-            _prompt(context, cfg),
+            _prompt(figures, cfg),
         ],
     )
-    return _finalize(response.text, cfg)
+    return _parse(response.text, cfg)

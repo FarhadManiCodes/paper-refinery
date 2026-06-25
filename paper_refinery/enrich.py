@@ -13,12 +13,13 @@ figure, so this works uniformly -- including figures LlamaParse failed to crop.
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from .config import FigureConfig
-from .figures import describe_figure as _default_describe
+from .figures import describe_page_figures as _default_describe
 from .parse import ParseResult
 
 _PAGE = re.compile(r"<page_number>\s*(\d+)\s*</page_number>")
@@ -27,7 +28,8 @@ _CAPTION_LINE = re.compile(
     r"(?m)^[ \t]*\**[ \t]*(FIGURE|Figure)[ \t]+(\d+(?:\.\d+)?)\b[.:]?[ \t]*(.*)$"
 )
 
-Describer = Callable[[Path, str | None, FigureConfig], str]
+# (page_render, [(figure_number, caption)]) -> {figure_number: description}
+PageDescriber = Callable[[Path, list[tuple[str, str]], FigureConfig], dict[str, str]]
 
 
 @dataclass
@@ -87,9 +89,13 @@ def _find_mentions(markdown: str, number: str) -> list[str]:
 def enrich_markdown(
     parsed: ParseResult,
     cfg: FigureConfig | None = None,
-    describe: Describer | None = None,
+    describe: PageDescriber | None = None,
 ) -> str:
-    """Return the markdown with figure descriptions spliced next to their captions."""
+    """Return the markdown with figure descriptions spliced next to their captions.
+
+    Figures are grouped by page and described one page at a time (a single Gemini call
+    per page), so a multi-figure page sends its render once.
+    """
     cfg = cfg or FigureConfig()
     describe = describe or _default_describe
     md = parsed.markdown
@@ -102,18 +108,27 @@ def enrich_markdown(
         mentions.setdefault(caption.number, _find_mentions(md, caption.number))
         return "\n\n".join([head, *mentions[caption.number]])
 
-    insertions: list[tuple[int, str]] = []
+    # group each figure (placeholder + its caption) by the page it sits on
+    by_page: dict[int | None, list[tuple[_Placeholder, _Caption | None]]] = defaultdict(list)
     for ph in _find_placeholders(md):
-        caption = _caption_after(md, ph.end)
-        render = parsed.page_renders.get(ph.page) if ph.page is not None else None
-        context = context_for(caption) if caption else ph.alt
-        desc = describe(render, context, cfg) if render else ""
-        if not desc:  # no page render, or Gemini found no matching figure
-            desc = ph.alt  # fall back to LlamaParse's own alt-text
-        if not desc:
-            continue
-        anchor = caption.line_end if caption else ph.end
-        insertions.append((anchor, f"\n\n> **Figure description (auto):** {desc}"))
+        by_page[ph.page].append((ph, _caption_after(md, ph.end)))
+
+    insertions: list[tuple[int, str]] = []
+    for page, items in by_page.items():
+        render = parsed.page_renders.get(page) if page is not None else None
+        results: dict[str, str] = {}
+        if render is not None:
+            requests = [(cap.number, context_for(cap)) for _, cap in items if cap]
+            if requests:
+                results = describe(render, requests, cfg)
+        for ph, caption in items:
+            desc = results.get(caption.number, "") if caption else ""
+            if not desc:  # no render, or Gemini didn't find this figure on the page
+                desc = ph.alt  # fall back to LlamaParse's own alt-text
+            if not desc:
+                continue
+            anchor = caption.line_end if caption else ph.end
+            insertions.append((anchor, f"\n\n> **Figure description (auto):** {desc}"))
 
     # apply back-to-front so earlier offsets stay valid
     for offset, text in sorted(insertions, key=lambda it: it[0], reverse=True):
