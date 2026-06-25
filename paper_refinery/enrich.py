@@ -20,9 +20,9 @@ from typing import Callable
 
 from .config import FigureConfig
 from .figures import describe_page_figures as _default_describe
+from .markers import PAGE_MARKER_RE
 from .parse import ParseResult
 
-_PAGE = re.compile(r"<page_number>\s*(\d+)\s*</page_number>")
 _PLACEHOLDER = re.compile(r"!\[(?P<alt>[^\]]*)\]\([^)]*\)")
 _CAPTION_LINE = re.compile(
     r"(?m)^[ \t]*\**[ \t]*(FIGURE|Figure)[ \t]+(\d+(?:\.\d+)?)\b[.:]?[ \t]*(.*)$"
@@ -48,7 +48,7 @@ class _Caption:
 
 def _page_at(markdown: str, offset: int) -> int | None:
     page = None
-    for m in _PAGE.finditer(markdown):
+    for m in PAGE_MARKER_RE.finditer(markdown):
         if m.start() <= offset:
             page = int(m.group(1))
         else:

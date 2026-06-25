@@ -19,8 +19,8 @@ from llama_index.core import Document
 from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
 
 from .config import ChunkConfig
+from .markers import PAGE_MARKER_RE
 
-_PAGE = re.compile(r"<page_number>\s*(\d+)\s*</page_number>")
 # boundary types in descending preference, with the regex that finds them
 _BOUNDARIES = ((3, r"\n\n+"), (2, r"(?<=[.!?])\s+"), (1, r"\n"), (0, r" "))
 _MODE = {3: "PARA", 2: "SENT", 1: "NL", 0: "WORD"}
@@ -103,7 +103,7 @@ def _overlap_before(prev: str, cfg: ChunkConfig) -> tuple[str, str]:
 
 
 def _page_range(text: str) -> tuple[int | None, int | None]:
-    nums = [int(m.group(1)) for m in _PAGE.finditer(text)]
+    nums = [int(m.group(1)) for m in PAGE_MARKER_RE.finditer(text)]
     return (min(nums), max(nums)) if nums else (None, None)
 
 
@@ -137,7 +137,7 @@ def chunk_markdown(markdown: str, cfg: ChunkConfig | None = None) -> list[Chunk]
 
         chunks.append(
             Chunk(
-                text=_PAGE.sub("", text).strip(),
+                text=PAGE_MARKER_RE.sub("", text).strip(),
                 index=i,
                 page_start=ps,
                 page_end=pe,

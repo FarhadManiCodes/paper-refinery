@@ -19,9 +19,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import ParseConfig
+from .markers import PAGE_MARKER_RE, page_marker
 
 _PAGE_RENDER = re.compile(r"^page_(\d+)\.(?:jpe?g|png)$", re.IGNORECASE)
-_EXISTING_PAGE_TAG = re.compile(r"<page_number>\s*\d+\s*</page_number>")
 
 
 @dataclass
@@ -36,8 +36,8 @@ def _build_markdown(pages) -> str:
     """Concatenate per-page markdown, prefixing each page with an authoritative marker."""
     parts: list[str] = []
     for page in pages:
-        body = _EXISTING_PAGE_TAG.sub("", page.md or "")
-        parts.append(f"<page_number>{page.page}</page_number>")
+        body = PAGE_MARKER_RE.sub("", page.md or "")
+        parts.append(page_marker(page.page))
         parts.append(body)
     return "\n\n".join(parts)
 
