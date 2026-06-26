@@ -47,3 +47,22 @@ def test_render_bytes_does_not_upscale_small_images(tmp_path):
     src = tmp_path / "small.png"
     Image.new("RGB", (500, 400), "white").save(src)
     assert Image.open(io.BytesIO(_render_bytes(src, max_px=1024))).size == (500, 400)
+
+
+def test_describe_page_figures_uses_injected_client(tmp_path):
+    # an injected client means no make_client / no API key needed
+    from PIL import Image
+
+    from paper_refinery.figures import describe_page_figures
+
+    img = tmp_path / "page.png"
+    Image.new("RGB", (80, 100), "white").save(img)
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents):
+                return type("R", (), {"text": '{"4.1": "a description"}'})()
+
+    out = describe_page_figures(img, [("4.1", "caption")], client=FakeClient())
+    assert out == {"4.1": "a description"}

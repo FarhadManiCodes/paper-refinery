@@ -54,27 +54,36 @@ def _parse(text: str | None, cfg: FigureConfig) -> dict[str, str]:
     return out
 
 
+def make_client(cfg: FigureConfig | None = None):
+    """Create a Gemini client. Build one and reuse it across pages (see cli.py)."""
+    from google import genai
+
+    cfg = cfg or FigureConfig()
+    api_key = os.environ.get(cfg.api_key_env)
+    if not api_key:
+        raise RuntimeError(f"{cfg.api_key_env} is not set")
+    return genai.Client(api_key=api_key)
+
+
 def describe_page_figures(
     page_render: Path,
     figures: list[tuple[str, str]],
     cfg: FigureConfig | None = None,
+    client=None,
 ) -> dict[str, str]:
     """Describe every figure on a page in one Gemini call.
 
     ``figures`` is a list of ``(number, caption)`` for the figures on this page. Returns
     ``{number: description}``; figures Gemini does not find on the page are omitted.
+    Pass ``client`` to reuse one Gemini client across pages.
     """
-    from google import genai
     from google.genai import types
 
     cfg = cfg or FigureConfig()
     if not figures:
         return {}
-    api_key = os.environ.get(cfg.api_key_env)
-    if not api_key:
-        raise RuntimeError(f"{cfg.api_key_env} is not set")
-
-    client = genai.Client(api_key=api_key)
+    if client is None:
+        client = make_client(cfg)
     response = client.models.generate_content(
         model=cfg.model,
         contents=[

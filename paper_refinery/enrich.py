@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -90,11 +91,13 @@ def enrich_markdown(
     parsed: ParseResult,
     cfg: FigureConfig | None = None,
     describe: PageDescriber | None = None,
+    max_workers: int = 4,
 ) -> str:
     """Return the markdown with figure descriptions spliced next to their captions.
 
     Figures are grouped by page and described one page at a time (a single Gemini call
-    per page), so a multi-figure page sends its render once.
+    per page). The per-page calls are independent, so they run concurrently. Splicing is
+    deterministic regardless of completion order.
     """
     cfg = cfg or FigureConfig()
     describe = describe or _default_describe
@@ -113,24 +116,41 @@ def enrich_markdown(
     for ph in _find_placeholders(md):
         by_page[ph.page].append((ph, _caption_after(md, ph.end)))
 
-    insertions: list[tuple[int, str]] = []
+    # one describe task per page that has a render and at least one caption
+    tasks: dict[int, tuple[Path, list[tuple[str, str]]]] = {}
     for page, items in by_page.items():
         render = parsed.page_renders.get(page) if page is not None else None
-        results: dict[str, str] = {}
-        if render is not None:
-            requests = [(cap.number, context_for(cap)) for _, cap in items if cap]
-            if requests:
-                results = describe(render, requests, cfg)
+        requests = [(cap.number, context_for(cap)) for _, cap in items if cap]
+        if render is not None and requests:
+            tasks[page] = (render, requests)
+
+    # run the page calls concurrently; one page failing falls back to alt-text, not the doc
+    results_by_page: dict[int, dict[str, str]] = {}
+    if tasks:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(describe, render, requests, cfg): page
+                for page, (render, requests) in tasks.items()
+            }
+            for future, page in futures.items():
+                try:
+                    results_by_page[page] = future.result()
+                except Exception:
+                    results_by_page[page] = {}
+
+    # splice deterministically (document order; offsets applied back-to-front)
+    insertions: list[tuple[int, str]] = []
+    for page, items in by_page.items():
+        results = results_by_page.get(page, {})
         for ph, caption in items:
             desc = results.get(caption.number, "") if caption else ""
-            if not desc:  # no render, or Gemini didn't find this figure on the page
+            if not desc:  # no render, Gemini missed it, or the page call failed
                 desc = ph.alt  # fall back to LlamaParse's own alt-text
             if not desc:
                 continue
             anchor = caption.line_end if caption else ph.end
             insertions.append((anchor, f"\n\n> **Figure description (auto):** {desc}"))
 
-    # apply back-to-front so earlier offsets stay valid
     for offset, text in sorted(insertions, key=lambda it: it[0], reverse=True):
         md = md[:offset] + text + md[offset:]
     return md
