@@ -1,18 +1,16 @@
-"""Splice figure descriptions into the markdown, anchored on inline image placeholders.
+"""Splice figure descriptions into the markdown, anchored on FIGURE captions.
 
-LlamaParse inlines a ``![alt](src)`` placeholder at each real figure's position, with
-the figure's caption (``FIGURE N.M ...``) on the following line. For each placeholder we
-send Gemini the **full-page render** for that figure's page (the caption tells it which
-figure to describe) and splice the description after the caption.
-
-This deliberately avoids LlamaParse's per-figure image crops, which are unreliable (they
-miss some figures and mis-classify text as charts). The page render always contains the
-figure, so this works uniformly -- including figures LlamaParse failed to crop.
+Each figure has a ``FIGURE N.M ...`` caption in the text. The caption is the reliable
+anchor: LlamaParse's inline image placeholders move around between runs, but the caption
+(number + page + position) is stable. We find one caption per figure number, group them by
+the page they sit on, describe each page's figures with Gemini in a single call, and splice
+the description right after the caption.
 """
 
 from __future__ import annotations
 
 import re
+import warnings
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -24,7 +22,6 @@ from .figures import describe_page_figures as _default_describe
 from .markers import PAGE_MARKER_RE
 from .parse import ParseResult
 
-_PLACEHOLDER = re.compile(r"!\[(?P<alt>[^\]]*)\]\([^)]*\)")
 _CAPTION_LINE = re.compile(
     r"(?m)^[ \t]*\**[ \t]*(FIGURE|Figure)[ \t]+(\d+(?:\.\d+)?)\b[.:]?[ \t]*(.*)$"
 )
@@ -34,17 +31,12 @@ PageDescriber = Callable[[Path, list[tuple[str, str]], FigureConfig], dict[str, 
 
 
 @dataclass
-class _Placeholder:
-    alt: str
-    end: int  # offset just past the ![...](...) placeholder
-    page: int | None
-
-
-@dataclass
 class _Caption:
     number: str
     text: str
     line_end: int  # offset just past the caption line (where a description is spliced)
+    page: int | None
+    upper: bool  # True if the line was "FIGURE" (the canonical caption form)
 
 
 def _page_at(markdown: str, offset: int) -> int | None:
@@ -57,20 +49,17 @@ def _page_at(markdown: str, offset: int) -> int | None:
     return page
 
 
-def _find_placeholders(markdown: str) -> list[_Placeholder]:
-    return [
-        _Placeholder(m.group("alt").strip(), m.end(), _page_at(markdown, m.start()))
-        for m in _PLACEHOLDER.finditer(markdown)
-    ]
-
-
-def _caption_after(markdown: str, pos: int, window: int = 600) -> _Caption | None:
-    """The first FIGURE caption line within `window` chars after `pos`."""
-    m = _CAPTION_LINE.search(markdown, pos, pos + window)
-    if not m:
-        return None
-    text = (m.group(3) or "").strip().strip("*").strip()  # drop leaked markdown bold
-    return _Caption(m.group(2), text, m.end())
+def _find_captions(markdown: str) -> list[_Caption]:
+    """One caption per figure number; the uppercase FIGURE line wins if both forms exist."""
+    caps: dict[str, _Caption] = {}
+    for m in _CAPTION_LINE.finditer(markdown):
+        kind, number = m.group(1), m.group(2)
+        text = (m.group(3) or "").strip().strip("*").strip()  # drop leaked markdown bold
+        upper = kind == "FIGURE"
+        cur = caps.get(number)
+        if cur is None or (upper and not cur.upper):
+            caps[number] = _Caption(number, text, m.end(), _page_at(markdown, m.start()), upper)
+    return list(caps.values())
 
 
 def _find_mentions(markdown: str, number: str) -> list[str]:
@@ -95,9 +84,9 @@ def enrich_markdown(
 ) -> str:
     """Return the markdown with figure descriptions spliced next to their captions.
 
-    Figures are grouped by page and described one page at a time (a single Gemini call
-    per page). The per-page calls are independent, so they run concurrently. Splicing is
-    deterministic regardless of completion order.
+    Captions are grouped by page and described one page at a time (a single Gemini call
+    per page). The per-page calls are independent and run concurrently. A page that fails
+    (after retries) leaves its figures undescribed; splicing is deterministic.
     """
     cfg = cfg or FigureConfig()
     describe = describe or _default_describe
@@ -111,20 +100,17 @@ def enrich_markdown(
         mentions.setdefault(caption.number, _find_mentions(md, caption.number))
         return "\n\n".join([head, *mentions[caption.number]])
 
-    # group each figure (placeholder + its caption) by the page it sits on
-    by_page: dict[int | None, list[tuple[_Placeholder, _Caption | None]]] = defaultdict(list)
-    for ph in _find_placeholders(md):
-        by_page[ph.page].append((ph, _caption_after(md, ph.end)))
+    by_page: dict[int | None, list[_Caption]] = defaultdict(list)
+    for caption in _find_captions(md):
+        by_page[caption.page].append(caption)
 
-    # one describe task per page that has a render and at least one caption
+    # one describe task per page that has a render
     tasks: dict[int, tuple[Path, list[tuple[str, str]]]] = {}
-    for page, items in by_page.items():
+    for page, captions in by_page.items():
         render = parsed.page_renders.get(page) if page is not None else None
-        requests = [(cap.number, context_for(cap)) for _, cap in items if cap]
-        if render is not None and requests:
-            tasks[page] = (render, requests)
+        if render is not None:
+            tasks[page] = (render, [(c.number, context_for(c)) for c in captions])
 
-    # run the page calls concurrently; one page failing falls back to alt-text, not the doc
     results_by_page: dict[int, dict[str, str]] = {}
     if tasks:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -135,22 +121,22 @@ def enrich_markdown(
             for future, page in futures.items():
                 try:
                     results_by_page[page] = future.result()
-                except Exception:
+                except Exception as exc:  # surface it; leave this page undescribed
+                    warnings.warn(f"figure description failed on page {page}: {exc!r}")
                     results_by_page[page] = {}
 
-    # splice deterministically (document order; offsets applied back-to-front)
     insertions: list[tuple[int, str]] = []
-    for page, items in by_page.items():
+    for page, captions in by_page.items():
         results = results_by_page.get(page, {})
-        for ph, caption in items:
-            desc = results.get(caption.number, "") if caption else ""
-            if not desc:  # no render, Gemini missed it, or the page call failed
-                desc = ph.alt  # fall back to LlamaParse's own alt-text
+        for caption in captions:
+            desc = results.get(caption.number, "")
             if not desc:
                 continue
-            anchor = caption.line_end if caption else ph.end
-            insertions.append((anchor, f"\n\n> **Figure description (auto):** {desc}"))
+            insertions.append(
+                (caption.line_end, f"\n\n> **Figure description (auto):** {desc}")
+            )
 
+    # apply back-to-front so earlier offsets stay valid
     for offset, text in sorted(insertions, key=lambda it: it[0], reverse=True):
         md = md[:offset] + text + md[offset:]
     return md

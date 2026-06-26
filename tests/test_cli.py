@@ -47,3 +47,5 @@ def test_main_wires_stages_and_writes_json(tmp_path, monkeypatch):
     assert seen["md"] == "MD"
     assert data["chunks"][0]["text"] == "ENRICHED"  # enrich output reached chunk -> json
     assert data["docname"] == "p"
+    # the enriched markdown is kept as an artifact before chunking
+    assert pdf.with_suffix(".refinery.md").read_text() == "ENRICHED"

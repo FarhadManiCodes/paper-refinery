@@ -12,11 +12,23 @@ import io
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 from .config import FigureConfig
 
 _JSON = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _generate(client, model, contents, attempts: int = 4, base_delay: float = 4.0):
+    """generate_content with exponential backoff (handles transient rate limits)."""
+    for i in range(attempts):
+        try:
+            return client.models.generate_content(model=model, contents=contents)
+        except Exception:
+            if i == attempts - 1:
+                raise
+            time.sleep(base_delay * (2**i))
 
 
 def _render_bytes(page_render: Path, max_px: int) -> bytes:
@@ -84,9 +96,10 @@ def describe_page_figures(
         return {}
     if client is None:
         client = make_client(cfg)
-    response = client.models.generate_content(
-        model=cfg.model,
-        contents=[
+    response = _generate(
+        client,
+        cfg.model,
+        [
             types.Part.from_bytes(
                 data=_render_bytes(Path(page_render), cfg.max_image_px),
                 mime_type="image/jpeg",
