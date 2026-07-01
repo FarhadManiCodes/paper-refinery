@@ -37,6 +37,7 @@ def test_parse_config_local_backend_defaults():
     assert c.merged_cell_strategy == "duplicate"
     assert c.model_path == ""
     assert c.mmproj_path == ""
+    assert c.figure_crop_margin == 1.1
     assert c.glmocr_config_overrides == {}
 
 

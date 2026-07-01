@@ -17,6 +17,7 @@ from paper_refinery.parse import (
     ParseResult,
     _build_markdown,
     _dispatch_region,
+    _dotted_overrides,
     _html_table_to_markdown,
     _llama_server,
     _merge_formula_numbers,
@@ -66,6 +67,19 @@ def test_dispatch_title_strips_ocrs_own_heading_marker():
 
     kind, text = _dispatch_region(_region("doc_title", "# My Paper"), ParseConfig())
     assert text == "# My Paper"
+
+
+def test_dispatch_figure_title_is_plain_body_text():
+    # the "FIGURE N. ..." caption line -- must land in body markdown as-is, since
+    # enrich.py's caption regex scans the body text for it
+    kind, text = _dispatch_region(_region("figure_title", "FIGURE 4.1. A comparison."), ParseConfig())
+    assert kind == "body" and text == "FIGURE 4.1. A comparison."
+
+
+def test_dispatch_algorithm_is_fenced_code_block():
+    kind, text = _dispatch_region(_region("algorithm", "for i in range(n):\n    do(i)"), ParseConfig())
+    assert kind == "body"
+    assert text == "```\nfor i in range(n):\n    do(i)\n```"
 
 
 def test_dispatch_reference_content_is_routed_separately():
@@ -146,6 +160,14 @@ def test_html_table_duplicates_rowspan_value():
     lines = md.splitlines()
     assert lines[0] == "| Method | 1 |"
     assert lines[2] == "| Method | 2 |"
+
+
+def test_html_table_tolerates_malformed_span_attribute():
+    # GLM-OCR's own model-generated HTML, not hand-authored -- a garbled rowspan
+    # shouldn't crash table conversion (and by extension, the whole page/PDF)
+    html = "<table><tr><td rowspan='not-a-number'>x</td><td>y</td></tr></table>"
+    md = _html_table_to_markdown(html)
+    assert md.splitlines()[0] == "| x | y |"
 
 
 def test_html_table_missing_table_tag_falls_back_to_stripped_text():
@@ -251,6 +273,33 @@ def test_save_figure_crop_warns_and_returns_none_when_missing(tmp_path):
     with pytest.warns(UserWarning):
         result = _save_figure_crop(region, {}, set(), tmp_path, page=1, idx=0)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _dotted_overrides
+# ---------------------------------------------------------------------------
+
+
+def test_dotted_overrides_widens_only_figure_class_ids():
+    dotted = _dotted_overrides(ParseConfig(figure_crop_margin=1.1))
+    ratios = dotted["pipeline.layout.layout_unclip_ratio"]
+    assert ratios == {3: (1.1, 1.1), 14: (1.1, 1.1)}
+
+
+def test_dotted_overrides_lets_explicit_override_win():
+    cfg = ParseConfig(
+        figure_crop_margin=1.1,
+        glmocr_config_overrides={"pipeline.layout.layout_unclip_ratio": 1.0},
+    )
+    dotted = _dotted_overrides(cfg)
+    assert dotted["pipeline.layout.layout_unclip_ratio"] == 1.0
+
+
+def test_dotted_overrides_keeps_unrelated_user_overrides():
+    cfg = ParseConfig(glmocr_config_overrides={"pipeline.max_workers": 1})
+    dotted = _dotted_overrides(cfg)
+    assert dotted["pipeline.max_workers"] == 1
+    assert "pipeline.layout.layout_unclip_ratio" in dotted
 
 
 # ---------------------------------------------------------------------------

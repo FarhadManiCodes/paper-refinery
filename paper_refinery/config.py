@@ -39,6 +39,13 @@ class ParseConfig:
     table_format: str = "markdown"  # glmocr emits HTML tables; we convert to markdown
     merged_cell_strategy: str = "duplicate"  # rowspan/colspan fallback: no lossless markdown equivalent
     figures_dir_name: str = "figures"  # subdir of image_dir where figure/chart crops are saved
+    figure_crop_margin: float = 1.1
+    #   multiplier applied to each detected figure/chart box's width and height before
+    #   cropping (1.1 = 10% larger on each axis) -- glmocr's own default is 1.0, i.e. no
+    #   margin, which can clip axis labels/legends/edges sitting right at the detected
+    #   boundary. Applied only to the "chart"/"image" layout classes (see
+    #   _FIGURE_CLASS_IDS in parse.py); text/table/formula crops keep native detection
+    #   precision, since a looser box there would just add OCR noise.
     references_suffix: str = ".references.json"  # sidecar: "{pdf.stem}{references_suffix}"
     glmocr_config_overrides: dict = field(default_factory=dict)
     #   dotted-path escape hatch into glmocr's own config (e.g. {"pipeline.max_workers": 1}

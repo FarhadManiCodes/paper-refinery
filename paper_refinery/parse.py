@@ -35,7 +35,7 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup
 
-from .config import ParseConfig
+from .config import ParseConfig, load_config
 from .markers import page_marker
 
 # PP-DocLayout-V3 label taxonomy (glmocr's config.yaml `label_task_mapping` / `id2label`).
@@ -51,11 +51,16 @@ _ABANDON_LABELS = {
 }
 _DOC_TITLE_LABEL = "doc_title"
 _PARAGRAPH_TITLE_LABEL = "paragraph_title"
+_FIGURE_TITLE_LABEL = "figure_title"  # a "FIGURE N. ..." caption line -- plain body text,
+#   named explicitly rather than relying on the unknown-label fallback, since enrich.py's
+#   caption regex depends on this text actually landing in the body markdown
 _REFERENCE_LABEL = "reference_content"
 _TABLE_LABEL = "table"
+_ALGORITHM_LABEL = "algorithm"  # pseudocode block: fenced so markdown preserves its structure
 _FORMULA_LABELS = {"display_formula", "inline_formula"}
 _FORMULA_NUMBER_LABEL = "formula_number"
 _FIGURE_LABELS = {"chart", "image"}  # glmocr's "skip" task: cropped, never OCR'd
+_FIGURE_CLASS_IDS = (3, 14)  # "chart", "image" in glmocr's id2label (config.yaml); re-check on upgrade
 
 _HEADING_PREFIX_RE = re.compile(r"^#+\s*")
 
@@ -104,19 +109,29 @@ def _llama_server(cfg: ParseConfig):
         str(cfg.n_gpu_layers),
         *cfg.extra_server_args,
     ]
-    fd, log_path = tempfile.mkstemp(prefix="llama-server-", suffix=".log")
-    with open(fd, "w") as log_file:
-        proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
-        try:
-            _wait_for_health(proc, cfg, Path(log_path))
-            yield proc
-        finally:
-            proc.terminate()
+    fd, log_path_str = tempfile.mkstemp(prefix="llama-server-", suffix=".log")
+    log_path = Path(log_path_str)
+    try:
+        with open(fd, "w") as log_file:
+            proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
             try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=10)
+                _wait_for_health(proc, cfg, log_path)
+                yield proc
+            finally:
+                # sole place that owns process teardown, for every exit path (including
+                # a health-check timeout/early-exit raised from _wait_for_health)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=10)
+    finally:
+        log_path.unlink(missing_ok=True)
+
+
+def _read_log(log_path: Path) -> str:
+    return log_path.read_text(errors="replace")
 
 
 def _wait_for_health(proc: subprocess.Popen, cfg: ParseConfig, log_path: Path) -> None:
@@ -125,8 +140,7 @@ def _wait_for_health(proc: subprocess.Popen, cfg: ParseConfig, log_path: Path) -
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(
-                f"llama-server exited early (code {proc.returncode}); log:\n"
-                f"{log_path.read_text(errors='replace')}"
+                f"llama-server exited early (code {proc.returncode}); log:\n{_read_log(log_path)}"
             )
         try:
             with urllib.request.urlopen(url, timeout=2) as resp:
@@ -135,10 +149,9 @@ def _wait_for_health(proc: subprocess.Popen, cfg: ParseConfig, log_path: Path) -
         except (urllib.error.URLError, OSError):
             pass
         time.sleep(1.0)
-    proc.terminate()
     raise RuntimeError(
         f"llama-server did not become healthy within {cfg.startup_timeout_s}s; log:\n"
-        f"{log_path.read_text(errors='replace')}"
+        f"{_read_log(log_path)}"
     )
 
 
@@ -159,6 +172,19 @@ def _merge_formula_number(formula_md: str, number: str) -> str:
     if formula_md.endswith("\n$$"):
         return formula_md[: -len("\n$$")] + f" \\tag{{{number}}}\n$$"
     return formula_md
+
+
+def _int_attr(cell, name: str, default: int = 1) -> int:
+    """A tag's ``rowspan``/``colspan`` attribute as an int, tolerating a malformed value.
+
+    The source HTML is GLM-OCR's own model-generated output, not hand-authored markup --
+    a non-numeric span value is a real (if rare) failure mode, not a "can't happen" input,
+    and one bad cell shouldn't crash the whole page's table conversion.
+    """
+    try:
+        return int(cell.get(name, default) or default)
+    except (TypeError, ValueError):
+        return default
 
 
 def _html_table_to_markdown(html: str, strategy: str = "duplicate") -> str:
@@ -185,8 +211,8 @@ def _html_table_to_markdown(html: str, strategy: str = "duplicate") -> str:
             while active.get(col, (0, ""))[0] > 0:
                 col += 1
             text = cell.get_text(" ", strip=True)
-            rowspan = int(cell.get("rowspan", 1) or 1)
-            colspan = int(cell.get("colspan", 1) or 1)
+            rowspan = _int_attr(cell, "rowspan")
+            colspan = _int_attr(cell, "colspan")
             for i in range(colspan):
                 c = col + i
                 while len(row) <= c:
@@ -248,12 +274,16 @@ def _dispatch_region(region: dict, cfg: ParseConfig) -> tuple[str, str]:
         return "body", f"# {_strip_heading_prefix(content)}"
     if label == _PARAGRAPH_TITLE_LABEL:
         return "body", f"## {_strip_heading_prefix(content)}"
+    if label == _FIGURE_TITLE_LABEL:
+        return "body", content
     if label == _REFERENCE_LABEL:
         return "reference", content
     if label == _TABLE_LABEL:
         if cfg.table_format == "markdown":
             return "body", _html_table_to_markdown(content, cfg.merged_cell_strategy)
         return "body", content
+    if label == _ALGORITHM_LABEL:
+        return "body", f"```\n{content}\n```"
     if label in _FORMULA_LABELS:
         return "formula", _wrap_formula(content)
     if label == _FORMULA_NUMBER_LABEL:
@@ -268,11 +298,12 @@ def _merge_formula_numbers(
 ) -> list[tuple[str, str, dict]]:
     """Fold adjacent formula/formula_number pairs (either order) into one "body" item.
 
-    Verified against a live glmocr response: glmocr's own default post-processing
-    (``enable_merge_formula_numbers``) already merges these upstream, so a standalone
-    ``formula_number`` sibling rarely reaches us here -- this is a defensive fallback for
-    when it does, not the primary path. Idempotent either way: a formula whose content
-    already contains ``\\tag{...}`` passes through unchanged.
+    glmocr merges these upstream by default (``enable_merge_formula_numbers``), so under
+    default settings a standalone ``formula_number`` sibling never reaches us here. This
+    exists for the one case that isn't dead code: ``ParseConfig.glmocr_config_overrides``
+    lets a caller turn that default off, at which point this is the only thing that still
+    merges the number in. Idempotent either way: a formula whose content already contains
+    ``\\tag{...}`` passes through unchanged.
     """
     merged: list[tuple[str, str, dict]] = []
     i = 0
@@ -377,12 +408,28 @@ def _build_markdown(
     return "\n\n".join(parts), figure_crops, references
 
 
+def _dotted_overrides(cfg: ParseConfig) -> dict:
+    """Build glmocr's ``_dotted`` config-override dict for this run.
+
+    Widens the layout-detection box only for figure/chart classes (``cfg.figure_crop_margin``,
+    per-class via ``pipeline.layout.layout_unclip_ratio``) before layering on
+    ``cfg.glmocr_config_overrides`` -- an explicit user override always wins over our
+    computed default for the same dotted path.
+    """
+    margin = (cfg.figure_crop_margin, cfg.figure_crop_margin)
+    dotted = {
+        "pipeline.layout.layout_unclip_ratio": {cid: margin for cid in _FIGURE_CLASS_IDS},
+    }
+    dotted.update(cfg.glmocr_config_overrides)
+    return dotted
+
+
 def parse_pdf(pdf_path: Path, image_dir: Path, cfg: ParseConfig | None = None) -> ParseResult:
     """Parse a PDF into page-marked markdown (with figure placeholders + LaTeX + markdown
     tables) via a local llama-server serving GLM-OCR, orchestrated by the glmocr SDK."""
     from glmocr import GlmOcr
 
-    cfg = cfg or ParseConfig()
+    cfg = cfg or load_config().parse
     pdf_path, image_dir = Path(pdf_path), Path(image_dir)
     figures_dir = image_dir / cfg.figures_dir_name
     figures_dir.mkdir(parents=True, exist_ok=True)
@@ -393,7 +440,7 @@ def parse_pdf(pdf_path: Path, image_dir: Path, cfg: ParseConfig | None = None) -
             ocr_api_host=cfg.host,
             ocr_api_port=cfg.port,
             layout_device=cfg.layout_device,
-            _dotted=cfg.glmocr_config_overrides,
+            _dotted=_dotted_overrides(cfg),
         ) as parser:
             result = parser.parse(str(pdf_path))
 
