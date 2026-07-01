@@ -31,6 +31,14 @@ def test_parse_drops_skip_marker_and_handles_garbage():
     assert _parse(None, cfg) == {}
 
 
+def test_parse_ignores_stray_brace_in_leading_prose():
+    # a greedy \{.*\} regex would span from the example's brace all the way to the
+    # real answer's closing brace, producing malformed JSON and silently losing the
+    # answer -- the real JSON here is the last one, closest '{' to the final '}'
+    text = 'The format looks like {"example": "ignore this"}. Here:\n{"4.1": "real desc"}'
+    assert _parse(text, FigureConfig()) == {"4.1": "real desc"}
+
+
 def test_crop_bytes_downscales_long_side(tmp_path):
     from PIL import Image
 

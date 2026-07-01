@@ -62,6 +62,8 @@ class FigureConfig:
     include_references: bool = False  # also feed in-text "Figure N" mentions as context
     # (off = caption-only context; cross-referencing is a future improvement)
     max_image_px: int = 1024  # downscale each crop's long side before sending (saves tokens)
+    retry_attempts: int = 4  # generate_content attempts before giving up
+    retry_base_delay: float = 4.0  # seconds; doubles each retry (4, 8, 16, ...)
     # One call per page: describe every listed figure, return JSON {number: description}.
     prompt: str = (
         "The attached image(s) are cropped figure/chart regions from a scientific "

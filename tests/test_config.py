@@ -45,6 +45,12 @@ def test_figure_prompt_forbids_fabricated_numbers():
     assert "Do NOT" in FigureConfig().prompt
 
 
+def test_figure_config_retry_defaults():
+    c = FigureConfig()
+    assert c.retry_attempts == 4
+    assert c.retry_base_delay == 4.0
+
+
 def test_load_config_returns_defaults_when_file_missing(tmp_path):
     cfg = load_config(tmp_path / "does-not-exist.toml")
     assert cfg == RefineryConfig()

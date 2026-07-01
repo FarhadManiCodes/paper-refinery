@@ -12,24 +12,21 @@ from __future__ import annotations
 import io
 import json
 import os
-import re
 import time
 from pathlib import Path
 
 from .config import FigureConfig
 
-_JSON = re.compile(r"\{.*\}", re.DOTALL)
 
-
-def _generate(client, model, contents, attempts: int = 4, base_delay: float = 4.0):
+def _generate(client, model, contents, cfg: FigureConfig):
     """generate_content with exponential backoff (handles transient rate limits)."""
-    for i in range(attempts):
+    for i in range(cfg.retry_attempts):
         try:
             return client.models.generate_content(model=model, contents=contents)
         except Exception:
-            if i == attempts - 1:
+            if i == cfg.retry_attempts - 1:
                 raise
-            time.sleep(base_delay * (2**i))
+            time.sleep(cfg.retry_base_delay * (2**i))
 
 
 def _crop_bytes(crop: Path, max_px: int) -> bytes:
@@ -50,17 +47,35 @@ def _prompt(figures: list[tuple[str, str]], cfg: FigureConfig) -> str:
     return f"{cfg.prompt}\n\nFigures on this page:\n{listing}"
 
 
+def _extract_json_object(text: str) -> dict | None:
+    """Find the JSON object in ``text``, tolerating surrounding prose/fences.
+
+    Anchors on the LAST ``}`` (the prompt asks for the JSON answer alone, so it's expected
+    to come last, after any preamble like "Sure, here's the JSON:"), then tries each ``{``
+    before it, closest first, until one parses -- so a stray ``{`` earlier in explanatory
+    prose (e.g. "the format looks like {...}") isn't grabbed by mistake the way a single
+    greedy ``\\{.*\\}`` regex would.
+    """
+    end = text.rfind("}")
+    if end == -1:
+        return None
+    for start in reversed([i for i, ch in enumerate(text[:end]) if ch == "{"]):
+        try:
+            data = json.loads(text[start : end + 1])
+        except (ValueError, TypeError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
 def _parse(text: str | None, cfg: FigureConfig) -> dict[str, str]:
     """Parse Gemini's JSON {number: description}; tolerate fences / surrounding prose."""
-    m = _JSON.search(text or "")
-    if not m:
-        return {}
-    try:
-        data = json.loads(m.group(0))
-    except (ValueError, TypeError):
+    data = _extract_json_object(text or "")
+    if data is None:
         return {}
     out: dict[str, str] = {}
-    for number, desc in (data or {}).items():
+    for number, desc in data.items():
         desc = str(desc).strip()
         if desc and not desc.upper().startswith(cfg.skip_marker.upper()):
             out[str(number).strip()] = desc
@@ -103,10 +118,10 @@ def describe_page_figures(
         client = make_client(cfg)
     parts = [
         types.Part.from_bytes(
-            data=_crop_bytes(Path(crop), cfg.max_image_px),
+            data=_crop_bytes(crop, cfg.max_image_px),
             mime_type="image/jpeg",
         )
         for crop in crops
     ]
-    response = _generate(client, cfg.model, [*parts, _prompt(figures, cfg)])
+    response = _generate(client, cfg.model, [*parts, _prompt(figures, cfg)], cfg)
     return _parse(response.text, cfg)
