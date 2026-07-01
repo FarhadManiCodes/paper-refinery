@@ -33,6 +33,26 @@ def test_find_mentions_excludes_caption():
     assert not any(m.startswith("FIGURE 1.") for m in mentions)
 
 
+def test_find_captions_matches_fig_abbreviation():
+    # real GLM-OCR output from a journal using "FIG." rather than "FIGURE" -- both with
+    # and without a space before the number
+    md = (
+        "FIG.1. Dispersion of passive scalar in parallel flow.\n\n"
+        "FIG. 3. Convergence of the analytical model family.\n\n"
+    )
+    caps = {c.number: c for c in _find_captions(md)}
+    assert set(caps) == {"1", "3"}
+    assert caps["1"].text == "Dispersion of passive scalar in parallel flow."
+    assert caps["3"].text == "Convergence of the analytical model family."
+    assert caps["1"].upper and caps["3"].upper  # "FIG" is ALL-CAPS -> canonical form
+
+
+def test_find_captions_lowercase_fig_is_not_canonical():
+    md = "Fig.1 shows something in a sentence.\n\nFIG.1. The real caption.\n\n"
+    caps = {c.number: c for c in _find_captions(md)}
+    assert caps["1"].text == "The real caption." and caps["1"].upper
+
+
 def test_enrich_one_call_per_page_and_splices_after_caption():
     calls = []
 
@@ -110,3 +130,43 @@ def test_enrich_skips_figure_with_no_description():
 def test_enrich_skips_when_no_crops_for_the_page():
     out = enrich_markdown(ParseResult(MD, figure_crops={}), describe=lambda c, q, cfg: {"1": "X"})
     assert "Figure description (auto)" not in out
+
+
+def test_enrich_renames_crop_to_its_figure_number_before_describing(tmp_path):
+    crop = tmp_path / "page_2_fig_0.png"
+    crop.write_bytes(b"fake png bytes")
+    md = (
+        "<page_number>2</page_number>\n\n"
+        f"![FIGURE_CROP 2:0]({crop})\n\n"
+        "FIGURE 4.1. A comparison.\n\n"
+    )
+    captured = {}
+
+    def fake(crops, requests, cfg):
+        captured["crops"] = crops
+        return {n: "D" for n, _ in requests}
+
+    out = enrich_markdown(ParseResult(md, figure_crops={2: [crop]}), describe=fake)
+
+    renamed = tmp_path / "fig_4.1.png"
+    assert renamed.exists() and not crop.exists()
+    assert captured["crops"] == [renamed]
+    assert f"![FIGURE 4.1]({renamed})" in out
+    assert f"![FIGURE_CROP 2:0]({crop})" not in out
+
+
+def test_enrich_leaves_unmatched_crop_name_unchanged(tmp_path):
+    # more crops than captions on a page: the extra crop has nothing to pair with
+    crop0 = tmp_path / "page_2_fig_0.png"
+    crop1 = tmp_path / "page_2_fig_1.png"
+    crop0.write_bytes(b"a")
+    crop1.write_bytes(b"b")
+    md = (
+        "<page_number>2</page_number>\n\n"
+        f"![FIGURE_CROP 2:0]({crop0})\n\n![FIGURE_CROP 2:1]({crop1})\n\n"
+        "FIGURE 5. Only one caption.\n\n"
+    )
+    enrich_markdown(ParseResult(md, figure_crops={2: [crop0, crop1]}), describe=lambda c, q, cfg: {})
+
+    assert (tmp_path / "fig_5.png").exists()
+    assert crop1.exists()  # unmatched; left as-is
