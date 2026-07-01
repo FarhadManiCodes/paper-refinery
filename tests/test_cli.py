@@ -49,3 +49,38 @@ def test_main_wires_stages_and_writes_json(tmp_path, monkeypatch):
     assert data["docname"] == "p"
     # the enriched markdown is kept as an artifact before chunking
     assert pdf.with_suffix(".refinery.md").read_text() == "ENRICHED"
+    # no references from parse_pdf in this test -> no sidecar written
+    assert not pdf.with_suffix(".references.json").exists()
+    assert "references ->" not in result.output
+
+
+def test_main_writes_references_sidecar_and_keeps_it_out_of_chunking(tmp_path, monkeypatch):
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    refs = [{"page": 3, "text": "[1] Smith, J. (2020)."}]
+    monkeypatch.setattr(
+        cli, "parse_pdf", lambda p, d, c: ParseResult(markdown="MD", references=refs)
+    )
+    monkeypatch.setattr(cli, "make_client", lambda cfg: object())
+    monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
+
+    seen_chunk_input = {}
+
+    def fake_chunk(md, cfg):
+        seen_chunk_input["md"] = md
+        return [Chunk(md, 0, 1, 1)]
+
+    monkeypatch.setattr(cli, "chunk_markdown", fake_chunk)
+
+    result = CliRunner().invoke(cli.main, [str(pdf)])
+    assert result.exit_code == 0, result.output
+
+    refs_path = pdf.with_suffix(".references.json")
+    assert refs_path.exists()
+    data = json.loads(refs_path.read_text())
+    assert data["references"] == refs
+    assert data["source_pdf"] == str(pdf)
+    assert f"references -> {refs_path}" in result.output
+    # references never reach the chunker
+    assert "Smith" not in seen_chunk_input["md"]

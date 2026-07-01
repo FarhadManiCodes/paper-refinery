@@ -16,11 +16,20 @@ def test_refinery_config_composes_subconfigs():
     assert isinstance(r.figure, FigureConfig)
 
 
-def test_chart_to_table_is_off_by_default():
-    # specialized chart parsing fabricates numbers; must stay off (design decision)
-    assert "specialized_chart" not in ParseConfig().__dict__  # not even exposed as on
-    # and we no longer rely on LlamaParse's per-figure crops either
-    assert "extract_charts" not in ParseConfig().__dict__
+def test_parse_config_has_no_dual_backend_flag():
+    # single local backend (llama-server + glmocr); no LlamaParse/cloud fallback flag
+    keys = ParseConfig().__dict__.keys()
+    assert "api_key_env" not in keys
+    assert "parse_mode" not in keys
+
+
+def test_parse_config_local_backend_defaults():
+    c = ParseConfig()
+    assert c.table_format == "markdown"
+    assert c.merged_cell_strategy == "duplicate"
+    assert c.model_path == ""
+    assert c.mmproj_path == ""
+    assert c.glmocr_config_overrides == {}
 
 
 def test_figure_prompt_forbids_fabricated_numbers():

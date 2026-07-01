@@ -1,10 +1,10 @@
 """Splice figure descriptions into the markdown, anchored on FIGURE captions.
 
 Each figure has a ``FIGURE N.M ...`` caption in the text. The caption is the reliable
-anchor: LlamaParse's inline image placeholders move around between runs, but the caption
-(number + page + position) is stable. We find one caption per figure number, group them by
-the page they sit on, describe each page's figures with Gemini in a single call, and splice
-the description right after the caption.
+anchor: figure/chart placeholders can shift between parser runs, but the caption (number +
+page + position) is stable. We find one caption per figure number, group them by the page
+they sit on, describe each page's figures with Gemini in a single call (given that page's
+crop files), and splice the description right after the caption.
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ _CAPTION_LINE = re.compile(
     r"(?m)^[ \t]*\**[ \t]*(FIGURE|Figure)[ \t]+(\d+(?:\.\d+)?)\b[.:]?[ \t]*(.*)$"
 )
 
-# (page_render, [(figure_number, caption)]) -> {figure_number: description}
-PageDescriber = Callable[[Path, list[tuple[str, str]], FigureConfig], dict[str, str]]
+# (crops, [(figure_number, caption)]) -> {figure_number: description}
+PageDescriber = Callable[[list[Path], list[tuple[str, str]], FigureConfig], dict[str, str]]
 
 
 @dataclass
@@ -104,19 +104,19 @@ def enrich_markdown(
     for caption in _find_captions(md):
         by_page[caption.page].append(caption)
 
-    # one describe task per page that has a render
-    tasks: dict[int, tuple[Path, list[tuple[str, str]]]] = {}
+    # one describe task per page that has figure/chart crops
+    tasks: dict[int, tuple[list[Path], list[tuple[str, str]]]] = {}
     for page, captions in by_page.items():
-        render = parsed.page_renders.get(page) if page is not None else None
-        if render is not None:
-            tasks[page] = (render, [(c.number, context_for(c)) for c in captions])
+        crops = parsed.figure_crops.get(page, []) if page is not None else []
+        if crops:
+            tasks[page] = (crops, [(c.number, context_for(c)) for c in captions])
 
     results_by_page: dict[int, dict[str, str]] = {}
     if tasks:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
-                pool.submit(describe, render, requests, cfg): page
-                for page, (render, requests) in tasks.items()
+                pool.submit(describe, crops, requests, cfg): page
+                for page, (crops, requests) in tasks.items()
             }
             for future, page in futures.items():
                 try:

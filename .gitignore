@@ -44,4 +44,8 @@ out/
 scratch/
 *.chunks.json
 *.refinery.md
+*.references.json
 images/
+
+# ---- sample PDFs for local parser testing (copyrighted papers; don't commit) ----
+samples/

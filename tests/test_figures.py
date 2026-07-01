@@ -55,7 +55,7 @@ def test_describe_page_figures_uses_injected_client(tmp_path):
 
     from paper_refinery.figures import describe_page_figures
 
-    img = tmp_path / "page.png"
+    img = tmp_path / "crop.png"
     Image.new("RGB", (80, 100), "white").save(img)
 
     class FakeClient:
@@ -64,5 +64,37 @@ def test_describe_page_figures_uses_injected_client(tmp_path):
             def generate_content(model, contents):
                 return type("R", (), {"text": '{"4.1": "a description"}'})()
 
-    out = describe_page_figures(img, [("4.1", "caption")], client=FakeClient())
+    out = describe_page_figures([img], [("4.1", "caption")], client=FakeClient())
     assert out == {"4.1": "a description"}
+
+
+def test_describe_page_figures_sends_one_image_part_per_crop(tmp_path):
+    from PIL import Image
+
+    from paper_refinery.figures import describe_page_figures
+
+    crop1, crop2 = tmp_path / "c1.png", tmp_path / "c2.png"
+    Image.new("RGB", (40, 40), "white").save(crop1)
+    Image.new("RGB", (40, 40), "white").save(crop2)
+
+    calls = []
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents):
+                calls.append(contents)
+                return type("R", (), {"text": '{"1": "d1", "2": "d2"}'})()
+
+    out = describe_page_figures(
+        [crop1, crop2], [("1", "cap one"), ("2", "cap two")], client=FakeClient()
+    )
+    assert out == {"1": "d1", "2": "d2"}
+    # two image parts + one trailing text prompt
+    assert len(calls[0]) == 3
+
+
+def test_describe_page_figures_returns_empty_without_crops():
+    from paper_refinery.figures import describe_page_figures
+
+    assert describe_page_figures([], [("1", "cap")], client=object()) == {}

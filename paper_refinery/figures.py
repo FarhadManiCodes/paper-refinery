@@ -1,9 +1,10 @@
 """Figure understanding via Gemini.
 
-Given a full-page render and the captions of the figure(s) on that page, describe every
-figure in a single call. One call per page (not per figure) keeps multi-figure pages
-cheap; the render is downscaled first to save image tokens. Never invents precise numeric
-values read off plotted curves -- those belong to the paper's own tables.
+Given a page's figure/chart crops (from the local GLM-OCR parser -- see parse.py) and the
+captions of the figure(s) on that page, describe every figure in a single call. One call
+per page (not per figure) keeps multi-figure pages cheap; each crop is downscaled first to
+save image tokens. Never invents precise numeric values read off plotted curves -- those
+belong to the paper's own tables.
 """
 
 from __future__ import annotations
@@ -78,33 +79,34 @@ def make_client(cfg: FigureConfig | None = None):
 
 
 def describe_page_figures(
-    page_render: Path,
+    crops: list[Path],
     figures: list[tuple[str, str]],
     cfg: FigureConfig | None = None,
     client=None,
 ) -> dict[str, str]:
     """Describe every figure on a page in one Gemini call.
 
-    ``figures`` is a list of ``(number, caption)`` for the figures on this page. Returns
-    ``{number: description}``; figures Gemini does not find on the page are omitted.
-    Pass ``client`` to reuse one Gemini client across pages.
+    ``crops`` are the page's figure/chart crop files (from the local GLM-OCR parser), in
+    reading order; ``figures`` is a list of ``(number, caption)`` for the figures on this
+    page. All crops are sent as separate image parts alongside one caption listing --
+    Gemini reconciles which crop matches which caption itself, same as it already does for
+    a busy full page, so an exact crop-to-caption count match isn't required. Returns
+    ``{number: description}``; figures Gemini does not find are omitted. Pass ``client``
+    to reuse one Gemini client across pages.
     """
     from google.genai import types
 
     cfg = cfg or FigureConfig()
-    if not figures:
+    if not figures or not crops:
         return {}
     if client is None:
         client = make_client(cfg)
-    response = _generate(
-        client,
-        cfg.model,
-        [
-            types.Part.from_bytes(
-                data=_render_bytes(Path(page_render), cfg.max_image_px),
-                mime_type="image/jpeg",
-            ),
-            _prompt(figures, cfg),
-        ],
-    )
+    parts = [
+        types.Part.from_bytes(
+            data=_render_bytes(Path(crop), cfg.max_image_px),
+            mime_type="image/jpeg",
+        )
+        for crop in crops
+    ]
+    response = _generate(client, cfg.model, [*parts, _prompt(figures, cfg)])
     return _parse(response.text, cfg)

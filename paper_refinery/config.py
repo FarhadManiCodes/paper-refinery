@@ -18,16 +18,25 @@ class ChunkConfig:
 
 @dataclass
 class ParseConfig:
-    """LlamaParse options."""
+    """Local GLM-OCR backend: llama-server (inference) + glmocr SDK (layout + orchestration)."""
 
-    parse_mode: str = "parse_page_with_agent"  # agentic: best equations/tables (justified cost)
-    inline_images: bool = True  # ![alt](src) placeholder at each figure (reliable anchor)
-    take_screenshot: bool = True  # full-page renders (page_N.jpg) sent to Gemini per figure
-    disable_image_extraction: bool = True  # skip LlamaParse's unreliable per-figure crops
-    #   (independent of inline_images: placeholders still appear; only the crop files are skipped)
-    api_key_env: str = "LLAMA_API_KEY"
-    # Audited: we use only markdown + placeholders + page renders. No figure crops, charts,
-    # specialized parsing, vendor models, or HTML tables -- nothing we'd pay for and discard.
+    llama_server_bin: str = "llama-server"  # resolved via PATH unless overridden
+    model_path: str = ""  # GLM-OCR GGUF weights; empty -> RuntimeError, no guessed path
+    mmproj_path: str = ""  # GLM-OCR GGUF vision projector; empty -> RuntimeError
+    host: str = "127.0.0.1"
+    port: int = 8080
+    n_gpu_layers: int = 99  # -ngl: offload all layers (assumes a GPU is available)
+    extra_server_args: tuple[str, ...] = ("--flash-attn", "off", "-fit", "off")
+    #   required for GLM-OCR as of ggml-org/llama.cpp discussion #19721; re-check on upgrade
+    startup_timeout_s: float = 120.0  # health-check polling budget (model load can be slow)
+    layout_device: str | None = None  # None = glmocr auto-selects CUDA/CPU for PP-DocLayout-V3
+    table_format: str = "markdown"  # glmocr emits HTML tables; we convert to markdown
+    merged_cell_strategy: str = "duplicate"  # rowspan/colspan fallback: no lossless markdown equivalent
+    figures_dir_name: str = "figures"  # subdir of image_dir where figure/chart crops are saved
+    references_suffix: str = ".references.json"  # sidecar: "{pdf.stem}{references_suffix}"
+    glmocr_config_overrides: dict = field(default_factory=dict)
+    #   dotted-path escape hatch into glmocr's own config (e.g. {"pipeline.max_workers": 1}
+    #   to cut region-OCR concurrency on constrained hardware); forwarded as GlmOcr(_dotted=...)
 
 
 @dataclass
@@ -39,11 +48,12 @@ class FigureConfig:
     skip_marker: str = "NOT_A_FIGURE"  # Gemini omits / flags figures not on the page
     include_references: bool = False  # also feed in-text "Figure N" mentions as context
     # (off = caption-only context; cross-referencing is a future improvement)
-    max_image_px: int = 1024  # downscale the page render's long side before sending (saves tokens)
+    max_image_px: int = 1024  # downscale each crop's long side before sending (saves tokens)
     # One call per page: describe every listed figure, return JSON {number: description}.
     prompt: str = (
-        "The attached image is a full page from a scientific paper. It contains the "
-        "figure(s) listed below by caption. For EACH listed figure, write a 2-4 "
+        "The attached image(s) are cropped figure/chart regions from a scientific "
+        "paper page. Together they contain the figure(s) listed below by caption. "
+        "For EACH listed figure, write a 2-4 "
         "sentence description for search and retrieval: what is compared, the "
         "variables/axes, and the qualitative trends or conclusions. Do NOT report "
         "precise numeric values read off plotted curves — give ranges or directions "

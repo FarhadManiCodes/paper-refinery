@@ -31,10 +31,23 @@ def write_chunks(chunks: list[Chunk], docname: str, source_pdf: str, out_path: P
     out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
-def _refine(pdf: Path, out: Path, md_out: Path, image_dir: Path, cfg: RefineryConfig) -> int:
-    """Run the pipeline; returns the number of chunks written. Page renders go to
-    ``image_dir`` (kept only for the duration of the run)."""
+def _refine(
+    pdf: Path, out: Path, md_out: Path, image_dir: Path, cfg: RefineryConfig
+) -> tuple[int, Path | None]:
+    """Run the pipeline; returns (chunk count, references sidecar path or None). Figure
+    crops go to ``image_dir`` (kept only for the duration of the run)."""
     parsed = parse_pdf(pdf, image_dir, cfg.parse)
+
+    refs_path: Path | None = None
+    if parsed.references:
+        refs_path = pdf.with_suffix(cfg.parse.references_suffix)
+        refs_path.write_text(
+            json.dumps(
+                {"source_pdf": str(pdf), "references": parsed.references},
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
 
     # one Gemini client, reused across pages (the page calls run concurrently in enrich)
     client = make_client(cfg.figure)
@@ -46,7 +59,7 @@ def _refine(pdf: Path, out: Path, md_out: Path, image_dir: Path, cfg: RefineryCo
 
     chunks = chunk_markdown(enriched, cfg.chunk)
     write_chunks(chunks, pdf.stem, str(pdf), out)
-    return len(chunks)
+    return len(chunks), refs_path
 
 
 @click.command()
@@ -76,12 +89,15 @@ def main(pdf: Path, out: Path | None, md_out: Path | None, image_dir: Path | Non
     md_out = md_out or pdf.with_suffix(".refinery.md")
 
     if image_dir is not None:
-        n = _refine(pdf, out, md_out, image_dir, cfg)
+        n, refs_path = _refine(pdf, out, md_out, image_dir, cfg)
     else:
         with tempfile.TemporaryDirectory(prefix="refinery-") as td:
-            n = _refine(pdf, out, md_out, Path(td), cfg)
+            n, refs_path = _refine(pdf, out, md_out, Path(td), cfg)
 
-    click.echo(f"enriched markdown -> {md_out}\nwrote {n} chunks -> {out}")
+    summary = f"enriched markdown -> {md_out}\nwrote {n} chunks -> {out}"
+    if refs_path is not None:
+        summary += f"\nreferences -> {refs_path}"
+    click.echo(summary)
 
 
 if __name__ == "__main__":
