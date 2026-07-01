@@ -1,6 +1,14 @@
 """Sanity checks on default configuration."""
 
-from paper_refinery.config import ChunkConfig, FigureConfig, ParseConfig, RefineryConfig
+import pytest
+
+from paper_refinery.config import (
+    ChunkConfig,
+    FigureConfig,
+    ParseConfig,
+    RefineryConfig,
+    load_config,
+)
 
 
 def test_chunk_defaults_are_consistent():
@@ -34,3 +42,31 @@ def test_parse_config_local_backend_defaults():
 
 def test_figure_prompt_forbids_fabricated_numbers():
     assert "Do NOT" in FigureConfig().prompt
+
+
+def test_load_config_returns_defaults_when_file_missing(tmp_path):
+    cfg = load_config(tmp_path / "does-not-exist.toml")
+    assert cfg == RefineryConfig()
+
+
+def test_load_config_overlays_parse_section(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[parse]\nmodel_path = "/models/glm-ocr.gguf"\nn_gpu_layers = 20\n')
+    cfg = load_config(path)
+    assert cfg.parse.model_path == "/models/glm-ocr.gguf"
+    assert cfg.parse.n_gpu_layers == 20
+    assert cfg.parse.mmproj_path == ""  # untouched fields keep their code default
+
+
+def test_load_config_rejects_unknown_section(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("[bogus]\nx = 1\n")
+    with pytest.raises(ValueError, match="unknown config section"):
+        load_config(path)
+
+
+def test_load_config_rejects_unknown_key(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("[parse]\nnot_a_real_field = 1\n")
+    with pytest.raises(ValueError, match="unknown key"):
+        load_config(path)

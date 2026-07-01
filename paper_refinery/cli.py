@@ -14,7 +14,7 @@ from pathlib import Path
 import click
 
 from .chunker import Chunk, chunk_markdown
-from .config import RefineryConfig
+from .config import RefineryConfig, load_config
 from .enrich import enrich_markdown
 from .figures import describe_page_figures, make_client
 from .parse import parse_pdf
@@ -80,11 +80,34 @@ def _refine(
     "--image-dir",
     type=click.Path(path_type=Path),
     default=None,
-    help="Where to keep page renders (default: a temp dir cleaned up after the run).",
+    help="Where to keep figure/chart crops (default: a temp dir cleaned up after the run).",
 )
-def main(pdf: Path, out: Path | None, md_out: Path | None, image_dir: Path | None) -> None:
+@click.option(
+    "--model-path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="GLM-OCR GGUF weights (default: 'parse.model_path' in config.toml).",
+)
+@click.option(
+    "--mmproj-path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="GLM-OCR GGUF vision projector (default: 'parse.mmproj_path' in config.toml).",
+)
+def main(
+    pdf: Path,
+    out: Path | None,
+    md_out: Path | None,
+    image_dir: Path | None,
+    model_path: Path | None,
+    mmproj_path: Path | None,
+) -> None:
     """Parse, figure-enrich, and chunk PDF into a chunks manifest for papis-ask."""
-    cfg = RefineryConfig()
+    cfg = load_config()
+    if model_path is not None:
+        cfg.parse.model_path = str(model_path)
+    if mmproj_path is not None:
+        cfg.parse.mmproj_path = str(mmproj_path)
     out = out or pdf.with_suffix(".chunks.json")
     md_out = md_out or pdf.with_suffix(".refinery.md")
 

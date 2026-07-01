@@ -56,10 +56,23 @@ model, plus the `glmocr` SDK to drive layout detection and per-region OCR agains
    (`Q8_0` main weights are also available and smaller, ~950MB vs ~1.8GB for F16, with
    negligible quality difference for a model this size.)
 
-3. **Point `ParseConfig` at both files** (`model_path`, `mmproj_path`) -- `parse_pdf` spawns
-   and tears down `llama-server` itself for the duration of each run, so you don't need to
-   run it as a standing service. `llama-server` currently requires `--flash-attn off -fit
-   off` for GLM-OCR ([llama.cpp discussion #19721](https://github.com/ggml-org/llama.cpp/discussions/19721));
+3. **Point `ParseConfig` at both files** via `~/.config/paper-refinery/config.toml`
+   (XDG-style user config; not secrets, so it doesn't belong in your shell rc):
+
+   ```toml
+   [parse]
+   model_path = "/home/you/.cache/paper-refinery/models/GLM-OCR-f16.gguf"
+   mmproj_path = "/home/you/.cache/paper-refinery/models/mmproj-GLM-OCR-Q8_0.gguf"
+   ```
+
+   The file is optional and only needs to set what differs from the code defaults --
+   see `paper_refinery.config.load_config` for the full mechanism (any `ParseConfig`/
+   `FigureConfig`/`ChunkConfig` field can be overridden this way, e.g. `n_gpu_layers` or
+   `glmocr_config_overrides` for hardware-specific tuning). `--model-path`/`--mmproj-path`
+   CLI flags override the file per-run. `parse_pdf` spawns and tears down `llama-server`
+   itself for the duration of each run, so you don't need to run it as a standing service.
+   `llama-server` currently requires `--flash-attn off -fit off` for GLM-OCR ([llama.cpp
+   discussion #19721](https://github.com/ggml-org/llama.cpp/discussions/19721));
    `ParseConfig.extra_server_args` defaults to that already -- re-check on a llama.cpp
    upgrade in case the constraint has been lifted.
 

@@ -7,6 +7,7 @@ from click.testing import CliRunner
 from paper_refinery import cli
 from paper_refinery.chunker import Chunk
 from paper_refinery.cli import write_chunks
+from paper_refinery.config import RefineryConfig
 from paper_refinery.parse import ParseResult
 
 
@@ -30,6 +31,7 @@ def test_main_wires_stages_and_writes_json(tmp_path, monkeypatch):
     pdf.write_bytes(b"%PDF-1.4 fake")
 
     seen = {}
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
     monkeypatch.setattr(cli, "parse_pdf", lambda p, d, c: ParseResult(markdown="MD"))
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
 
@@ -59,6 +61,7 @@ def test_main_writes_references_sidecar_and_keeps_it_out_of_chunking(tmp_path, m
     pdf.write_bytes(b"%PDF-1.4 fake")
 
     refs = [{"page": 3, "text": "[1] Smith, J. (2020)."}]
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
     monkeypatch.setattr(
         cli, "parse_pdf", lambda p, d, c: ParseResult(markdown="MD", references=refs)
     )

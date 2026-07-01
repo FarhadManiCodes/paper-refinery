@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -21,8 +23,12 @@ class ParseConfig:
     """Local GLM-OCR backend: llama-server (inference) + glmocr SDK (layout + orchestration)."""
 
     llama_server_bin: str = "llama-server"  # resolved via PATH unless overridden
-    model_path: str = ""  # GLM-OCR GGUF weights; empty -> RuntimeError, no guessed path
-    mmproj_path: str = ""  # GLM-OCR GGUF vision projector; empty -> RuntimeError
+    # GLM-OCR GGUF weights / vision projector -- not secrets, just local file paths, so
+    # they're read from ~/.config/paper-refinery/config.toml (see `load_config` below)
+    # rather than an env var. Still empty -> RuntimeError (no guessed path). The
+    # `refinery` CLI's --model-path/--mmproj-path flags take precedence over the file.
+    model_path: str = ""
+    mmproj_path: str = ""
     host: str = "127.0.0.1"
     port: int = 8080
     n_gpu_layers: int = 99  # -ngl: offload all layers (assumes a GPU is available)
@@ -70,3 +76,36 @@ class RefineryConfig:
     chunk: ChunkConfig = field(default_factory=ChunkConfig)
     parse: ParseConfig = field(default_factory=ParseConfig)
     figure: FigureConfig = field(default_factory=FigureConfig)
+
+
+DEFAULT_CONFIG_PATH = Path.home() / ".config" / "paper-refinery" / "config.toml"
+
+
+def load_config(path: Path | None = None) -> RefineryConfig:
+    """Build a RefineryConfig, overlaying values from a TOML file (XDG-style user config).
+
+    The file is optional -- every field already has a code default -- and only needs to
+    set what differs from that default, e.g. local, machine-specific GLM-OCR model paths::
+
+        [parse]
+        model_path = "/home/you/.cache/paper-refinery/models/GLM-OCR-f16.gguf"
+        mmproj_path = "/home/you/.cache/paper-refinery/models/mmproj-GLM-OCR-Q8_0.gguf"
+
+    Each top-level TOML table maps to a ``RefineryConfig`` sub-config by name (``parse``,
+    ``figure``, ``chunk``); each key in it must match a dataclass field on that sub-config.
+    """
+    cfg = RefineryConfig()
+    path = path or DEFAULT_CONFIG_PATH
+    if not path.exists():
+        return cfg
+    with path.open("rb") as f:
+        data = tomllib.load(f)
+    for section, values in data.items():
+        sub = getattr(cfg, section, None)
+        if sub is None:
+            raise ValueError(f"{path}: unknown config section [{section}]")
+        for key, value in values.items():
+            if not hasattr(sub, key):
+                raise ValueError(f"{path}: unknown key '{key}' in [{section}]")
+            setattr(sub, key, value)
+    return cfg
