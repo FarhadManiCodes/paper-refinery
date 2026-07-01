@@ -78,7 +78,6 @@ class ParseResult:
     # markdown with one authoritative <page_number>N</page_number> per page boundary,
     # boilerplate/reference regions removed, tables as markdown, formulas as LaTeX
     markdown: str
-    page_renders: dict[int, Path] = field(default_factory=dict)  # unused by this backend
     figure_crops: dict[int, list[Path]] = field(default_factory=dict)  # page -> crop paths
     references: list[dict] = field(default_factory=list)  # [{"page": int, "text": str}, ...]
 

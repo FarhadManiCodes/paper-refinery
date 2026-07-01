@@ -32,11 +32,11 @@ def _generate(client, model, contents, attempts: int = 4, base_delay: float = 4.
             time.sleep(base_delay * (2**i))
 
 
-def _render_bytes(page_render: Path, max_px: int) -> bytes:
-    """JPEG bytes of the page render, downscaled so its long side <= max_px."""
+def _crop_bytes(crop: Path, max_px: int) -> bytes:
+    """JPEG bytes of the figure crop, downscaled so its long side <= max_px."""
     from PIL import Image
 
-    img = Image.open(page_render).convert("RGB")
+    img = Image.open(crop).convert("RGB")
     if max(img.size) > max_px:
         img.thumbnail((max_px, max_px))
     buf = io.BytesIO()
@@ -103,7 +103,7 @@ def describe_page_figures(
         client = make_client(cfg)
     parts = [
         types.Part.from_bytes(
-            data=_render_bytes(Path(crop), cfg.max_image_px),
+            data=_crop_bytes(Path(crop), cfg.max_image_px),
             mime_type="image/jpeg",
         )
         for crop in crops

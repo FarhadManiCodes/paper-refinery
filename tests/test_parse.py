@@ -26,7 +26,7 @@ from paper_refinery.parse import (
 
 def test_parse_result_defaults_are_empty():
     r = ParseResult(markdown="x")
-    assert r.page_renders == {} and r.figure_crops == {} and r.references == []
+    assert r.figure_crops == {} and r.references == []
 
 
 # ---------------------------------------------------------------------------

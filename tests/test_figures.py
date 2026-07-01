@@ -3,7 +3,7 @@
 import io
 
 from paper_refinery.config import FigureConfig
-from paper_refinery.figures import _parse, _prompt, _render_bytes
+from paper_refinery.figures import _crop_bytes, _parse, _prompt
 
 
 def test_prompt_lists_each_figure_with_its_caption():
@@ -31,22 +31,22 @@ def test_parse_drops_skip_marker_and_handles_garbage():
     assert _parse(None, cfg) == {}
 
 
-def test_render_bytes_downscales_long_side(tmp_path):
+def test_crop_bytes_downscales_long_side(tmp_path):
     from PIL import Image
 
-    src = tmp_path / "page.png"
+    src = tmp_path / "crop.png"
     Image.new("RGB", (2000, 2600), "white").save(src)
-    w, h = Image.open(io.BytesIO(_render_bytes(src, max_px=1024))).size
+    w, h = Image.open(io.BytesIO(_crop_bytes(src, max_px=1024))).size
     assert 1020 <= max(w, h) <= 1024  # long side at the cap
     assert h > w  # portrait aspect preserved
 
 
-def test_render_bytes_does_not_upscale_small_images(tmp_path):
+def test_crop_bytes_does_not_upscale_small_images(tmp_path):
     from PIL import Image
 
     src = tmp_path / "small.png"
     Image.new("RGB", (500, 400), "white").save(src)
-    assert Image.open(io.BytesIO(_render_bytes(src, max_px=1024))).size == (500, 400)
+    assert Image.open(io.BytesIO(_crop_bytes(src, max_px=1024))).size == (500, 400)
 
 
 def test_describe_page_figures_uses_injected_client(tmp_path):
