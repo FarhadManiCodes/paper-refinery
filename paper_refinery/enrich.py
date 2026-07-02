@@ -92,6 +92,13 @@ def _rename_crops_to_captions(
     return md, renamed
 
 
+def _group_by_page(md: str) -> dict[int | None, list[_Caption]]:
+    grouped: dict[int | None, list[_Caption]] = defaultdict(list)
+    for caption in _find_captions(md):
+        grouped[caption.page].append(caption)
+    return grouped
+
+
 def _find_mentions(markdown: str, number: str) -> list[str]:
     """Body paragraphs that reference 'Figure N'/'Fig. N' (used only when include_references)."""
     ref = re.compile(rf"\b(?:FIGURE|Figure|FIG|Fig)\.?[ \t]*{re.escape(number)}\b")
@@ -110,7 +117,6 @@ def enrich_markdown(
     parsed: ParseResult,
     cfg: FigureConfig | None = None,
     describe: PageDescriber | None = None,
-    max_workers: int = 4,
 ) -> str:
     """Return the markdown with figure descriptions spliced next to their captions.
 
@@ -121,22 +127,18 @@ def enrich_markdown(
     cfg = cfg or FigureConfig()
     describe = describe or _default_describe
     md = parsed.markdown
-    mentions: dict[str, list[str]] = {}
 
     def context_for(caption: _Caption) -> str:
         head = f"FIGURE {caption.number}. {caption.text}".strip()
         if not cfg.include_references:
             return head
-        mentions.setdefault(caption.number, _find_mentions(md, caption.number))
-        return "\n\n".join([head, *mentions[caption.number]])
+        return "\n\n".join([head, *_find_mentions(md, caption.number)])
 
     # first pass: only to learn page/reading-order for crop-to-caption pairing below.
     # Renaming can change md's length (placeholder text differs from the new image
     # line), which would invalidate any caption.line_end offsets computed against the
     # pre-rename text -- so captions are re-found from scratch afterward, once md is final.
-    first_pass: dict[int | None, list[_Caption]] = defaultdict(list)
-    for caption in _find_captions(md):
-        first_pass[caption.page].append(caption)
+    first_pass = _group_by_page(md)
 
     # rename each page's crops to their matched figure number, before any Gemini call --
     # lets cropping/placement be checked by filename alone
@@ -148,9 +150,7 @@ def enrich_markdown(
         if crops:
             md, figure_crops[page] = _rename_crops_to_captions(md, page, crops, captions)
 
-    by_page: dict[int | None, list[_Caption]] = defaultdict(list)
-    for caption in _find_captions(md):
-        by_page[caption.page].append(caption)
+    by_page = _group_by_page(md)
 
     # one describe task per page that has figure/chart crops
     tasks: dict[int, tuple[list[Path], list[tuple[str, str]]]] = {}
@@ -161,7 +161,7 @@ def enrich_markdown(
 
     results_by_page: dict[int, dict[str, str]] = {}
     if tasks:
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        with ThreadPoolExecutor(max_workers=cfg.max_workers) as pool:
             futures = {
                 pool.submit(describe, crops, requests, cfg): page
                 for page, (crops, requests) in tasks.items()
