@@ -21,13 +21,15 @@ from paper_refinery.parse import (
     _html_table_to_markdown,
     _llama_server,
     _merge_formula_numbers,
+    _merge_reference_numbers,
+    _render_references_markdown,
     _save_figure_crop,
 )
 
 
 def test_parse_result_defaults_are_empty():
     r = ParseResult(markdown="x")
-    assert r.figure_crops == {} and r.references == []
+    assert r.figure_crops == {} and r.references == [] and r.references_markdown == ""
 
 
 # ---------------------------------------------------------------------------
@@ -41,12 +43,19 @@ def _region(label: str, content: str = "", **extra) -> dict:
 
 @pytest.mark.parametrize(
     "label",
-    ["header", "footer", "number", "footnote", "aside_text", "reference", "footer_image", "header_image"],
+    ["header", "footer", "number", "footnote", "aside_text", "footer_image", "header_image"],
 )
 def test_dispatch_abandons_boilerplate(label):
     kind, text = _dispatch_region(_region(label, "should be dropped"), ParseConfig())
     assert kind == "abandon"
     assert text == ""
+
+
+def test_dispatch_reference_number_is_own_kind():
+    # the bracket/number marker before a bibliography entry -- kept (not abandoned) so
+    # it can be paired back with its reference_content sibling by _merge_reference_numbers
+    kind, text = _dispatch_region(_region("reference", "[12]"), ParseConfig())
+    assert kind == "reference_number" and text == "[12]"
 
 
 def test_dispatch_doc_title_becomes_h1():
@@ -208,6 +217,62 @@ def test_unmerged_formula_passes_through():
 
 
 # ---------------------------------------------------------------------------
+# _merge_reference_numbers
+# ---------------------------------------------------------------------------
+
+
+def test_merge_reference_number_then_content():
+    triples = [("reference_number", "[12]", {}), ("reference", "Smith, J. (2020).", {})]
+    merged = _merge_reference_numbers(triples)
+    assert merged == [("reference", "Smith, J. (2020).", {"number": "12"})]
+
+
+def test_merge_content_then_reference_number():
+    triples = [("reference", "Smith, J. (2020).", {}), ("reference_number", "23.", {})]
+    merged = _merge_reference_numbers(triples)
+    assert merged == [("reference", "Smith, J. (2020).", {"number": "23"})]
+
+
+def test_unmerged_reference_keeps_number_none():
+    triples = [("reference", "Smith, J. (2020).", {})]
+    merged = _merge_reference_numbers(triples)
+    assert len(merged) == 1
+    assert merged[0][:2] == ("reference", "Smith, J. (2020).")
+    assert merged[0][2].get("number") is None  # unpaired: region passes through as-is
+
+
+def test_unmerged_reference_number_is_dropped():
+    triples = [("reference_number", "[12]", {}), ("body", "next paragraph", {})]
+    merged = _merge_reference_numbers(triples)
+    assert merged == [("body", "next paragraph", {})]
+
+
+# ---------------------------------------------------------------------------
+# _render_references_markdown
+# ---------------------------------------------------------------------------
+
+
+def test_render_references_markdown_groups_by_page_with_number_prefix():
+    refs = [
+        {"page": 1, "number": "1", "text": "Smith, J. (2020)."},
+        {"page": 1, "number": "2", "text": "Jones, A. (2019)."},
+        {"page": 2, "number": None, "text": "Lee, K. (2018)."},
+    ]
+    md = _render_references_markdown(refs)
+    assert "<page_number>1</page_number>" in md
+    assert "<page_number>2</page_number>" in md
+    assert "[1] Smith, J. (2020)." in md
+    assert "[2] Jones, A. (2019)." in md
+    assert "Lee, K. (2018)." in md and "[None]" not in md
+    assert md.index("<page_number>1</page_number>") < md.index("[1]")
+    assert md.index("<page_number>2</page_number>") < md.index("Lee, K.")
+
+
+def test_render_references_markdown_empty_list():
+    assert _render_references_markdown([]) == ""
+
+
+# ---------------------------------------------------------------------------
 # _build_markdown (integration of dispatch + merge + figure/reference routing)
 # ---------------------------------------------------------------------------
 
@@ -233,12 +298,23 @@ def test_build_markdown_routes_references_out_of_body(tmp_path):
     pages = [
         [
             _region("text", "Body text.", index=0),
-            _region("reference_content", "[1] Smith, J. (2020).", index=1),
+            _region("reference_content", "Smith, J. (2020).", index=1),
         ]
     ]
     md, crops, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
     assert "Smith, J." not in md
-    assert refs == [{"page": 1, "text": "[1] Smith, J. (2020)."}]
+    assert refs == [{"page": 1, "number": None, "text": "Smith, J. (2020)."}]
+
+
+def test_build_markdown_pairs_reference_number_with_content(tmp_path):
+    pages = [
+        [
+            _region("reference", "[1]", index=0),
+            _region("reference_content", "Smith, J. (2020).", index=1),
+        ]
+    ]
+    md, crops, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    assert refs == [{"page": 1, "number": "1", "text": "Smith, J. (2020)."}]
 
 
 def test_build_markdown_saves_figure_crop_and_inserts_placeholder(tmp_path):

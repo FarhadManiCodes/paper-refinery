@@ -10,14 +10,15 @@ ingests directly — bypassing pypdf's blind char-window chunking.
 
 ```
 PDF
- └─ parse    local GLM-OCR -> clean markdown (LaTeX + markdown tables) + figure crops
-             (llama-server + glmocr SDK: PP-DocLayout-V3 layout, per-region OCR)         + page markers
-             boilerplate (headers/footers/page numbers) dropped; references -> sidecar
+ └─ parse    local GLM-OCR -> clean body markdown (LaTeX + markdown tables) + figure crops + page markers
+             (llama-server + glmocr SDK: PP-DocLayout-V3 layout, per-region OCR)
+             boilerplate (headers/footers/page numbers) dropped; bibliography routed to its own raw markdown
  └─ figures  Gemini        -> describe each figure crop (what's compared, trends; never fabricated numbers)
  └─ enrich                 -> splice figure descriptions next to their captions
  └─ chunker                -> section-aware split + guaranteed soft-overlap + page numbers
  └─ paper.chunks.json      -> consumed by papis-ask via aadd_texts
- └─ paper.references.json  -> raw reference entries (not chunked/embedded; for future citation lookup)
+ └─ paper.references.md    -> raw bibliography, in reading order (not chunked/embedded; structuring is a
+                              separate, later stage -- see the plan doc)
 ```
 
 ## Why
@@ -85,5 +86,5 @@ model, plus the `glmocr` SDK to drive layout detection and per-region OCR agains
 ## Usage
 
 ```bash
-refinery path/to/paper.pdf            # -> path/to/paper.chunks.json (+ .refinery.md, .references.json)
+refinery path/to/paper.pdf            # -> path/to/paper.chunks.json (+ .refinery.md, .references.md)
 ```

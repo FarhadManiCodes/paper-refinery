@@ -11,9 +11,21 @@ figure/chart regions.
 
 We rebuild markdown from ``result.json_result`` ourselves (rather than using glmocr's own
 ``markdown_result``) so we can: drop boilerplate regions outright, route reference content
-to a separate sidecar instead of the body, convert HTML tables to markdown, and turn
+out of the body into its own raw markdown, convert HTML tables to markdown, and turn
 figure/chart regions into placeholders + saved crop files (never interpreted here -- see
 ``figures.py`` for that, now working from crops instead of full-page renders).
+
+This module produces two markdown outputs (``ParseResult.markdown`` and
+``.references_markdown``) and nothing more: GLM-OCR's own native output format is
+markdown (glmocr's own ``markdown_result`` field, though we don't use it directly --
+see above), and that applies identically to bibliography text, which gets the exact
+same generic "Text Recognition:" OCR treatment as any other paragraph. Structuring the
+bibliography into anything beyond plain OCR'd text -- authors/title/venue/DOI, in-text
+citation-marker linking -- is deliberately a separate, later concern, not this module's
+job; the one thing this module *does* do for references is pair each entry with its
+detected number (the same region-adjacency technique ``_merge_formula_numbers`` already
+uses for formula/formula_number), since that's reassembling what the layout model
+already segmented, not interpreting it.
 
 Page boundaries are our own ``<page_number>N</page_number>`` markers (``markers.py``),
 independent of any OCR-detected page-number region (which is discarded as boilerplate).
@@ -45,7 +57,6 @@ _ABANDON_LABELS = {
     "number",  # printed page number -- we inject our own <page_number> markers instead
     "footnote",
     "aside_text",
-    "reference",  # the bracket/number marker before a reference entry
     "footer_image",
     "header_image",
 }
@@ -54,6 +65,10 @@ _PARAGRAPH_TITLE_LABEL = "paragraph_title"
 _FIGURE_TITLE_LABEL = "figure_title"  # a "FIGURE N. ..." caption line -- plain body text,
 #   named explicitly rather than relying on the unknown-label fallback, since enrich.py's
 #   caption regex depends on this text actually landing in the body markdown
+_REFERENCE_NUMBER_LABEL = "reference"  # the bracket/number marker before a bibliography
+#   entry -- its own region, sibling to "reference_content" (same split as
+#   formula/formula_number); paired back together by _merge_reference_numbers below
+#   rather than discarded, so the raw bibliography keeps its original numbering
 _REFERENCE_LABEL = "reference_content"
 _TABLE_LABEL = "table"
 _ALGORITHM_LABEL = "algorithm"  # pseudocode block: fenced so markdown preserves its structure
@@ -84,7 +99,10 @@ class ParseResult:
     # boilerplate/reference regions removed, tables as markdown, formulas as LaTeX
     markdown: str
     figure_crops: dict[int, list[Path]] = field(default_factory=dict)  # page -> crop paths
-    references: list[dict] = field(default_factory=list)  # [{"page": int, "text": str}, ...]
+    # raw bibliography, routed out of `markdown` entirely -- structuring/linking these
+    # is a separate, later concern (not this module's job)
+    references: list[dict] = field(default_factory=list)  # [{"page", "number", "text"}, ...]
+    references_markdown: str = ""  # _render_references_markdown(references); see parse_pdf
 
 
 @contextmanager
@@ -258,12 +276,13 @@ def _html_table_to_markdown(html: str, strategy: str = "duplicate") -> str:
 def _dispatch_region(region: dict, cfg: ParseConfig) -> tuple[str, str]:
     """Classify one glmocr region and format its content.
 
-    Returns ``(kind, text)``; kind is one of "abandon", "body", "reference", "figure",
-    "formula", "formula_number". Prefers ``native_label`` (PP-DocLayout-V3's fine-grained
-    class, e.g. "paragraph_title"/"display_formula"/"reference_content") over ``label``
-    (glmocr's coarse text/table/formula/skip bucket, e.g. "text"/"formula"), which can't
-    distinguish reference_content from body text, or chart from image. Confirmed against a
-    live glmocr response: both keys are present on every region dict.
+    Returns ``(kind, text)``; kind is one of "abandon", "body", "reference",
+    "reference_number", "figure", "formula", "formula_number". Prefers ``native_label``
+    (PP-DocLayout-V3's fine-grained class, e.g. "paragraph_title"/"display_formula"/
+    "reference_content") over ``label`` (glmocr's coarse text/table/formula/skip bucket,
+    e.g. "text"/"formula"), which can't distinguish reference_content from body text, or
+    chart from image. Confirmed against a live glmocr response: both keys are present on
+    every region dict.
     """
     label = region.get("native_label") or region.get("label") or ""
     content = (region.get("content") or "").strip()
@@ -276,6 +295,8 @@ def _dispatch_region(region: dict, cfg: ParseConfig) -> tuple[str, str]:
         return "body", f"## {_strip_heading_prefix(content)}"
     if label == _FIGURE_TITLE_LABEL:
         return "body", content
+    if label == _REFERENCE_NUMBER_LABEL:
+        return "reference_number", content
     if label == _REFERENCE_LABEL:
         return "reference", content
     if label == _TABLE_LABEL:
@@ -328,6 +349,40 @@ def _merge_formula_numbers(
     return merged
 
 
+def _merge_reference_numbers(
+    triples: list[tuple[str, str, dict]],
+) -> list[tuple[str, str, dict]]:
+    """Fold an adjacent reference_number/reference pair (either order) into one
+    "reference" triple, carrying the number in ``region["number"]``.
+
+    PP-DocLayout-V3 labels a bibliography entry's leading "[12]"/"23." marker as its own
+    region (native_label "reference"), separate from "reference_content" -- the same
+    split _merge_formula_numbers already resolves for formula/formula_number. An
+    unpaired reference_content still becomes an entry with no number attached (never
+    dropped over a missing number -- the entry's text is what matters most); an unpaired
+    reference_number is dropped (nothing to attach it to).
+    """
+    merged: list[tuple[str, str, dict]] = []
+    i = 0
+    while i < len(triples):
+        kind, text, region = triples[i]
+        nxt = triples[i + 1] if i + 1 < len(triples) else None
+        if kind == "reference_number" and nxt and nxt[0] == "reference":
+            number = text.strip().strip("[]().").strip()
+            merged.append(("reference", nxt[1], {**nxt[2], "number": number}))
+            i += 2
+        elif kind == "reference" and nxt and nxt[0] == "reference_number":
+            number = nxt[1].strip().strip("[]().").strip()
+            merged.append(("reference", text, {**region, "number": number}))
+            i += 2
+        elif kind == "reference_number":
+            i += 1  # unpaired number marker: nothing to attach it to
+        else:
+            merged.append((kind, text, region))
+            i += 1
+    return merged
+
+
 def _save_figure_crop(
     region: dict,
     image_files: dict,
@@ -372,7 +427,7 @@ def _build_markdown(
     figures_dir: Path,
     cfg: ParseConfig,
 ) -> tuple[str, dict[int, list[Path]], list[dict]]:
-    """Assemble page-marked markdown, figure crops, and a references sidecar from
+    """Assemble page-marked markdown, figure crops, and a raw references list from
     glmocr's per-page region lists."""
     parts: list[str] = []
     figure_crops: dict[int, list[Path]] = {}
@@ -385,6 +440,7 @@ def _build_markdown(
         triples = [(*_dispatch_region(r, cfg), r) for r in sorted_regions]
         triples = [t for t in triples if t[0] != "abandon"]
         triples = _merge_formula_numbers(triples)
+        triples = _merge_reference_numbers(triples)
 
         body_parts: list[str] = []
         for kind, text, region in triples:
@@ -393,7 +449,7 @@ def _build_markdown(
                     body_parts.append(text)
             elif kind == "reference":
                 if text.strip():
-                    references.append({"page": page, "text": text})
+                    references.append({"page": page, "number": region.get("number"), "text": text})
             elif kind == "figure":
                 idx = len(figure_crops.get(page, []))
                 crop_path = _save_figure_crop(region, image_files, used_images, figures_dir, page, idx)
@@ -406,6 +462,32 @@ def _build_markdown(
         parts.append("\n\n".join(body_parts))
 
     return "\n\n".join(parts), figure_crops, references
+
+
+def _render_references_markdown(references: list[dict]) -> str:
+    """Plain markdown rendering of the raw bibliography: one entry per line, grouped
+    under each page's own ``<page_number>`` marker, in reading order.
+
+    Zero interpretation -- this is GLM-OCR's own OCR'd text, reassembled only using the
+    number/content region pairing already done in ``_merge_reference_numbers``. No
+    schema, no external tool: structuring the bibliography into anything more is a
+    separate, later concern, kept out of the OCR/parse layer entirely.
+    """
+    if not references:
+        return ""
+    by_page: dict[int, list[dict]] = {}
+    for ref in references:
+        by_page.setdefault(ref["page"], []).append(ref)
+
+    parts: list[str] = []
+    for page in sorted(by_page):
+        lines = [
+            f"[{ref['number']}] {ref['text']}" if ref["number"] else ref["text"]
+            for ref in by_page[page]
+        ]
+        parts.append(page_marker(page))
+        parts.append("\n\n".join(lines))
+    return "\n\n".join(parts)
 
 
 def _dotted_overrides(cfg: ParseConfig) -> dict:
@@ -451,4 +533,9 @@ def parse_pdf(pdf_path: Path, image_dir: Path, cfg: ParseConfig | None = None) -
     markdown, figure_crops, references = _build_markdown(
         json_result, result.image_files, figures_dir, cfg
     )
-    return ParseResult(markdown=markdown, figure_crops=figure_crops, references=references)
+    return ParseResult(
+        markdown=markdown,
+        figure_crops=figure_crops,
+        references=references,
+        references_markdown=_render_references_markdown(references),
+    )

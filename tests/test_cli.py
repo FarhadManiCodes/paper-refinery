@@ -73,7 +73,7 @@ def test_main_wires_stages_and_writes_json(tmp_path, monkeypatch):
     # the enriched markdown is kept as an artifact before chunking
     assert pdf.with_suffix(".refinery.md").read_text() == "ENRICHED"
     # no references from parse_pdf in this test -> no sidecar written
-    assert not pdf.with_suffix(".references.json").exists()
+    assert not pdf.with_suffix(".references.md").exists()
     assert "references ->" not in result.output
 
 
@@ -99,14 +99,16 @@ def test_main_defaults_image_dir_next_to_md_out(tmp_path, monkeypatch):
     assert seen["image_dir"] == pdf.with_suffix(".refinery.md").parent
 
 
-def test_main_writes_references_sidecar_and_keeps_it_out_of_chunking(tmp_path, monkeypatch):
+def test_main_writes_references_markdown_and_keeps_it_out_of_chunking(tmp_path, monkeypatch):
     pdf = tmp_path / "p.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")
 
-    refs = [{"page": 3, "text": "[1] Smith, J. (2020)."}]
+    refs_md = "<page_number>3</page_number>\n\n[1] Smith, J. (2020)."
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
     monkeypatch.setattr(
-        cli, "parse_pdf", lambda p, d, c: ParseResult(markdown="MD", references=refs)
+        cli,
+        "parse_pdf",
+        lambda p, d, c: ParseResult(markdown="MD", references_markdown=refs_md),
     )
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
     monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
@@ -122,11 +124,9 @@ def test_main_writes_references_sidecar_and_keeps_it_out_of_chunking(tmp_path, m
     result = CliRunner().invoke(cli.main, [str(pdf)])
     assert result.exit_code == 0, result.output
 
-    refs_path = pdf.with_suffix(".references.json")
+    refs_path = pdf.with_suffix(".references.md")
     assert refs_path.exists()
-    data = json.loads(refs_path.read_text())
-    assert data["references"] == refs
-    assert data["source_pdf"] == str(pdf)
+    assert refs_path.read_text() == refs_md
     assert f"references -> {refs_path}" in result.output
     # references never reach the chunker
     assert "Smith" not in seen_chunk_input["md"]

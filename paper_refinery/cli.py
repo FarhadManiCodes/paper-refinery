@@ -54,21 +54,15 @@ def write_chunks(chunks: list[Chunk], docname: str, source_pdf: str, out_path: P
 def _refine(
     pdf: Path, out: Path, md_out: Path, image_dir: Path, cfg: RefineryConfig
 ) -> tuple[int, Path | None]:
-    """Run the pipeline; returns (chunk count, references sidecar path or None). Figure
-    crops go to ``image_dir``, which persists alongside ``md_out`` (not cleaned up) so the
-    enriched markdown's image links keep resolving after the run."""
+    """Run the pipeline; returns (chunk count, raw references markdown path or None).
+    Figure crops go to ``image_dir``, which persists alongside ``md_out`` (not cleaned
+    up) so the enriched markdown's image links keep resolving after the run."""
     parsed = parse_pdf(pdf, image_dir, cfg.parse)
 
     refs_path: Path | None = None
-    if parsed.references:
-        refs_path = pdf.with_suffix(cfg.parse.references_suffix)
-        refs_path.write_text(
-            json.dumps(
-                {"source_pdf": str(pdf), "references": parsed.references},
-                indent=2,
-                ensure_ascii=False,
-            )
-        )
+    if parsed.references_markdown:
+        refs_path = pdf.with_suffix(".references.md")
+        refs_path.write_text(parsed.references_markdown)
 
     # one Gemini client, reused across pages (the page calls run concurrently in enrich)
     client = make_client(cfg.figure)
