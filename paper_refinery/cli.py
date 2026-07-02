@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import functools
 import json
-import tempfile
+import os
+import re
 from pathlib import Path
 
 import click
@@ -18,6 +19,25 @@ from .config import RefineryConfig, load_config
 from .enrich import enrich_markdown
 from .figures import describe_page_figures, make_client
 from .parse import parse_pdf
+
+_IMAGE_LINK_RE = re.compile(r"(!\[[^\]]*\]\()([^)\s]+)(\))")
+
+
+def _relativize_image_links(md: str, base: Path) -> str:
+    """Rewrite absolute image-link paths in markdown to be relative to ``base``.
+
+    The .md file and its figure crops are meant to travel together (as siblings under
+    ``image_dir``) -- an absolute path breaks the moment either is moved, renamed, or
+    shared with someone else.
+    """
+
+    def _rel(m: re.Match) -> str:
+        path = Path(m.group(2))
+        if not path.is_absolute():
+            return m.group(0)
+        return f"{m.group(1)}{os.path.relpath(path, start=base)}{m.group(3)}"
+
+    return _IMAGE_LINK_RE.sub(_rel, md)
 
 
 def write_chunks(chunks: list[Chunk], docname: str, source_pdf: str, out_path: Path) -> None:
@@ -35,7 +55,8 @@ def _refine(
     pdf: Path, out: Path, md_out: Path, image_dir: Path, cfg: RefineryConfig
 ) -> tuple[int, Path | None]:
     """Run the pipeline; returns (chunk count, references sidecar path or None). Figure
-    crops go to ``image_dir`` (kept only for the duration of the run)."""
+    crops go to ``image_dir``, which persists alongside ``md_out`` (not cleaned up) so the
+    enriched markdown's image links keep resolving after the run."""
     parsed = parse_pdf(pdf, image_dir, cfg.parse)
 
     refs_path: Path | None = None
@@ -53,6 +74,7 @@ def _refine(
     client = make_client(cfg.figure)
     describe = functools.partial(describe_page_figures, client=client)
     enriched = enrich_markdown(parsed, cfg.figure, describe=describe)
+    enriched = _relativize_image_links(enriched, md_out.parent)
 
     # keep the enriched markdown as a reviewable artifact, before chunking
     md_out.write_text(enriched)
@@ -80,7 +102,7 @@ def _refine(
     "--image-dir",
     type=click.Path(path_type=Path),
     default=None,
-    help="Where to keep figure/chart crops (default: a temp dir cleaned up after the run).",
+    help="Where to keep figure/chart crops (default: alongside --md-out).",
 )
 @click.option(
     "--model-path",
@@ -110,12 +132,9 @@ def main(
         cfg.parse.mmproj_path = str(mmproj_path)
     out = out or pdf.with_suffix(".chunks.json")
     md_out = md_out or pdf.with_suffix(".refinery.md")
+    image_dir = image_dir or md_out.parent
 
-    if image_dir is not None:
-        n, refs_path = _refine(pdf, out, md_out, image_dir, cfg)
-    else:
-        with tempfile.TemporaryDirectory(prefix="refinery-") as td:
-            n, refs_path = _refine(pdf, out, md_out, Path(td), cfg)
+    n, refs_path = _refine(pdf, out, md_out, image_dir, cfg)
 
     summary = f"enriched markdown -> {md_out}\nwrote {n} chunks -> {out}"
     if refs_path is not None:
