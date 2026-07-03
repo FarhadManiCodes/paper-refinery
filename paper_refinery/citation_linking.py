@@ -25,6 +25,7 @@ an OCR-corrupted surname would otherwise propagate into every citekey in the bod
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
@@ -218,14 +219,25 @@ _NARRATIVE_AY_RE = re.compile(
 )
 
 
+def _fold(name: str) -> str:
+    """Lowercased, diacritic-folded form for surname comparison.
+
+    OCR is inconsistent about diacritics across a page: confirmed live on fmech, where
+    the body prints "Höhn et al. (2011)" but the bibliography region OCR'd the same
+    surname as "Hohn" -- an exact match misses a genuine citation.
+    """
+    decomposed = unicodedata.normalize("NFKD", name)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).lower()
+
+
 def _author_year_lookup(extracted: list[dict]) -> dict[tuple[str, int], int]:
-    """(first-author surname lowercased, year) -> ref index; colliding pairs are
+    """(first-author surname folded, year) -> ref index; colliding pairs are
     dropped entirely (linking one of them would be a guess)."""
     lookup: dict[tuple[str, int], int] = {}
     collisions: set[tuple[str, int]] = set()
     for i, entry in enumerate(extracted):
         authors = entry.get("authors") or []
-        family = (authors[0].get("family") or "").lower() if authors else ""
+        family = _fold(authors[0].get("family") or "") if authors else ""
         year = entry.get("year")
         if not family or year is None:
             continue
@@ -256,7 +268,7 @@ def _find_author_year_markers(
             if not pm:
                 indices = []
                 break
-            key = (pm.group(1).lower(), int(pm.group(2)))
+            key = (_fold(pm.group(1)), int(pm.group(2)))
             if key not in lookup:
                 indices = []
                 break
@@ -273,7 +285,7 @@ def _find_author_year_markers(
             continue
         if any(s < m.end() and m.start() < e for s, e in taken):
             continue
-        key = (m.group(1).lower(), int(m.group(3)))
+        key = (_fold(m.group(1)), int(m.group(3)))
         if key in lookup:
             markers.append(Marker(m.start(), m.end(), m.group(0), [lookup[key]]))
         else:
@@ -319,7 +331,7 @@ def make_citekey(entry: dict) -> str | None:
     """
     authors = entry.get("authors") or []
     family = (authors[0].get("family") or "") if authors else ""
-    family = _CITEKEY_JUNK_RE.sub("", family.lower())
+    family = _CITEKEY_JUNK_RE.sub("", _fold(family))  # fold, then strip: Höhn -> hohn, not hhn
     year = entry.get("year")
     if not family or year is None:
         return None

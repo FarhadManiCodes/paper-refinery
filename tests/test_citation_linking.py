@@ -181,6 +181,18 @@ def test_author_year_narrative():
     ]
 
 
+def test_author_year_matches_across_diacritic_inconsistency():
+    # the real fmech case: body prints "Höhn et al. (2011)", bibliography OCR'd the
+    # same surname as "Hohn" -- folding must bridge both directions
+    entries = _author_year([("Hohn", 2011)])
+    res = link_citations("as evidenced by Höhn et al. (2011).", entries)
+    assert [(m.text, m.ref_indices) for m in res.markers] == [("Höhn et al. (2011)", [0])]
+
+
+def test_make_citekey_folds_diacritics():
+    assert make_citekey({"authors": [{"family": "Höhn"}], "year": 2011}) == "hohn_2011"
+
+
 def test_author_year_unknown_surname_left_unlinked():
     res = link_citations("as shown (Nobody, 2019).", AY)
     assert res.markers == [] and "(Nobody, 2019)" in res.ambiguous
