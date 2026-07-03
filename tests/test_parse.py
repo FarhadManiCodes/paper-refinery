@@ -1,6 +1,6 @@
 """Tests for the local GLM-OCR parser.
 
-The pure helpers (region dispatch, markdown assembly, table conversion, formula-number
+The pure helpers (region dispatch, markdown assembly, table conversion, reference-number
 merging, the llama-server health check) are tested directly against hand-built
 glmocr-shaped region dicts; the network/process-bound ``parse_pdf`` itself is exercised
 separately with a live llama-server + GLM-OCR (skipped by default).
@@ -19,10 +19,11 @@ from paper_refinery.parse import (
     _dispatch_region,
     _dotted_overrides,
     _drop_trailing_boilerplate,
+    _ensure_port_free,
     _html_table_to_markdown,
     _llama_server,
-    _merge_formula_numbers,
     _merge_reference_numbers,
+    _reclaim_mislabeled_references,
     _render_references_markdown,
     _save_figure_crop,
     _sort_references_by_number,
@@ -121,7 +122,7 @@ def test_dispatch_table_keeps_html_when_configured():
 
 def test_dispatch_formula_wraps_in_dollars():
     kind, text = _dispatch_region(_region("display_formula", "E = mc^2"), ParseConfig())
-    assert kind == "formula"
+    assert kind == "body"
     assert text == "$$\nE = mc^2\n$$"
 
 
@@ -130,9 +131,16 @@ def test_dispatch_formula_strips_existing_fences():
     assert text == "$$\nx^2\n$$"
 
 
-def test_dispatch_formula_number_is_own_kind():
+def test_dispatch_formula_number_becomes_parenthetical_body():
+    # glmocr merges these into the formula upstream by default; a standalone one (merge
+    # disabled via overrides) degrades to its own "(N)" paragraph rather than being dropped
     kind, text = _dispatch_region(_region("formula_number", "(1)"), ParseConfig())
-    assert kind == "formula_number" and text == "(1)"
+    assert kind == "body" and text == "(1)"
+
+
+def test_dispatch_empty_formula_number_yields_empty_body():
+    kind, text = _dispatch_region(_region("formula_number", ""), ParseConfig())
+    assert kind == "body" and text == ""
 
 
 def test_dispatch_unknown_label_kept_as_body_text():
@@ -183,39 +191,6 @@ def test_html_table_tolerates_malformed_span_attribute():
 
 def test_html_table_missing_table_tag_falls_back_to_stripped_text():
     assert _html_table_to_markdown("just some text") == "just some text"
-
-
-# ---------------------------------------------------------------------------
-# _merge_formula_numbers
-# ---------------------------------------------------------------------------
-
-
-def test_merge_formula_then_number():
-    triples = [("formula", "$$\nE=mc^2\n$$", {}), ("formula_number", "(1)", {})]
-    merged = _merge_formula_numbers(triples)
-    assert len(merged) == 1
-    assert merged[0][0] == "body"
-    assert merged[0][1] == "$$\nE=mc^2 \\tag{1}\n$$"
-
-
-def test_merge_number_then_formula():
-    triples = [("formula_number", "(2)", {}), ("formula", "$$\nx^2\n$$", {})]
-    merged = _merge_formula_numbers(triples)
-    assert len(merged) == 1
-    assert merged[0][1] == "$$\nx^2 \\tag{2}\n$$"
-
-
-def test_unmerged_formula_number_becomes_parenthetical_body():
-    triples = [("formula_number", "(3)", {})]
-    merged = _merge_formula_numbers(triples)
-    assert merged == [("body", "(3)", {})]
-
-
-def test_unmerged_formula_passes_through():
-    triples = [("formula", "$$\nx\n$$", {}), ("body", "next paragraph", {})]
-    merged = _merge_formula_numbers(triples)
-    assert merged[0] == ("body", "$$\nx\n$$", {})
-    assert merged[1] == ("body", "next paragraph", {})
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +341,27 @@ def test_sort_references_by_number_leaves_non_numeric_marker_untouched():
     assert _sort_references_by_number(refs) == refs
 
 
+def test_sort_references_by_number_leaves_duplicate_keys_untouched():
+    # two entries garbled to the same number -> keys can't be trusted at all
+    refs = [
+        {"number": "2", "text": "b"},
+        {"number": "1", "text": "a"},
+        {"number": "2", "text": "c"},
+    ]
+    assert _sort_references_by_number(refs) == refs
+
+
+def test_sort_references_by_number_leaves_outlier_key_untouched():
+    # an unnumbered entry whose text starts with a year would sort to the end --
+    # the gap it leaves in the contiguous run is the tell
+    refs = [
+        {"number": "1", "text": "a"},
+        {"number": None, "text": "2019 IEEE Conference on Things. Proceedings."},
+        {"number": "2", "text": "b"},
+    ]
+    assert _sort_references_by_number(refs) == refs
+
+
 def test_sort_references_by_number_handles_empty_list():
     assert _sort_references_by_number([]) == []
 
@@ -375,13 +371,14 @@ def test_sort_references_by_number_falls_back_to_leading_number_in_text():
     # reference_number region for this paper at all -- the marker is just the leading
     # digits of the OCR'd text blob itself, so `number` is None on every entry
     refs = [
-        _ref("2 L. A. Zadeh and J. R. Ragazzini, An Extension of..."),
-        _ref("1 N. Wiener, The Extrapolation, Interpolation..."),
+        _ref("9 A. B. Lees, Interpolation and Extrapolation..."),
+        _ref("8 G. Franklin, The Optimum Synthesis..."),
+        _ref("11 M. Shinbrot, Optimization of Time-Varying..."),
         _ref("10 R. C. Davis, On the Theory of Prediction..."),
-        _ref("3 H. W. Bode and C. E. Shannon, A Simplified..."),
     ]
     sorted_refs = _sort_references_by_number(refs)
-    assert [r["text"][:2].strip() for r in sorted_refs] == ["1", "2", "3", "10"]
+    # numeric, not lexicographic: "10"/"11" sort after "8"/"9"
+    assert [r["text"][:2].strip() for r in sorted_refs] == ["8", "9", "10", "11"]
 
 
 def test_sort_references_by_number_falls_back_to_bracketed_number_in_text():
@@ -396,6 +393,102 @@ def test_sort_references_by_number_mixed_region_and_text_number_sources():
     refs = [_ref("Second entry", number="2"), _ref("1 First entry")]
     sorted_refs = _sort_references_by_number(refs)
     assert sorted_refs[0]["text"] == "1 First entry"
+
+
+# ---------------------------------------------------------------------------
+# _reclaim_mislabeled_references
+# ---------------------------------------------------------------------------
+
+
+def test_reclaim_body_entry_adjacent_to_references():
+    # the real brunton-2016 bug: "1. Jordan MI, ..." labeled as plain text right
+    # before the detected reference run
+    triples = [
+        ("body", "ACKNOWLEDGMENTS. We are grateful...", {}),
+        ("body", "1. Jordan MI, Mitchell TM (2015) Machine learning. Science.", {}),
+        ("reference", "3. Bongard J, Lipson H (2007) Automated reverse engineering.", {}),
+    ]
+    out = _reclaim_mislabeled_references(triples)
+    assert out[0][0] == "body"  # ACK untouched
+    assert out[1][0] == "reference"
+    assert out[2][0] == "reference"
+
+
+def test_reclaim_chains_through_a_run_of_mislabeled_entries():
+    triples = [
+        ("body", "1. First entry.", {}),
+        ("body", "2. Second entry.", {}),
+        ("reference", "3. Third entry.", {}),
+    ]
+    out = _reclaim_mislabeled_references(triples)
+    assert [k for k, _, _ in out] == ["reference", "reference", "reference"]
+
+
+def test_reclaim_requires_adjacency():
+    # a numbered body region separated from the reference run stays body text
+    triples = [
+        ("body", "1. A numbered list item in the body.", {}),
+        ("body", "Some interleaving paragraph.", {}),
+        ("reference", "2. Real reference.", {}),
+    ]
+    out = _reclaim_mislabeled_references(triples)
+    assert out[0][0] == "body"
+
+
+def test_reclaim_requires_entry_marker():
+    # adjacency alone isn't enough -- text without a "[N] "/"N. " start stays body
+    triples = [
+        ("body", "Concluding remarks about the method.", {}),
+        ("reference", "1. Real reference.", {}),
+    ]
+    out = _reclaim_mislabeled_references(triples)
+    assert out[0][0] == "body"
+
+
+def test_reclaim_noop_without_any_reference_region():
+    triples = [("body", "1. Numbered list item.", {}), ("body", "2. Another.", {})]
+    assert _reclaim_mislabeled_references(triples) == triples
+
+
+def test_build_markdown_reclaims_mislabeled_first_reference(tmp_path):
+    pages = [
+        [
+            _region("text", "ACKNOWLEDGMENTS. Thanks everyone.", index=0),
+            _region("text", "1. Jordan MI (2015) Machine learning. Science.", index=1),
+            _region("reference_content", "2. Bongard J (2007) Automated.", index=2),
+        ]
+    ]
+    md, _, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    assert "Jordan" not in md  # moved out of the body...
+    assert [r["text"] for r in refs] == [  # ...into the references, in order
+        "1. Jordan MI (2015) Machine learning. Science.",
+        "2. Bongard J (2007) Automated.",
+    ]
+
+
+def test_build_markdown_warns_on_numbered_gap(tmp_path):
+    pages = [
+        [
+            _region("reference_content", "1. First.", index=0),
+            _region("reference_content", "3. Third.", index=1),
+        ]
+    ]
+    with pytest.warns(UserWarning, match=r"missing entr\(ies\): \[2\]"):
+        _build_markdown(pages, {}, tmp_path, ParseConfig())
+
+
+def test_build_markdown_no_gap_warning_when_contiguous(tmp_path):
+    import warnings as warnings_mod
+
+    pages = [
+        [
+            _region("reference_content", "1. First.", index=0),
+            _region("reference_content", "2. Second.", index=1),
+        ]
+    ]
+    with warnings_mod.catch_warnings():
+        warnings_mod.simplefilter("error")
+        _build_markdown(pages, {}, tmp_path, ParseConfig())
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +558,19 @@ def test_build_markdown_multiple_pages_have_distinct_markers(tmp_path):
     assert md.index("<page_number>2</page_number>") < md.index("page two")
 
 
+def test_build_markdown_all_reference_page_emits_no_empty_part(tmp_path):
+    # a page whose regions are all references (or boilerplate) contributes only its
+    # marker -- no stray empty string producing a triple blank line
+    pages = [
+        [_region("text", "body", index=0)],
+        [_region("reference_content", "Smith, J. (2020).", index=0)],
+    ]
+    md, _, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    assert "\n\n\n" not in md
+    assert md.endswith("<page_number>2</page_number>")
+    assert len(refs) == 1
+
+
 # ---------------------------------------------------------------------------
 # _save_figure_crop
 # ---------------------------------------------------------------------------
@@ -505,8 +611,29 @@ def test_dotted_overrides_keeps_unrelated_user_overrides():
 
 
 # ---------------------------------------------------------------------------
-# _llama_server
+# _llama_server / _ensure_port_free
 # ---------------------------------------------------------------------------
+
+
+def test_ensure_port_free_raises_when_port_occupied():
+    import socket
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        with pytest.raises(RuntimeError, match="already listening"):
+            _ensure_port_free(ParseConfig(port=port))
+
+
+def test_ensure_port_free_passes_on_free_port():
+    import socket
+
+    # bind-then-close to find a port that's definitely free right now
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    _ensure_port_free(ParseConfig(port=port))  # must not raise
 
 
 def test_llama_server_requires_model_path():
@@ -539,7 +666,12 @@ def test_llama_server_raises_cleanly_on_early_exit(monkeypatch):
             pass
 
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: FakeProc())
-    cfg = ParseConfig(model_path="/x/model.gguf", mmproj_path="/x/mmproj.gguf", startup_timeout_s=5)
+    # uncommon port: the pre-flight _ensure_port_free must not trip over a real
+    # llama-server that happens to be running on the default 8080 during tests
+    cfg = ParseConfig(
+        model_path="/x/model.gguf", mmproj_path="/x/mmproj.gguf",
+        startup_timeout_s=5, port=59173,
+    )
     with pytest.raises(RuntimeError, match="exited early"):
         with _llama_server(cfg):
             pass

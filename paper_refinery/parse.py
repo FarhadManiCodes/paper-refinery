@@ -23,9 +23,8 @@ same generic "Text Recognition:" OCR treatment as any other paragraph. Structuri
 bibliography into anything beyond plain OCR'd text -- authors/title/venue/DOI, in-text
 citation-marker linking -- is deliberately a separate, later concern, not this module's
 job; the one thing this module *does* do for references is pair each entry with its
-detected number (the same region-adjacency technique ``_merge_formula_numbers`` already
-uses for formula/formula_number), since that's reassembling what the layout model
-already segmented, not interpreting it.
+detected number (``_merge_reference_numbers``, plain region adjacency), since that's
+reassembling what the layout model already segmented, not interpreting it.
 
 Page boundaries are our own ``<page_number>N</page_number>`` markers (``markers.py``),
 independent of any OCR-detected page-number region (which is discarded as boilerplate).
@@ -35,6 +34,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import subprocess
 import tempfile
 import time
@@ -105,6 +105,25 @@ class ParseResult:
     references_markdown: str = ""  # _render_references_markdown(references); see parse_pdf
 
 
+def _ensure_port_free(cfg: ParseConfig) -> None:
+    """Fail loudly if something is already listening on the configured port.
+
+    Without this there's a race: _wait_for_health polls ``/health`` while our own
+    process is still starting -- a leftover llama-server (e.g. orphaned by an earlier
+    interrupted run) on the same port answers 200 first, our process dies with a bind
+    error a moment later, and the whole PDF silently parses against the stale server.
+    A raw socket connect, not an HTTP call: a half-loaded server answering 503 is
+    still "occupied".
+    """
+    with socket.socket() as s:
+        s.settimeout(1.0)
+        if s.connect_ex((cfg.host, cfg.port)) == 0:
+            raise RuntimeError(
+                f"something is already listening on {cfg.host}:{cfg.port} "
+                "(an orphaned llama-server?) -- kill it or change ParseConfig.port"
+            )
+
+
 @contextmanager
 def _llama_server(cfg: ParseConfig):
     """Spawn llama-server serving GLM-OCR, wait for it to become healthy, tear it down."""
@@ -112,6 +131,7 @@ def _llama_server(cfg: ParseConfig):
         raise RuntimeError("ParseConfig.model_path is not set (GLM-OCR GGUF weights)")
     if not cfg.mmproj_path:
         raise RuntimeError("ParseConfig.mmproj_path is not set (GLM-OCR GGUF vision projector)")
+    _ensure_port_free(cfg)
 
     cmd = [
         cfg.llama_server_bin,
@@ -182,14 +202,6 @@ def _wrap_formula(content: str) -> str:
         if text.endswith(fence):
             text = text[: -len(fence)].strip()
     return f"$$\n{text}\n$$"
-
-
-def _merge_formula_number(formula_md: str, number: str) -> str:
-    """Fold an adjacent formula_number region into the formula via ``\\tag{}``."""
-    number = number.strip().strip("()")
-    if formula_md.endswith("\n$$"):
-        return formula_md[: -len("\n$$")] + f" \\tag{{{number}}}\n$$"
-    return formula_md
 
 
 def _int_attr(cell, name: str, default: int = 1) -> int:
@@ -277,7 +289,7 @@ def _dispatch_region(region: dict, cfg: ParseConfig) -> tuple[str, str]:
     """Classify one glmocr region and format its content.
 
     Returns ``(kind, text)``; kind is one of "abandon", "body", "reference",
-    "reference_number", "figure", "formula", "formula_number". Prefers ``native_label``
+    "reference_number", "figure". Prefers ``native_label``
     (PP-DocLayout-V3's fine-grained class, e.g. "paragraph_title"/"display_formula"/
     "reference_content") over ``label`` (glmocr's coarse text/table/formula/skip bucket,
     e.g. "text"/"formula"), which can't distinguish reference_content from body text, or
@@ -306,47 +318,17 @@ def _dispatch_region(region: dict, cfg: ParseConfig) -> tuple[str, str]:
     if label == _ALGORITHM_LABEL:
         return "body", f"```\n{content}\n```"
     if label in _FORMULA_LABELS:
-        return "formula", _wrap_formula(content)
+        return "body", _wrap_formula(content)
     if label == _FORMULA_NUMBER_LABEL:
-        return "formula_number", content
+        # standalone equation-number region: glmocr folds these into the formula's own
+        # content upstream by default (enable_merge_formula_numbers), so under default
+        # settings this never fires. If a glmocr_config_overrides caller disables that
+        # merge, the number degrades to its own "(N)" paragraph rather than being
+        # dropped -- occasional loss of \tag{} fidelity is acceptable here.
+        return "body", f"({content.strip('() ')})" if content else ""
     if label in _FIGURE_LABELS:
         return "figure", ""
     return "body", content  # unknown label: keep as text rather than silently drop it
-
-
-def _merge_formula_numbers(
-    triples: list[tuple[str, str, dict]],
-) -> list[tuple[str, str, dict]]:
-    """Fold adjacent formula/formula_number pairs (either order) into one "body" item.
-
-    glmocr merges these upstream by default (``enable_merge_formula_numbers``), so under
-    default settings a standalone ``formula_number`` sibling never reaches us here. This
-    exists for the one case that isn't dead code: ``ParseConfig.glmocr_config_overrides``
-    lets a caller turn that default off, at which point this is the only thing that still
-    merges the number in. Idempotent either way: a formula whose content already contains
-    ``\\tag{...}`` passes through unchanged.
-    """
-    merged: list[tuple[str, str, dict]] = []
-    i = 0
-    while i < len(triples):
-        kind, text, region = triples[i]
-        nxt = triples[i + 1] if i + 1 < len(triples) else None
-        if kind == "formula" and nxt and nxt[0] == "formula_number":
-            merged.append(("body", _merge_formula_number(text, nxt[1]), region))
-            i += 2
-        elif kind == "formula_number" and nxt and nxt[0] == "formula":
-            merged.append(("body", _merge_formula_number(nxt[1], text), nxt[2]))
-            i += 2
-        elif kind == "formula":
-            merged.append(("body", text, region))
-            i += 1
-        elif kind == "formula_number":
-            merged.append(("body", f"({text.strip('() ')})" if text else "", region))
-            i += 1
-        else:
-            merged.append((kind, text, region))
-            i += 1
-    return merged
 
 
 def _merge_reference_numbers(
@@ -357,7 +339,8 @@ def _merge_reference_numbers(
 
     PP-DocLayout-V3 labels a bibliography entry's leading "[12]"/"23." marker as its own
     region (native_label "reference"), separate from "reference_content" -- the same
-    split _merge_formula_numbers already resolves for formula/formula_number. An
+    kind of split it makes for formula/formula_number (which glmocr itself merges
+    upstream). An
     unpaired reference_content still becomes an entry with no number attached (never
     dropped over a missing number -- the entry's text is what matters most); an unpaired
     reference_number is dropped (nothing to attach it to).
@@ -381,6 +364,63 @@ def _merge_reference_numbers(
             merged.append((kind, text, region))
             i += 1
     return merged
+
+
+# a bibliography-entry-looking start: "[12] " or "12. " (bracket/dot required -- a bare
+# "2 " would match too much ordinary body text to be safe as a reclaim signal)
+_MISLABELED_REFERENCE_RE = re.compile(r"^\s*\[?\d{1,3}[\].]\s")
+
+
+def _reclaim_mislabeled_references(
+    triples: list[tuple[str, str, dict]],
+) -> list[tuple[str, str, dict]]:
+    """Reroute body regions that are clearly bibliography entries back into the references.
+
+    PP-DocLayout-V3 sometimes mislabels a bibliography's first entr(ies) as plain text --
+    confirmed live on brunton-2016.pdf, where "1. Jordan MI, ..." was the last *body*
+    paragraph while reference_content detection only began at entry 3. Recovery rule,
+    deliberately narrow: on a page that already has detected reference regions, a body
+    region is reclaimed iff it starts with a bibliography-entry marker ("[1] " / "1. ",
+    see ``_MISLABELED_REFERENCE_RE``) *and* is directly adjacent to a reference region --
+    iterated to a fixed point, so a contiguous run of mislabeled entries chains onto the
+    reference run one by one. Numbered body text anywhere else on the page is never
+    touched.
+    """
+    if not any(kind == "reference" for kind, _, _ in triples):
+        return triples
+    out = list(triples)
+    changed = True
+    while changed:
+        changed = False
+        for i, (kind, text, region) in enumerate(out):
+            if kind != "body" or not _MISLABELED_REFERENCE_RE.match(text):
+                continue
+            prev_is_ref = i > 0 and out[i - 1][0] == "reference"
+            next_is_ref = i + 1 < len(out) and out[i + 1][0] == "reference"
+            if prev_is_ref or next_is_ref:
+                out[i] = ("reference", text, region)
+                changed = True
+    return out
+
+
+def _warn_reference_gaps(references: list[dict]) -> None:
+    """Warn (never fix or drop) when a numbered bibliography has holes.
+
+    A gap means the layout model produced no region at all for an entry (confirmed live:
+    brunton-2016's entry 2 simply has no region) -- nothing downstream can recover text
+    that was never OCR'd, but a silent loss is worse than a loud one. Only fires when
+    every entry has a clean numeric key; unnumbered (author-year) styles say nothing.
+    """
+    keys = [_reference_sort_key(ref) for ref in references]
+    if not keys or any(key is None for key in keys):
+        return
+    expected = set(range(1, max(keys) + 1))
+    missing = sorted(expected - set(keys))
+    if missing:
+        warnings.warn(
+            f"numbered bibliography has {len(missing)} missing entr(ies): {missing} -- "
+            "the layout model likely produced no region for them (unrecoverable here)"
+        )
 
 
 def _save_figure_crop(
@@ -499,13 +539,20 @@ def _sort_references_by_number(references: list[dict]) -> list[dict]:
     out of numeric order (2, 1, 3, 4, 5, 7, 6, ...). Since a numbered bibliography always
     prints in ascending order, re-sorting by the parsed number is a safe, unambiguous
     fix -- but only when *every* entry yields a clean integer key (see
-    ``_reference_sort_key``); a style with no numbers at all (author-year, e.g.
-    fmech-07-655266) or a partial/garbled parse is left in detected order rather than
-    guessing at a partial sort.
+    ``_reference_sort_key``) *and* the keys form one contiguous run (a numbered
+    bibliography is always 1..n): a duplicate key (two entries garbled to the same
+    number) or an outlier (an unnumbered entry whose text happens to start with a year,
+    e.g. "2019 IEEE Conference on...") means the keys can't be trusted at all. A style
+    with no numbers (author-year, e.g. fmech-07-655266) or a partial/garbled parse is
+    left in detected order rather than guessing at a partial sort.
     """
+    if not references:
+        return references
     keys = [_reference_sort_key(ref) for ref in references]
     if any(key is None for key in keys):
         return references
+    if sorted(keys) != list(range(min(keys), min(keys) + len(keys))):
+        return references  # duplicates or gaps -> don't trust the keys
     return [ref for _, ref in sorted(zip(keys, references), key=lambda pair: pair[0])]
 
 
@@ -527,8 +574,8 @@ def _build_markdown(
         sorted_regions = sorted(regions, key=lambda r: r.get("index", 0))
         triples = [(*_dispatch_region(r, cfg), r) for r in sorted_regions]
         triples = [t for t in triples if t[0] != "abandon"]
-        triples = _merge_formula_numbers(triples)
         triples = _merge_reference_numbers(triples)
+        triples = _reclaim_mislabeled_references(triples)
 
         body_parts: list[str] = []
         for kind, text, region in triples:
@@ -547,10 +594,12 @@ def _build_markdown(
                 body_parts.append(f"![FIGURE_CROP {page}:{idx}]({crop_path})")
 
         parts.append(page_marker(page))
-        parts.append("\n\n".join(body_parts))
+        if body_parts:  # a page can be all references/boilerplate -- no empty part then
+            parts.append("\n\n".join(body_parts))
 
     references = _drop_trailing_boilerplate(references)
     references = _sort_references_by_number(references)
+    _warn_reference_gaps(references)
 
     return "\n\n".join(parts), figure_crops, references
 
