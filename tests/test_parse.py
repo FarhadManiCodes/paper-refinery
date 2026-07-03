@@ -1,32 +1,29 @@
 """Tests for the local GLM-OCR parser.
 
 The pure helpers (region dispatch, markdown assembly, table conversion, reference-number
-merging, the llama-server health check) are tested directly against hand-built
-glmocr-shaped region dicts; the network/process-bound ``parse_pdf`` itself is exercised
-separately with a live llama-server + GLM-OCR (skipped by default).
+merging) are tested directly against hand-built glmocr-shaped region dicts; ``parse_pdf``
+itself is exercised offline against a fake backend (server lifecycle tests live in
+test_backend.py), plus one live test with a real llama-server (skipped by default).
 """
 
 from __future__ import annotations
 
-import subprocess
-
 import pytest
 
+from paper_refinery.backend import OcrBackend
 from paper_refinery.config import ParseConfig
 from paper_refinery.parse import (
     ParseResult,
     _build_markdown,
     _dispatch_region,
-    _dotted_overrides,
     _drop_trailing_boilerplate,
-    _ensure_port_free,
     _html_table_to_markdown,
-    _llama_server,
     _merge_reference_numbers,
     _reclaim_mislabeled_references,
     _render_references_markdown,
     _save_figure_crop,
     _sort_references_by_number,
+    parse_pdf,
 )
 
 
@@ -584,97 +581,69 @@ def test_save_figure_crop_warns_and_returns_none_when_missing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _dotted_overrides
+# parse_pdf against a fake backend (offline end-to-end; lifecycle in test_backend.py)
 # ---------------------------------------------------------------------------
 
 
-def test_dotted_overrides_widens_only_figure_class_ids():
-    dotted = _dotted_overrides(ParseConfig(figure_crop_margin=1.1))
-    ratios = dotted["pipeline.layout.layout_unclip_ratio"]
-    assert ratios == {3: (1.1, 1.1), 14: (1.1, 1.1)}
+class _FakeResult:
+    def __init__(self, json_result, image_files=None):
+        self.json_result = json_result
+        self.image_files = image_files or {}
 
 
-def test_dotted_overrides_lets_explicit_override_win():
-    cfg = ParseConfig(
-        figure_crop_margin=1.1,
-        glmocr_config_overrides={"pipeline.layout.layout_unclip_ratio": 1.0},
-    )
-    dotted = _dotted_overrides(cfg)
-    assert dotted["pipeline.layout.layout_unclip_ratio"] == 1.0
+class _FakeParser:
+    def __init__(self, result):
+        self._result = result
+
+    def parse(self, path):
+        return self._result
 
 
-def test_dotted_overrides_keeps_unrelated_user_overrides():
-    cfg = ParseConfig(glmocr_config_overrides={"pipeline.max_workers": 1})
-    dotted = _dotted_overrides(cfg)
-    assert dotted["pipeline.max_workers"] == 1
-    assert "pipeline.layout.layout_unclip_ratio" in dotted
+class _FakeServer:
+    def __init__(self):
+        self.killed = False
+
+    def kill(self):
+        self.killed = True
 
 
-# ---------------------------------------------------------------------------
-# _llama_server / _ensure_port_free
-# ---------------------------------------------------------------------------
+def test_parse_pdf_with_backend_builds_full_result(tmp_path):
+    pages = [
+        [
+            _region("doc_title", "A Paper", index=0),
+            _region("text", "Body text.", index=1),
+            _region("reference_content", "1. Smith J (2020) Things.", index=2),
+        ]
+    ]
+    backend = OcrBackend(parser=_FakeParser(_FakeResult(pages)), server=_FakeServer())
+    result = parse_pdf(tmp_path / "x.pdf", tmp_path, ParseConfig(), backend=backend)
+    assert "# A Paper" in result.markdown
+    assert "<page_number>1</page_number>" in result.markdown
+    assert "Smith" not in result.markdown
+    assert len(result.references) == 1
+    assert "1. Smith J (2020) Things." in result.references_markdown
 
 
-def test_ensure_port_free_raises_when_port_occupied():
-    import socket
+def test_parse_pdf_watchdog_kills_server_and_raises(tmp_path):
+    import threading
 
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        port = listener.getsockname()[1]
-        with pytest.raises(RuntimeError, match="already listening"):
-            _ensure_port_free(ParseConfig(port=port))
+    released = threading.Event()
 
+    class HangingParser:
+        def parse(self, path):
+            released.wait(timeout=10)  # hangs until the watchdog kills the "server"
+            raise ConnectionError("server gone")
 
-def test_ensure_port_free_passes_on_free_port():
-    import socket
-
-    # bind-then-close to find a port that's definitely free right now
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    _ensure_port_free(ParseConfig(port=port))  # must not raise
-
-
-def test_llama_server_requires_model_path():
-    with pytest.raises(RuntimeError, match="model_path"):
-        with _llama_server(ParseConfig(mmproj_path="/x/mmproj.gguf")):
-            pass
-
-
-def test_llama_server_requires_mmproj_path():
-    with pytest.raises(RuntimeError, match="mmproj_path"):
-        with _llama_server(ParseConfig(model_path="/x/model.gguf")):
-            pass
-
-
-def test_llama_server_raises_cleanly_on_early_exit(monkeypatch):
-    class FakeProc:
-        def __init__(self, *a, **k):
-            self.returncode = 1
-
-        def poll(self):
-            return self.returncode
-
-        def terminate(self):
-            pass
-
-        def wait(self, timeout=None):
-            pass
-
+    class Server(_FakeServer):
         def kill(self):
-            pass
+            super().kill()
+            released.set()
 
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: FakeProc())
-    # uncommon port: the pre-flight _ensure_port_free must not trip over a real
-    # llama-server that happens to be running on the default 8080 during tests
-    cfg = ParseConfig(
-        model_path="/x/model.gguf", mmproj_path="/x/mmproj.gguf",
-        startup_timeout_s=5, port=59173,
-    )
-    with pytest.raises(RuntimeError, match="exited early"):
-        with _llama_server(cfg):
-            pass
+    backend = OcrBackend(parser=HangingParser(), server=Server())
+    cfg = ParseConfig(parse_timeout_s=0.05)
+    with pytest.raises(RuntimeError, match="exceeded ParseConfig.parse_timeout_s"):
+        parse_pdf(tmp_path / "x.pdf", tmp_path, cfg, backend=backend)
+    assert backend.server.killed
 
 
 @pytest.mark.skip(reason="parse_pdf needs a running llama-server + GLM-OCR weights")

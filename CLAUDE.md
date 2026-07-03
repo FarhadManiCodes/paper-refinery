@@ -45,6 +45,7 @@ Pipeline stages, each a single-purpose module; `cli.py::_refine` owns all wiring
 modules own logic (never call each other except `enrich`→`parse` for its result type):
 
 ```
+backend.py   llama-server + GlmOcr lifecycle; ocr_backend() is reusable across PDFs
 parse.py     PDF -> ParseResult (body markdown + figure crops + raw references)
 figures.py   describe one page's figure crops via Gemini (one call per page, not per figure)
 enrich.py    splice figure descriptions next to their captions in the markdown

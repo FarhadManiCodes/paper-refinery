@@ -71,7 +71,10 @@ model, plus the `glmocr` SDK to drive layout detection and per-region OCR agains
    `FigureConfig`/`ChunkConfig` field can be overridden this way, e.g. `n_gpu_layers` or
    `glmocr_config_overrides` for hardware-specific tuning). `--model-path`/`--mmproj-path`
    CLI flags override the file per-run. `parse_pdf` spawns and tears down `llama-server`
-   itself for the duration of each run, so you don't need to run it as a standing service.
+   itself for the duration of each run, so you don't need to run it as a standing service;
+   batch callers can instead hold one server open across many PDFs via
+   `paper_refinery.backend.ocr_backend` (server spawn + model load is the dominant fixed
+   cost of a parse).
    `llama-server` currently requires `--flash-attn off -fit off` for GLM-OCR ([llama.cpp
    discussion #19721](https://github.com/ggml-org/llama.cpp/discussions/19721));
    `ParseConfig.extra_server_args` defaults to that already -- re-check on a llama.cpp

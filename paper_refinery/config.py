@@ -38,6 +38,11 @@ class ParseConfig:
     extra_server_args: tuple[str, ...] = ("--flash-attn", "off", "-fit", "off")
     #   required for GLM-OCR as of ggml-org/llama.cpp discussion #19721; re-check on upgrade
     startup_timeout_s: float = 120.0  # health-check polling budget (model load can be slow)
+    parse_timeout_s: float = 1800.0
+    #   watchdog budget for one PDF's whole parse (layout + all OCR calls). A wedged
+    #   llama-server otherwise hangs parse_pdf forever -- observed live: one run sat
+    #   36+ minutes on a 12-page paper that normally takes ~10. On timeout the server
+    #   is killed and parse_pdf raises. Generous by design; raise it for huge PDFs.
     layout_device: str | None = None  # None = glmocr auto-selects CUDA/CPU for PP-DocLayout-V3
     table_format: str = "markdown"  # glmocr emits HTML tables; we convert to markdown
     merged_cell_strategy: str = "duplicate"  # rowspan/colspan fallback: no lossless markdown equivalent
@@ -47,7 +52,7 @@ class ParseConfig:
     #   cropping (1.1 = 10% larger on each axis) -- glmocr's own default is 1.0, i.e. no
     #   margin, which can clip axis labels/legends/edges sitting right at the detected
     #   boundary. Applied only to the "chart"/"image" layout classes (see
-    #   _FIGURE_CLASS_IDS in parse.py); text/table/formula crops keep native detection
+    #   _FIGURE_CLASS_IDS in backend.py); text/table/formula crops keep native detection
     #   precision, since a looser box there would just add OCR noise.
     glmocr_config_overrides: dict = field(default_factory=dict)
     #   dotted-path escape hatch into glmocr's own config (e.g. {"pipeline.max_workers": 1}
