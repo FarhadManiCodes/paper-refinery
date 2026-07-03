@@ -5,6 +5,12 @@ anchor: figure/chart placeholders can shift between parser runs, but the caption
 page + position) is stable. We find one caption per figure number, group them by the page
 they sit on, describe each page's figures with Gemini in a single call (given that page's
 crop files), and splice the description right after the caption.
+
+When the parse provides layout-model-detected captions (``ParseResult.figure_captions``,
+from PP-DocLayout-V3's figure_title regions), only body lines matching one of those are
+accepted as anchors -- a body paragraph starting "Figure 4 shows..." can no longer steal
+a caption's anchor. The caption regex still does the number extraction either way, and
+remains the sole mechanism for papers where the layout model detected no captions at all.
 """
 
 from __future__ import annotations
@@ -49,11 +55,30 @@ def _page_at(markdown: str, offset: int) -> int | None:
     return page
 
 
-def _find_captions(markdown: str) -> list[_Caption]:
+def _normalize_caption(text: str) -> str:
+    return " ".join(text.split()).strip("* ").strip()
+
+
+def _matches_known(line: str, known: set[str]) -> bool:
+    """True if this matched line is (the start of) a layout-model-detected caption.
+
+    Prefix matching in both directions, not just equality: a multi-line caption region
+    lands in the markdown with its first line matching the regex, so the line is a
+    prefix of the known caption text (never the other way around for a genuine match;
+    an in-text mention is a full sentence that prefixes no real caption).
+    """
+    line = _normalize_caption(line)
+    return any(k.startswith(line) or line.startswith(k) for k in known)
+
+
+def _find_captions(markdown: str, known: set[str] | None = None) -> list[_Caption]:
     """One caption per figure number; an ALL-CAPS "FIGURE"/"FIG" line wins over a
-    lower-case in-text mention if both forms exist."""
+    lower-case in-text mention if both forms exist. With ``known`` (normalized
+    figure_title texts from the parse), non-matching lines are rejected outright."""
     caps: dict[str, _Caption] = {}
     for m in _CAPTION_LINE.finditer(markdown):
+        if known and not _matches_known(m.group(0), known):
+            continue
         kind, number = m.group(1), m.group(2)
         text = (m.group(3) or "").strip().strip("*").strip()  # drop leaked markdown bold
         upper = kind.isupper()
@@ -92,9 +117,9 @@ def _rename_crops_to_captions(
     return md, renamed
 
 
-def _group_by_page(md: str) -> dict[int | None, list[_Caption]]:
+def _group_by_page(md: str, known: set[str] | None = None) -> dict[int | None, list[_Caption]]:
     grouped: dict[int | None, list[_Caption]] = defaultdict(list)
-    for caption in _find_captions(md):
+    for caption in _find_captions(md, known):
         grouped[caption.page].append(caption)
     return grouped
 
@@ -128,6 +153,12 @@ def enrich_markdown(
     describe = describe or _default_describe
     md = parsed.markdown
 
+    # layout-model-detected captions, when the parse provided them (empty set -> None:
+    # fall back to pure regex detection for papers with no figure_title regions)
+    known = {
+        _normalize_caption(c) for texts in parsed.figure_captions.values() for c in texts
+    } or None
+
     def context_for(caption: _Caption) -> str:
         head = f"FIGURE {caption.number}. {caption.text}".strip()
         if not cfg.include_references:
@@ -138,7 +169,7 @@ def enrich_markdown(
     # Renaming can change md's length (placeholder text differs from the new image
     # line), which would invalidate any caption.line_end offsets computed against the
     # pre-rename text -- so captions are re-found from scratch afterward, once md is final.
-    first_pass = _group_by_page(md)
+    first_pass = _group_by_page(md, known)
 
     # rename each page's crops to their matched figure number, before any Gemini call --
     # lets cropping/placement be checked by filename alone
@@ -150,7 +181,7 @@ def enrich_markdown(
         if crops:
             md, figure_crops[page] = _rename_crops_to_captions(md, page, crops, captions)
 
-    by_page = _group_by_page(md)
+    by_page = _group_by_page(md, known)
 
     # one describe task per page that has figure/chart crops
     tasks: dict[int, tuple[list[Path], list[tuple[str, str]]]] = {}

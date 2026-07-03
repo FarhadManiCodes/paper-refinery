@@ -73,9 +73,11 @@ see the plan file referenced in memory.
   ordering quirks. Numbered bibliographies are re-sorted by their printed number
   (`_sort_references_by_number`) precisely because `index` can't be trusted there.
 - **Figure anchoring is caption-based, not placeholder-based.** Placeholders shift between
-  parser runs; the `FIGURE N.M` caption is the stable anchor. `enrich.py` renames crop files
-  to their figure number (`fig_4.1.png`) by reading-order pairing before any Gemini call, so
-  cropping can be sanity-checked by filename alone.
+  parser runs; the `FIGURE N.M` caption is the stable anchor. When the layout model detected
+  caption regions (`ParseResult.figure_captions`), enrich accepts only body lines matching
+  them — the caption regex alone is the fallback. `enrich.py` renames crop files to their
+  figure number (`fig_4.1.png`) by reading-order pairing before any Gemini call, so cropping
+  can be sanity-checked by filename alone.
 - **Image links are relativized last.** `parse.py` emits absolute crop paths; `cli._refine`
   rewrites them relative to the markdown's own directory (`_relativize_image_links`) at the
   very end, since only `_refine` knows both the crop dir and the final `.md` path. Scratchpad

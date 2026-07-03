@@ -19,6 +19,7 @@ from paper_refinery.parse import (
     _drop_trailing_boilerplate,
     _html_table_to_markdown,
     _merge_reference_numbers,
+    _reading_order,
     _reclaim_mislabeled_references,
     _render_references_markdown,
     _save_figure_crop,
@@ -78,11 +79,11 @@ def test_dispatch_title_strips_ocrs_own_heading_marker():
     assert text == "# My Paper"
 
 
-def test_dispatch_figure_title_is_plain_body_text():
-    # the "FIGURE N. ..." caption line -- must land in body markdown as-is, since
-    # enrich.py's caption regex scans the body text for it
+def test_dispatch_figure_title_is_caption_kind():
+    # the "FIGURE N. ..." caption line -- routed as its own kind so _build_markdown
+    # both keeps it in the body markdown AND records it as a known caption
     kind, text = _dispatch_region(_region("figure_title", "FIGURE 4.1. A comparison."))
-    assert kind == "body" and text == "FIGURE 4.1. A comparison."
+    assert kind == "caption" and text == "FIGURE 4.1. A comparison."
 
 
 def test_dispatch_algorithm_is_fenced_code_block():
@@ -387,6 +388,82 @@ def test_sort_references_by_number_mixed_region_and_text_number_sources():
 
 
 # ---------------------------------------------------------------------------
+# _reading_order
+# ---------------------------------------------------------------------------
+
+
+def _box_region(index: int, bbox: list[int], text: str = "") -> dict:
+    return {"native_label": "text", "content": text, "index": index, "bbox_2d": bbox}
+
+
+def test_reading_order_fixes_in_column_inversion():
+    # the real kalman page-8 bug: index order put "Theorem 4" (y=436) before the
+    # "Fig. 4" caption (y=381) it follows in the same (right) column. The left-column
+    # region establishes the true page width, as on any real two-column page.
+    regions = [
+        _box_region(0, [100, 68, 500, 900], "left column"),
+        _box_region(1, [512, 234, 901, 382], "figure"),
+        _box_region(2, [512, 436, 908, 461], "Theorem 4..."),
+        _box_region(3, [571, 381, 849, 393], "Fig. 4 caption"),
+        _box_region(4, [512, 398, 908, 435], "Comparing equations..."),
+    ]
+    out = _reading_order(regions)
+    assert [r["index"] for r in out] == [0, 1, 3, 4, 2]
+
+
+def test_reading_order_keeps_correct_pages_unchanged():
+    regions = [
+        _box_region(0, [100, 68, 500, 92]),
+        _box_region(1, [100, 94, 500, 242]),
+        _box_region(2, [101, 242, 498, 317]),
+    ]
+    assert [r["index"] for r in _reading_order(regions)] == [0, 1, 2]
+
+
+def test_reading_order_never_interleaves_columns():
+    # macro order (left column fully, then right) is glmocr's job and must survive,
+    # even though the right column starts higher on the page than the left one ends
+    regions = [
+        _box_region(0, [100, 68, 500, 400], "left top"),
+        _box_region(1, [100, 410, 500, 800], "left bottom"),
+        _box_region(2, [512, 68, 908, 400], "right top"),
+        _box_region(3, [512, 410, 908, 800], "right bottom"),
+    ]
+    assert [r["index"] for r in _reading_order(regions)] == [0, 1, 2, 3]
+
+
+def test_reading_order_wide_region_breaks_runs():
+    # a page-wide region (title, spanning table) separates runs: text above and below
+    # it is never re-sorted across it
+    regions = [
+        _box_region(0, [100, 300, 500, 400], "left col after title"),
+        _box_region(1, [100, 68, 908, 120], "PAGE-WIDE TITLE"),
+        _box_region(2, [100, 410, 500, 500], "more left col"),
+    ]
+    # the wide region is its own run; the sort must not pull idx=1 above idx=0's run
+    out = _reading_order(regions)
+    assert [r["index"] for r in out] == [0, 1, 2]
+
+
+def test_reading_order_same_line_regions_keep_index_order():
+    # confirmed live: one formula split into two side-by-side regions 1px apart --
+    # exact-y sorting would swap what glmocr ordered correctly
+    regions = [
+        _box_region(0, [514, 408, 767, 423], "Pr[x(t_{n+1}) <="),
+        _box_region(1, [565, 407, 857, 471], "xi_1) <= xi_{n+..."),
+    ]
+    assert [r["index"] for r in _reading_order(regions)] == [0, 1]
+
+
+def test_reading_order_missing_bbox_falls_back_to_index_order():
+    regions = [
+        {"native_label": "text", "content": "b", "index": 1},
+        {"native_label": "text", "content": "a", "index": 0},
+    ]
+    assert [r["index"] for r in _reading_order(regions)] == [0, 1]
+
+
+# ---------------------------------------------------------------------------
 # _reclaim_mislabeled_references
 # ---------------------------------------------------------------------------
 
@@ -449,7 +526,7 @@ def test_build_markdown_reclaims_mislabeled_first_reference(tmp_path):
             _region("reference_content", "2. Bongard J (2007) Automated.", index=2),
         ]
     ]
-    md, _, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    md, _, _, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
     assert "Jordan" not in md  # moved out of the body...
     assert [r["text"] for r in refs] == [  # ...into the references, in order
         "1. Jordan MI (2015) Machine learning. Science.",
@@ -496,7 +573,7 @@ def test_build_markdown_drops_boilerplate_and_keeps_body(tmp_path):
             _region("footer", "1", index=3),
         ]
     ]
-    md, crops, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    md, crops, _caps, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
     assert "Running Head" not in md
     assert md.count("<page_number>") == 1 and "<page_number>1</page_number>" in md
     assert "# A Paper" in md
@@ -511,7 +588,7 @@ def test_build_markdown_routes_references_out_of_body(tmp_path):
             _region("reference_content", "Smith, J. (2020).", index=1),
         ]
     ]
-    md, crops, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    md, crops, _caps, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
     assert "Smith, J." not in md
     assert refs == [{"page": 1, "number": None, "text": "Smith, J. (2020)."}]
 
@@ -523,7 +600,7 @@ def test_build_markdown_pairs_reference_number_with_content(tmp_path):
             _region("reference_content", "Smith, J. (2020).", index=1),
         ]
     ]
-    md, crops, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    md, crops, _caps, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
     assert refs == [{"page": 1, "number": "1", "text": "Smith, J. (2020)."}]
 
 
@@ -534,7 +611,7 @@ def test_build_markdown_saves_figure_crop_and_inserts_placeholder(tmp_path):
     image_files = {"cropped_page0_idx0.jpg": img}
     pages = [[_region("chart", "", index=0, image_path="imgs/cropped_page0_idx0.jpg")]]
 
-    md, crops, refs = _build_markdown(pages, image_files, tmp_path, ParseConfig())
+    md, crops, _caps, refs = _build_markdown(pages, image_files, tmp_path, ParseConfig())
 
     assert 1 in crops and len(crops[1]) == 1
     assert crops[1][0].exists()
@@ -543,10 +620,22 @@ def test_build_markdown_saves_figure_crop_and_inserts_placeholder(tmp_path):
 
 def test_build_markdown_multiple_pages_have_distinct_markers(tmp_path):
     pages = [[_region("text", "page one", index=0)], [_region("text", "page two", index=0)]]
-    md, _, _ = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    md, _, _, _ = _build_markdown(pages, {}, tmp_path, ParseConfig())
     assert "<page_number>1</page_number>" in md and "<page_number>2</page_number>" in md
     assert md.index("<page_number>1</page_number>") < md.index("page one")
     assert md.index("<page_number>2</page_number>") < md.index("page two")
+
+
+def test_build_markdown_collects_captions_and_keeps_them_in_body(tmp_path):
+    pages = [
+        [
+            _region("text", "Body text.", index=0),
+            _region("figure_title", "FIGURE 2. A comparison of things.", index=1),
+        ]
+    ]
+    md, _, caps, _ = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    assert "FIGURE 2. A comparison of things." in md  # still body markdown...
+    assert caps == {1: ["FIGURE 2. A comparison of things."]}  # ...and known
 
 
 def test_build_markdown_all_reference_page_emits_no_empty_part(tmp_path):
@@ -556,7 +645,7 @@ def test_build_markdown_all_reference_page_emits_no_empty_part(tmp_path):
         [_region("text", "body", index=0)],
         [_region("reference_content", "Smith, J. (2020).", index=0)],
     ]
-    md, _, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    md, _, _, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
     assert "\n\n\n" not in md
     assert md.endswith("<page_number>2</page_number>")
     assert len(refs) == 1

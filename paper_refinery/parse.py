@@ -38,6 +38,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
+from functools import cmp_to_key
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -94,6 +95,12 @@ class ParseResult:
     # boilerplate/reference regions removed, tables as markdown, formulas as LaTeX
     markdown: str
     figure_crops: dict[int, list[Path]] = field(default_factory=dict)  # page -> crop paths
+    # figure/table caption texts as detected by the layout model (figure_title regions),
+    # page -> texts in reading order. The same text also stays in `markdown` as plain
+    # body content; this field exists so enrich.py can anchor descriptions on known
+    # captions instead of regex-guessing them from body text (where an in-text
+    # "Figure 4 shows..." paragraph could otherwise steal the anchor).
+    figure_captions: dict[int, list[str]] = field(default_factory=dict)
     # raw bibliography, routed out of `markdown` entirely -- structuring/linking these
     # is a separate, later concern (not this module's job)
     references: list[dict] = field(default_factory=list)  # [{"page", "number", "text"}, ...]
@@ -195,7 +202,7 @@ def _html_table_to_markdown(html: str) -> str:
 def _dispatch_region(region: dict) -> tuple[str, str]:
     """Classify one glmocr region and format its content.
 
-    Returns ``(kind, text)``; kind is one of "abandon", "body", "reference",
+    Returns ``(kind, text)``; kind is one of "abandon", "body", "caption", "reference",
     "reference_number", "figure". Prefers ``native_label``
     (PP-DocLayout-V3's fine-grained class, e.g. "paragraph_title"/"display_formula"/
     "reference_content") over ``label`` (glmocr's coarse text/table/formula/skip bucket,
@@ -213,7 +220,10 @@ def _dispatch_region(region: dict) -> tuple[str, str]:
     if label == _PARAGRAPH_TITLE_LABEL:
         return "body", f"## {_strip_heading_prefix(content)}"
     if label == _FIGURE_TITLE_LABEL:
-        return "body", content
+        # kept in the body markdown like plain text, but ALSO surfaced as a known
+        # caption (ParseResult.figure_captions) so enrich.py can anchor on layout-model
+        # ground truth instead of guessing captions from body text by regex alone
+        return "caption", content
     if label == _REFERENCE_NUMBER_LABEL:
         return "reference_number", content
     if label == _REFERENCE_LABEL:
@@ -461,22 +471,85 @@ def _sort_references_by_number(references: list[dict]) -> list[dict]:
     return [ref for _, ref in sorted(zip(keys, references), key=lambda pair: pair[0])]
 
 
+_WIDE_FRACTION = 0.6  # of page width: a region this wide spans columns (title, wide table)
+_COLUMN_OVERLAP = 0.5  # of the narrower region's width: x-overlap needed to share a column
+_Y_TOL_FRACTION = 0.01  # of page width: y-difference treated as "same line" (~half a line)
+
+
+def _reading_order(regions: list[dict]) -> list[dict]:
+    """Regions in reading order: glmocr's own ``index`` order, with local in-column
+    inversions repaired by geometry.
+
+    PP-DocLayout-V3's ``index`` gets the macro order right (which column when), but is
+    frequently wrong *within* a column -- measured live on kalman-1960.pdf: 11 genuine
+    inversions across 12 pages, e.g. "Theorem 4" emitted two regions before the "Fig. 4"
+    caption it follows on the page, and bibliography entries swapped pairwise. Within one
+    column, top-to-bottom *is* reading order, so each contiguous run of same-column
+    regions (x-overlap > ``_COLUMN_OVERLAP`` of the narrower one) is re-sorted by its
+    top edge. Deliberately conservative everywhere else:
+
+    - regions wider than ``_WIDE_FRACTION`` of the page (titles, column-spanning
+      tables/figures) break runs, so left/right-column text can never interleave;
+    - y-differences within ``_Y_TOL_FRACTION`` of page width count as the same line
+      (confirmed live: one formula split into two side-by-side regions 1px apart --
+      exact-y sorting would swap what glmocr ordered correctly);
+    - any region missing a well-formed ``bbox_2d`` -> plain index order, unchanged.
+    """
+    regs = sorted(regions, key=lambda r: r.get("index", 0))
+    boxes = [r.get("bbox_2d") for r in regs]
+    if not boxes or any(b is None or len(b) != 4 for b in boxes):
+        return regs
+    page_w = (max(b[2] for b in boxes) - min(b[0] for b in boxes)) or 1
+    y_tol = _Y_TOL_FRACTION * page_w
+
+    def is_wide(b) -> bool:
+        return (b[2] - b[0]) > _WIDE_FRACTION * page_w
+
+    def same_column(a, b) -> bool:
+        overlap = min(a[2], b[2]) - max(a[0], b[0])
+        return overlap > _COLUMN_OVERLAP * min(a[2] - a[0], b[2] - b[0])
+
+    def by_top(a: dict, b: dict) -> int:
+        dy = a["bbox_2d"][1] - b["bbox_2d"][1]
+        if abs(dy) <= y_tol:
+            return 0  # same line -> stable sort keeps glmocr's order
+        return -1 if dy < 0 else 1
+
+    ordered: list[dict] = []
+    run: list[dict] = []
+    for region in regs:
+        box = region["bbox_2d"]
+        if (
+            run
+            and not is_wide(box)
+            and not is_wide(run[-1]["bbox_2d"])
+            and same_column(run[-1]["bbox_2d"], box)
+        ):
+            run.append(region)
+        else:
+            ordered.extend(sorted(run, key=cmp_to_key(by_top)))
+            run = [region]
+    ordered.extend(sorted(run, key=cmp_to_key(by_top)))
+    return ordered
+
+
 def _build_markdown(
     pages_regions: list[list[dict]],
     image_files: dict,
     figures_dir: Path,
     cfg: ParseConfig,
-) -> tuple[str, dict[int, list[Path]], list[dict]]:
-    """Assemble page-marked markdown, figure crops, and a raw references list from
-    glmocr's per-page region lists."""
+) -> tuple[str, dict[int, list[Path]], dict[int, list[str]], list[dict]]:
+    """Assemble page-marked markdown, figure crops, known captions, and a raw
+    references list from glmocr's per-page region lists."""
     parts: list[str] = []
     figure_crops: dict[int, list[Path]] = {}
+    figure_captions: dict[int, list[str]] = {}
     references: list[dict] = []
     used_images: set[str] = set()
 
     for page_idx, regions in enumerate(pages_regions):
         page = page_idx + 1  # glmocr's page_idx is 0-based by input order; confirmed live
-        sorted_regions = sorted(regions, key=lambda r: r.get("index", 0))
+        sorted_regions = _reading_order(regions)
         triples = [(*_dispatch_region(r), r) for r in sorted_regions]
         triples = [t for t in triples if t[0] != "abandon"]
         triples = _merge_reference_numbers(triples)
@@ -487,6 +560,10 @@ def _build_markdown(
             if kind == "body":
                 if text.strip():
                     body_parts.append(text)
+            elif kind == "caption":
+                if text.strip():
+                    body_parts.append(text)  # stays in the body markdown as-is...
+                    figure_captions.setdefault(page, []).append(text)  # ...and is known
             elif kind == "reference":
                 if text.strip():
                     references.append({"page": page, "number": region.get("number"), "text": text})
@@ -506,7 +583,7 @@ def _build_markdown(
     references = _sort_references_by_number(references)
     _warn_reference_gaps(references)
 
-    return "\n\n".join(parts), figure_crops, references
+    return "\n\n".join(parts), figure_crops, figure_captions, references
 
 
 def _render_references_markdown(references: list[dict]) -> str:
@@ -590,12 +667,13 @@ def parse_pdf(
     if isinstance(json_result, str):
         json_result = json.loads(json_result)
 
-    markdown, figure_crops, references = _build_markdown(
+    markdown, figure_crops, figure_captions, references = _build_markdown(
         json_result, result.image_files, figures_dir, cfg
     )
     return ParseResult(
         markdown=markdown,
         figure_crops=figure_crops,
+        figure_captions=figure_captions,
         references=references,
         references_markdown=_render_references_markdown(references),
     )

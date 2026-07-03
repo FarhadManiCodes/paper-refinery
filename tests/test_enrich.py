@@ -53,6 +53,39 @@ def test_find_captions_lowercase_fig_is_not_canonical():
     assert caps["1"].text == "The real caption." and caps["1"].upper
 
 
+def test_find_captions_with_known_set_rejects_non_matching_lines():
+    md = "Figure 1 shows stuff in prose.\n\nFIGURE 1. Real caption.\n\n"
+    caps = _find_captions(md, known={"FIGURE 1. Real caption."})
+    assert len(caps) == 1
+    assert caps[0].text == "Real caption."
+
+
+def test_find_captions_known_prefix_matches_multiline_caption_first_line():
+    # a multi-line caption region lands in markdown with only its first line matching
+    # the regex; the line is a prefix of the known caption text
+    md = "FIGURE 2. First line of caption\n\n"
+    caps = _find_captions(md, known={"FIGURE 2. First line of caption continued below"})
+    assert len(caps) == 1 and caps[0].number == "2"
+
+
+def test_enrich_known_captions_stop_mention_stealing_the_anchor():
+    # both lines are the same case, so without known captions the *mention* would win
+    # (first match). With layout-model captions provided, it can't.
+    md = (
+        "<page_number>2</page_number>\n\n"
+        "Figure 7 shows the general trend of the comparison.\n\n"
+        "Figure 7. The real caption text.\n\n"
+    )
+    parsed = ParseResult(
+        md,
+        figure_crops={2: [Path("page_2_fig_0.png")]},
+        figure_captions={2: ["Figure 7. The real caption text."]},
+    )
+    out = enrich_markdown(parsed, describe=lambda c, q, cfg: {n: "DESC" for n, _ in q})
+    assert "The real caption text.\n\n> **Figure description (auto):** DESC" in out
+    assert "general trend of the comparison.\n\n> **Figure" not in out
+
+
 def test_enrich_one_call_per_page_and_splices_after_caption():
     calls = []
 
