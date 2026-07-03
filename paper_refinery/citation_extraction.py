@@ -139,7 +139,10 @@ def extract_references(
         cfg.retry_base_delay,
     )
 
-    items = [r.model_dump(exclude_none=True) for r in response.parsed]
+    # response.parsed is None when the model's JSON couldn't be coerced to the schema
+    # at all -- degrade to the same pad-with-{} path as a length mismatch, never crash
+    parsed = response.parsed or []
+    items = [r.model_dump(exclude_none=True) for r in parsed]
     if len(items) != len(raw_texts):
         warnings.warn(
             f"extract_references: got {len(items)} items for {len(raw_texts)} input "

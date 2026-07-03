@@ -86,15 +86,48 @@ class FigureConfig:
 
 @dataclass
 class CitationConfig:
-    """Bibliography extraction: one Gemini call turns each raw OCR'd reference string
-    into rough structured fields (title, authors, year, venue, ...). A labeling guess,
-    not ground truth -- verifying it against real bibliographic data is a separate,
-    not-yet-designed concern, deliberately not part of this config."""
+    """Citation pipeline: extraction (one Gemini call turns each raw OCR'd reference
+    string into rough structured fields) and resolution (verifying/completing those
+    fields against Semantic Scholar -> CrossRef -> OpenAlex; see citation_resolution.py).
+    One config class for both, mirroring how FigureConfig is shared by figures/enrich."""
 
+    # -- extraction (citation_extraction.py) --
     model: str = "gemini-3.1-flash-lite"
     api_key_env: str = "GOOGLE_API_KEY"
-    retry_attempts: int = 4  # generate_content attempts before giving up
+    retry_attempts: int = 4  # attempts before giving up (Gemini and resolver HTTP alike)
     retry_base_delay: float = 4.0  # seconds; doubles each retry
+
+    # -- resolution (citation_resolution.py) --
+    s2_api_base: str = "https://api.semanticscholar.org/graph/v1"
+    s2_api_key_env: str = "S2_API_KEY"  # optional; sent as x-api-key when set
+    s2_min_interval_s: float = 1.1
+    #   unauthenticated S2 hard-rate-limits bursts (~1 req/s; confirmed live: an
+    #   immediate second call 429s) -- calls are globally throttled to this interval
+    crossref_api_base: str = "https://api.crossref.org"
+    openalex_api_base: str = "https://api.openalex.org"
+    mailto: str = ""
+    #   contact email for CrossRef/OpenAlex "polite pool" (better rate limits & support);
+    #   optional but recommended -- set it in config.toml, not here
+    request_timeout_s: float = 30.0
+    max_workers: int = 4  # concurrent per-reference resolutions
+    api_retry_attempts: int = 2
+    api_retry_base_delay: float = 2.0
+    #   resolver HTTP gets a smaller budget than Gemini's retry_attempts/retry_base_delay:
+    #   fallback providers exist, so hammering a saturated keyless endpoint (S2's public
+    #   search pool 429s persistently under load -- confirmed live) buys nothing and
+    #   isn't "mindful" use of a shared resource
+    title_similarity_threshold: float = 0.90  # difflib ratio a title-search hit must clear
+    title_similarity_relaxed: float = 0.75
+    #   second acceptance tier (user: 0.90 alone is too strict for OCR-garbled titles):
+    #   a hit in [relaxed, threshold) is accepted only with stronger corroboration --
+    #   exact year match AND first-author surname match (diacritic-folded)
+    year_tolerance: int = 1
+    #   |extracted year - provider year| allowed (confirmed live: S2 reports the arXiv
+    #   preprint year for brunton-2016, one year before the published version)
+    api_cache_dir: str = "~/.cache/paper-refinery/api-cache"
+    #   every successful provider response is cached here (key: sha256 of the URL) so
+    #   iterating on matching logic never re-hits the keyless APIs; failures are never
+    #   cached. Sibling of the models cache; safe to delete anytime.
 
 
 @dataclass
