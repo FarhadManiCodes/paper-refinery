@@ -20,9 +20,13 @@ from paper_refinery.parse import (
     _html_table_to_markdown,
     _merge_reference_numbers,
     _merge_split_references,
+    _missing_reference_numbers,
     _reading_order,
+    _normalize_layer_text,
     _reclaim_mislabeled_references,
+    _recover_missing_references,
     _render_references_markdown,
+    _splice_missing_from_layer,
     _save_figure_crop,
     _sort_references_by_number,
     parse_pdf,
@@ -618,6 +622,76 @@ def test_build_markdown_no_gap_warning_when_contiguous(tmp_path):
     with warnings_mod.catch_warnings():
         warnings_mod.simplefilter("error")
         _build_markdown(pages, {}, tmp_path, ParseConfig())
+
+
+# ---------------------------------------------------------------------------
+# text-layer recovery of skipped bibliography entries
+# ---------------------------------------------------------------------------
+
+
+def test_splice_missing_recovers_entry_from_text_layer():
+    # the brunton case: entry 2 printed in the PDF but no layout region for it
+    refs = [
+        _ref("1. Jordan MI, Mitchell TM (2015) Machine learning. Science 349:255-260.", page=6),
+        _ref("3. Bongard J, Lipson H (2007) Automated reverse engineering. PNAS.", page=6),
+    ]
+    layer = (
+        "body text before the bibliography\n"
+        "1. Jordan MI, Mitchell TM (2015) Machine learning. Science\n349:255-260.\n"
+        "2. Marx V (2013) Biology: The big challenges of big data. Nature 498:255-260.\n"
+        "3. Bongard J, Lipson H (2007) Automated reverse engineering. PNAS.\n"
+    )
+    with pytest.warns(UserWarning, match="recovered missing reference 2"):
+        out = _splice_missing_from_layer(refs, layer, [2])
+    assert [r["text"][:10] for r in out] == ["1. Jordan ", "2. Marx V ", "3. Bongard"]
+    assert out[1]["number"] is None  # marker lives in the text, like its OCR'd siblings
+    assert "big data" in out[1]["text"]
+    assert out[1]["page"] == 6  # carried from its predecessor
+
+
+def test_splice_missing_skips_ambiguous_marker():
+    # a "Vol. 2." lookalike inside the neighbor makes the marker non-unique -> no guess
+    refs = [
+        _ref("1. First entry about Vol. 2. things in detail.", page=1),
+        _ref("3. Third entry text here.", page=1),
+    ]
+    layer = (
+        "1. First entry about Vol. 2. things in detail. "
+        "2. Second entry that must not be guessed at. "
+        "3. Third entry text here."
+    )
+    assert len(_splice_missing_from_layer(refs, layer, [2])) == 2
+
+
+def test_splice_missing_skips_when_neighbor_prefix_not_in_layer():
+    # heavily garbled OCR text can't anchor into the layer -> leave the gap alone
+    refs = [_ref("1. T0tally g@rbled 0CR text.", page=1), _ref("3. Third.", page=1)]
+    layer = "1. First. 2. Second. 3. Third."
+    assert len(_splice_missing_from_layer(refs, layer, [2])) == 2
+
+
+def test_recover_missing_references_guards(tmp_path):
+    ay = [_ref("Smith, J. (2020). A title.")]
+    assert _recover_missing_references(ay, tmp_path / "x.pdf") == ay  # unnumbered style
+    numbered = [_ref("1. A. Author, paper one."), _ref("2. B. Author, paper two.")]
+    assert _recover_missing_references(numbered, tmp_path / "x.pdf") == numbered  # no gap
+    gapped = [_ref("1. A. Author, paper one."), _ref("3. C. Author, paper three.")]
+    # gap present but the PDF is unreadable -> unchanged, gap warning handles it
+    assert _recover_missing_references(gapped, tmp_path / "missing.pdf") == gapped
+    assert _recover_missing_references(gapped, None) == gapped
+
+
+def test_normalize_layer_text_rejoins_hyphenated_linebreaks():
+    assert _normalize_layer_text("dynam-\nical\nsystems") == "dynamical systems"
+
+
+def test_missing_reference_numbers():
+    assert _missing_reference_numbers([_ref("1. A."), _ref("3. C.")]) == [2]
+    assert _missing_reference_numbers([_ref("1. A."), _ref("2. B.")]) == []
+    assert _missing_reference_numbers([_ref("Smith, J. (2020). A title.")]) == []  # unclean key
+    assert _missing_reference_numbers([]) == []
+    # duplicated keys make the expected-set math meaningless -> report nothing
+    assert _missing_reference_numbers([_ref("1. A."), _ref("1. B."), _ref("3. C.")]) == []
 
 
 # ---------------------------------------------------------------------------

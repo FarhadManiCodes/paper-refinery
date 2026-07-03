@@ -335,7 +335,8 @@ def _looks_like_continuation(text: str) -> bool:
 def _join_split_entry(head: str, tail: str) -> str:
     """Rejoin a split entry; a mid-URL split is glued back without a space."""
     head, tail = head.rstrip(), tail.lstrip()
-    last_token = head.split()[-1] if head.split() else ""
+    tokens = head.split()
+    last_token = tokens[-1] if tokens else ""
     if "://" in last_token or last_token.lower().startswith("www."):
         return head + tail
     return f"{head} {tail}"
@@ -371,6 +372,18 @@ def _merge_split_references(references: list[dict]) -> list[dict]:
     return out
 
 
+def _missing_reference_numbers(references: list[dict]) -> list[int]:
+    """Missing printed numbers of a numbered bibliography; ``[]`` when there is nothing
+    trustworthy to report -- keys unclean (author-year style, garbled markers),
+    duplicated (two entries garbled to the same number make the expected-set math
+    meaningless, same stance as ``_sort_references_by_number``), or simply complete.
+    Single source of gap arithmetic for the warning and the text-layer recovery."""
+    keys = [_reference_sort_key(ref) for ref in references]
+    if not keys or any(key is None for key in keys) or len(set(keys)) != len(keys):
+        return []
+    return sorted(set(range(1, max(keys) + 1)) - set(keys))
+
+
 def _warn_reference_gaps(references: list[dict]) -> None:
     """Warn (never fix or drop) when a numbered bibliography has holes.
 
@@ -378,17 +391,97 @@ def _warn_reference_gaps(references: list[dict]) -> None:
     brunton-2016's entry 2 simply has no region) -- nothing downstream can recover text
     that was never OCR'd, but a silent loss is worse than a loud one. Only fires when
     every entry has a clean numeric key; unnumbered (author-year) styles say nothing.
+    Runs after ``_recover_missing_references``, so it only reports what recovery from
+    the PDF text layer couldn't fill either.
     """
-    keys = [_reference_sort_key(ref) for ref in references]
-    if not keys or any(key is None for key in keys):
-        return
-    expected = set(range(1, max(keys) + 1))
-    missing = sorted(expected - set(keys))
+    missing = _missing_reference_numbers(references)
     if missing:
         warnings.warn(
             f"numbered bibliography has {len(missing)} missing entr(ies): {missing} -- "
             "the layout model likely produced no region for them (unrecoverable here)"
         )
+
+
+_RECOVERY_PREFIX_CHARS = 40  # of a neighbor entry's text used to anchor into the text layer
+_MIN_RECOVERED_CHARS = 20  # a shorter "entry" is a stray number hit, not a reference
+
+
+def _normalize_layer_text(text: str) -> str:
+    """Whitespace-collapsed form shared by the PDF text layer and OCR text so the two
+    can be substring-matched; line-break hyphenation is rejoined first."""
+    text = re.sub(r"-\n(?=[a-z])", "", text)
+    return re.sub(r"\s+", " ", text)
+
+
+def _splice_missing_from_layer(
+    references: list[dict], layer_text: str, missing: list[int]
+) -> list[dict]:
+    """Fill numbered-bibliography gaps with entries read from the PDF's own text layer.
+
+    Pure logic half of ``_recover_missing_references`` (which owns the file I/O and
+    computes ``missing`` -- guaranteed non-empty with clean, unique keys, see
+    ``_missing_reference_numbers``). Every step is anchored on data already trusted,
+    and any step failing skips that entry (the gap warning then still fires): the
+    missing number's nearest present neighbors are located in the text layer by their
+    OCR'd text prefix; the missing entry must start with its own printed marker
+    ("[N] "/"N. ") exactly once in the span between them -- zero hits or several (a
+    stray "Vol. 2." lookalike) means no guessing. A recovered entry is spliced in
+    right after its predecessor; its text starts at the printed marker by
+    construction, which doubles as its sort key (``number`` stays None like its
+    OCR'd siblings -- setting it would render a doubled "[2] 2. ..." marker), so the
+    downstream number sort sees a contiguous run again.
+    """
+    layer = _normalize_layer_text(layer_text)
+    by_key = {_reference_sort_key(ref): ref for ref in references}
+    out = list(references)
+    for n in missing:
+        prev_key = max((k for k in by_key if k < n), default=None)
+        next_key = min((k for k in by_key if k > n), default=None)
+        if prev_key is None or next_key is None:
+            continue
+        prev_prefix = _normalize_layer_text(by_key[prev_key]["text"])[:_RECOVERY_PREFIX_CHARS]
+        next_prefix = _normalize_layer_text(by_key[next_key]["text"])[:_RECOVERY_PREFIX_CHARS]
+        i_prev, i_next = layer.find(prev_prefix), layer.find(next_prefix)
+        if i_prev == -1 or i_next == -1 or i_next <= i_prev:
+            continue
+        segment = layer[i_prev:i_next]
+        starts = [m.start() for m in re.finditer(rf"(?:^|(?<=\s))\[?{n}[\].]\s", segment)]
+        if len(starts) != 1:
+            continue
+        text = segment[starts[0] :].strip()
+        if len(text) < _MIN_RECOVERED_CHARS:
+            continue
+        recovered = {"page": by_key[prev_key]["page"], "number": None, "text": text}
+        out.insert(out.index(by_key[prev_key]) + 1, recovered)
+        by_key[n] = recovered
+        warnings.warn(f"recovered missing reference {n} from the PDF's embedded text layer")
+    return out
+
+
+def _recover_missing_references(references: list[dict], pdf_path: Path | None) -> list[dict]:
+    """Recover numbered-bibliography entries the layout model skipped, from the PDF's
+    embedded text layer (confirmed live: brunton-2016's entry 2 is printed in the PDF
+    and readable via PyMuPDF, but PP-DocLayout-V3 produces no region for it).
+
+    Born-digital PDFs only -- a scanned PDF has no text layer and falls straight
+    through to the gap warning. Never touches unnumbered (author-year) bibliographies
+    or ones with unclean keys, and never runs at all when there is no gap.
+    """
+    if pdf_path is None or not references:
+        return references
+    missing = _missing_reference_numbers(references)
+    if not missing:
+        return references
+    try:
+        import fitz  # PyMuPDF; already present transitively via glmocr
+
+        with fitz.open(pdf_path) as doc:
+            layer_text = "\n".join(page.get_text() for page in doc)
+    except Exception:  # no text layer / import failure: the gap warning still fires
+        return references
+    if not layer_text.strip():
+        return references
+    return _splice_missing_from_layer(references, layer_text, missing)
 
 
 def _save_figure_crop(
@@ -591,9 +684,13 @@ def _build_markdown(
     image_files: dict,
     figures_dir: Path,
     cfg: ParseConfig,
+    pdf_path: Path | None = None,
 ) -> tuple[str, dict[int, list[Path]], dict[int, list[str]], list[dict]]:
     """Assemble page-marked markdown, figure crops, known captions, and a raw
-    references list from glmocr's per-page region lists."""
+    references list from glmocr's per-page region lists.
+
+    ``pdf_path`` enables text-layer recovery of skipped bibliography entries
+    (``_recover_missing_references``); None (tests, callers without the file) skips it."""
     parts: list[str] = []
     figure_crops: dict[int, list[Path]] = {}
     figure_captions: dict[int, list[str]] = {}
@@ -636,6 +733,7 @@ def _build_markdown(
 
     references = _merge_split_references(references)
     references = _drop_trailing_boilerplate(references)
+    references = _recover_missing_references(references, pdf_path)
     references = _sort_references_by_number(references)
     _warn_reference_gaps(references)
 
@@ -724,7 +822,7 @@ def parse_pdf(
         json_result = json.loads(json_result)
 
     markdown, figure_crops, figure_captions, references = _build_markdown(
-        json_result, result.image_files, figures_dir, cfg
+        json_result, result.image_files, figures_dir, cfg, pdf_path=pdf_path
     )
     return ParseResult(
         markdown=markdown,
