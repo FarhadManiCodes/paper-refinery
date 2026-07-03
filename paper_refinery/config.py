@@ -44,8 +44,6 @@ class ParseConfig:
     #   36+ minutes on a 12-page paper that normally takes ~10. On timeout the server
     #   is killed and parse_pdf raises. Generous by design; raise it for huge PDFs.
     layout_device: str | None = None  # None = glmocr auto-selects CUDA/CPU for PP-DocLayout-V3
-    table_format: str = "markdown"  # glmocr emits HTML tables; we convert to markdown
-    merged_cell_strategy: str = "duplicate"  # rowspan/colspan fallback: no lossless markdown equivalent
     figures_dir_name: str = "figures"  # subdir of image_dir where figure/chart crops are saved
     figure_crop_margin: float = 1.1
     #   multiplier applied to each detected figure/chart box's width and height before

@@ -43,8 +43,6 @@ def test_parse_config_has_no_dual_backend_flag():
 
 def test_parse_config_local_backend_defaults():
     c = ParseConfig()
-    assert c.table_format == "markdown"
-    assert c.merged_cell_strategy == "duplicate"
     assert c.model_path == ""
     assert c.mmproj_path == ""
     assert c.figure_crop_margin == 1.1

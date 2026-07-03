@@ -99,6 +99,24 @@ def test_main_defaults_image_dir_next_to_md_out(tmp_path, monkeypatch):
     assert seen["image_dir"] == pdf.with_suffix(".refinery.md").parent
 
 
+def test_main_needs_no_gemini_client_for_figureless_paper(tmp_path, monkeypatch):
+    # a paper with zero figure crops must not require GOOGLE_API_KEY at all
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    def boom(cfg):
+        raise AssertionError("make_client must not be called without figures")
+
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+    monkeypatch.setattr(cli, "parse_pdf", lambda p, d, c: ParseResult(markdown="MD"))
+    monkeypatch.setattr(cli, "make_client", boom)
+    monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
+    monkeypatch.setattr(cli, "chunk_markdown", lambda md, cfg: [Chunk(md, 0, 1, 1)])
+
+    result = CliRunner().invoke(cli.main, [str(pdf)])
+    assert result.exit_code == 0, result.output
+
+
 def test_main_writes_references_markdown_and_keeps_it_out_of_chunking(tmp_path, monkeypatch):
     pdf = tmp_path / "p.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")

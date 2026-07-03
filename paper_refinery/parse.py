@@ -124,13 +124,13 @@ def _int_attr(cell, name: str, default: int = 1) -> int:
         return default
 
 
-def _html_table_to_markdown(html: str, strategy: str = "duplicate") -> str:
+def _html_table_to_markdown(html: str) -> str:
     """Convert a GLM-OCR HTML table to a markdown pipe table.
 
     Markdown has no merged-cell concept; a rowspan/colspan cell's value is duplicated
-    into every grid position it visually spans (``strategy="duplicate"``) rather than
-    silently dropped. This can repeat a spanning header across columns/rows it covers --
-    an accepted, documented fidelity tradeoff, not a bug.
+    into every grid position it visually spans rather than silently dropped. This can
+    repeat a spanning header across columns/rows it covers -- an accepted, documented
+    fidelity tradeoff, not a bug.
     """
     soup = BeautifulSoup(html or "", "html.parser")
     table = soup.find("table")
@@ -154,7 +154,7 @@ def _html_table_to_markdown(html: str, strategy: str = "duplicate") -> str:
                 c = col + i
                 while len(row) <= c:
                     row.append("")
-                row[c] = text if strategy == "duplicate" or i == 0 else ""
+                row[c] = text
                 placed_this_row.add(c)
                 if rowspan > 1:
                     active[c] = (rowspan - 1, text)
@@ -170,7 +170,7 @@ def _html_table_to_markdown(html: str, strategy: str = "duplicate") -> str:
             if remaining > 0:
                 while len(row) <= c:
                     row.append("")
-                if not row[c] and strategy == "duplicate":
+                if not row[c]:
                     row[c] = text
                 active[c] = (remaining - 1, text)
 
@@ -192,7 +192,7 @@ def _html_table_to_markdown(html: str, strategy: str = "duplicate") -> str:
     return "\n".join(lines)
 
 
-def _dispatch_region(region: dict, cfg: ParseConfig) -> tuple[str, str]:
+def _dispatch_region(region: dict) -> tuple[str, str]:
     """Classify one glmocr region and format its content.
 
     Returns ``(kind, text)``; kind is one of "abandon", "body", "reference",
@@ -219,9 +219,7 @@ def _dispatch_region(region: dict, cfg: ParseConfig) -> tuple[str, str]:
     if label == _REFERENCE_LABEL:
         return "reference", content
     if label == _TABLE_LABEL:
-        if cfg.table_format == "markdown":
-            return "body", _html_table_to_markdown(content, cfg.merged_cell_strategy)
-        return "body", content
+        return "body", _html_table_to_markdown(content)
     if label == _ALGORITHM_LABEL:
         return "body", f"```\n{content}\n```"
     if label in _FORMULA_LABELS:
@@ -479,7 +477,7 @@ def _build_markdown(
     for page_idx, regions in enumerate(pages_regions):
         page = page_idx + 1  # glmocr's page_idx is 0-based by input order; confirmed live
         sorted_regions = sorted(regions, key=lambda r: r.get("index", 0))
-        triples = [(*_dispatch_region(r, cfg), r) for r in sorted_regions]
+        triples = [(*_dispatch_region(r), r) for r in sorted_regions]
         triples = [t for t in triples if t[0] != "abandon"]
         triples = _merge_reference_numbers(triples)
         triples = _reclaim_mislabeled_references(triples)

@@ -87,7 +87,7 @@ def test_extract_references_pads_when_model_returns_fewer_items():
     assert out == [{"title": "Only One", "authors": []}, {}]
 
 
-def test_extract_references_retries_then_succeeds():
+def test_extract_references_retries_transient_then_succeeds():
     parsed = [ExtractedReference(title="Paper A")]
     calls = []
 
@@ -97,7 +97,7 @@ def test_extract_references_retries_then_succeeds():
             def generate_content(model, contents, config):
                 calls.append(1)
                 if len(calls) < 3:
-                    raise RuntimeError("transient")
+                    raise ConnectionError("transient")  # retryable (see retry.py)
                 return type("R", (), {"parsed": parsed})()
 
     cfg = CitationConfig(retry_attempts=4, retry_base_delay=0.0)
@@ -107,15 +107,39 @@ def test_extract_references_retries_then_succeeds():
 
 
 def test_extract_references_raises_after_exhausting_retries():
+    calls = []
+
     class FakeClient:
         class models:
             @staticmethod
             def generate_content(model, contents, config):
-                raise RuntimeError("permanent failure")
+                calls.append(1)
+                raise ConnectionError("still down")
 
     cfg = CitationConfig(retry_attempts=2, retry_base_delay=0.0)
-    with pytest.raises(RuntimeError, match="permanent failure"):
+    with pytest.raises(ConnectionError, match="still down"):
         extract_references(["ref one"], cfg, client=FakeClient())
+    assert len(calls) == 2
+
+
+def test_extract_references_fails_fast_on_non_retryable_error():
+    # a bad key / bad request won't get better by waiting -- no backoff burn
+    calls = []
+
+    class FakeAuthError(Exception):
+        code = 401
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                calls.append(1)
+                raise FakeAuthError("invalid api key")
+
+    cfg = CitationConfig(retry_attempts=4, retry_base_delay=10.0)  # delay never slept
+    with pytest.raises(FakeAuthError):
+        extract_references(["ref one"], cfg, client=FakeClient())
+    assert len(calls) == 1
 
 
 def test_extract_references_sends_schema_and_deterministic_config():

@@ -11,12 +11,12 @@ separate concern, deliberately not this file's job.
 from __future__ import annotations
 
 import os
-import time
 import warnings
 
 from pydantic import BaseModel, Field
 
 from .config import CitationConfig
+from .retry import call_with_backoff
 
 
 class Author(BaseModel):
@@ -133,17 +133,11 @@ def extract_references(
         thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL),
     )
 
-    response = None
-    for attempt in range(cfg.retry_attempts):
-        try:
-            response = client.models.generate_content(
-                model=cfg.model, contents=prompt, config=config
-            )
-            break
-        except Exception:
-            if attempt == cfg.retry_attempts - 1:
-                raise
-            time.sleep(cfg.retry_base_delay * (2**attempt))
+    response = call_with_backoff(
+        lambda: client.models.generate_content(model=cfg.model, contents=prompt, config=config),
+        cfg.retry_attempts,
+        cfg.retry_base_delay,
+    )
 
     items = [r.model_dump(exclude_none=True) for r in response.parsed]
     if len(items) != len(raw_texts):

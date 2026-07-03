@@ -46,7 +46,7 @@ def _region(label: str, content: str = "", **extra) -> dict:
     ["header", "footer", "number", "footnote", "aside_text", "footer_image", "header_image"],
 )
 def test_dispatch_abandons_boilerplate(label):
-    kind, text = _dispatch_region(_region(label, "should be dropped"), ParseConfig())
+    kind, text = _dispatch_region(_region(label, "should be dropped"))
     assert kind == "abandon"
     assert text == ""
 
@@ -54,94 +54,88 @@ def test_dispatch_abandons_boilerplate(label):
 def test_dispatch_reference_number_is_own_kind():
     # the bracket/number marker before a bibliography entry -- kept (not abandoned) so
     # it can be paired back with its reference_content sibling by _merge_reference_numbers
-    kind, text = _dispatch_region(_region("reference", "[12]"), ParseConfig())
+    kind, text = _dispatch_region(_region("reference", "[12]"))
     assert kind == "reference_number" and text == "[12]"
 
 
 def test_dispatch_doc_title_becomes_h1():
-    kind, text = _dispatch_region(_region("doc_title", "My Paper"), ParseConfig())
+    kind, text = _dispatch_region(_region("doc_title", "My Paper"))
     assert kind == "body" and text == "# My Paper"
 
 
 def test_dispatch_paragraph_title_becomes_h2():
-    kind, text = _dispatch_region(_region("paragraph_title", "Methods"), ParseConfig())
+    kind, text = _dispatch_region(_region("paragraph_title", "Methods"))
     assert kind == "body" and text == "## Methods"
 
 
 def test_dispatch_title_strips_ocrs_own_heading_marker():
     # GLM-OCR sometimes emits its own "##" inside a title region's content; our own
     # prefix must not double up with it (regression: "## ## Section Title").
-    kind, text = _dispatch_region(_region("paragraph_title", "## B. A subsection"), ParseConfig())
+    kind, text = _dispatch_region(_region("paragraph_title", "## B. A subsection"))
     assert text == "## B. A subsection"
 
-    kind, text = _dispatch_region(_region("doc_title", "# My Paper"), ParseConfig())
+    kind, text = _dispatch_region(_region("doc_title", "# My Paper"))
     assert text == "# My Paper"
 
 
 def test_dispatch_figure_title_is_plain_body_text():
     # the "FIGURE N. ..." caption line -- must land in body markdown as-is, since
     # enrich.py's caption regex scans the body text for it
-    kind, text = _dispatch_region(_region("figure_title", "FIGURE 4.1. A comparison."), ParseConfig())
+    kind, text = _dispatch_region(_region("figure_title", "FIGURE 4.1. A comparison."))
     assert kind == "body" and text == "FIGURE 4.1. A comparison."
 
 
 def test_dispatch_algorithm_is_fenced_code_block():
-    kind, text = _dispatch_region(_region("algorithm", "for i in range(n):\n    do(i)"), ParseConfig())
+    kind, text = _dispatch_region(_region("algorithm", "for i in range(n):\n    do(i)"))
     assert kind == "body"
     assert text == "```\nfor i in range(n):\n    do(i)\n```"
 
 
 def test_dispatch_reference_content_is_routed_separately():
-    kind, text = _dispatch_region(_region("reference_content", "Smith et al. 2020."), ParseConfig())
+    kind, text = _dispatch_region(_region("reference_content", "Smith et al. 2020."))
     assert kind == "reference"
     assert text == "Smith et al. 2020."
 
 
 def test_dispatch_chart_and_image_are_figure_kind():
     for label in ("chart", "image"):
-        kind, text = _dispatch_region(_region(label, ""), ParseConfig())
+        kind, text = _dispatch_region(_region(label, ""))
         assert kind == "figure"
 
 
-def test_dispatch_table_converts_html_to_markdown_by_default():
+def test_dispatch_table_converts_html_to_markdown():
     html = "<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>"
-    kind, text = _dispatch_region(_region("table", html), ParseConfig())
+    kind, text = _dispatch_region(_region("table", html))
     assert kind == "body"
     assert "| A | B |" in text
     assert "| 1 | 2 |" in text
 
 
-def test_dispatch_table_keeps_html_when_configured():
-    html = "<table><tr><td>x</td></tr></table>"
-    kind, text = _dispatch_region(_region("table", html), ParseConfig(table_format="html"))
-    assert kind == "body" and text == html
-
-
 def test_dispatch_formula_wraps_in_dollars():
-    kind, text = _dispatch_region(_region("display_formula", "E = mc^2"), ParseConfig())
+    kind, text = _dispatch_region(_region("display_formula", "E = mc^2"))
     assert kind == "body"
     assert text == "$$\nE = mc^2\n$$"
 
 
 def test_dispatch_formula_strips_existing_fences():
-    kind, text = _dispatch_region(_region("inline_formula", "$$ x^2 $$"), ParseConfig())
+    kind, text = _dispatch_region(_region("inline_formula", "$$ x^2 $$"))
     assert text == "$$\nx^2\n$$"
 
 
 def test_dispatch_formula_number_becomes_parenthetical_body():
     # glmocr merges these into the formula upstream by default; a standalone one (merge
     # disabled via overrides) degrades to its own "(N)" paragraph rather than being dropped
-    kind, text = _dispatch_region(_region("formula_number", "(1)"), ParseConfig())
+    kind, text = _dispatch_region(_region("formula_number", "(1)"))
     assert kind == "body" and text == "(1)"
 
 
 def test_dispatch_empty_formula_number_yields_empty_body():
-    kind, text = _dispatch_region(_region("formula_number", ""), ParseConfig())
+    kind, text = _dispatch_region(_region("formula_number", ""))
     assert kind == "body" and text == ""
 
 
 def test_dispatch_unknown_label_kept_as_body_text():
-    kind, text = _dispatch_region(_region("some_new_label", "hello"), ParseConfig())
+    kind, text = _dispatch_region(_region("some_new_label", "hello"))
     assert kind == "body" and text == "hello"
 
 
@@ -161,7 +155,7 @@ def test_html_table_simple_roundtrip():
 
 def test_html_table_duplicates_colspan_value():
     html = "<table><tr><td colspan='2'>Header</td></tr><tr><td>a</td><td>b</td></tr></table>"
-    md = _html_table_to_markdown(html, strategy="duplicate")
+    md = _html_table_to_markdown(html)
     assert md.splitlines()[0] == "| Header | Header |"
 
 
@@ -172,7 +166,7 @@ def test_html_table_duplicates_rowspan_value():
         "<tr><td>2</td></tr>"
         "</table>"
     )
-    md = _html_table_to_markdown(html, strategy="duplicate")
+    md = _html_table_to_markdown(html)
     lines = md.splitlines()
     assert lines[0] == "| Method | 1 |"
     assert lines[2] == "| Method | 2 |"

@@ -64,9 +64,13 @@ def _refine(
         refs_path = pdf.with_suffix(".references.md")
         refs_path.write_text(parsed.references_markdown)
 
-    # one Gemini client, reused across pages (the page calls run concurrently in enrich)
-    client = make_client(cfg.figure)
-    describe = functools.partial(describe_page_figures, client=client)
+    # one Gemini client, reused across pages (the page calls run concurrently in enrich).
+    # Only built when there's actually a figure to describe -- a figure-less paper must
+    # not require GOOGLE_API_KEY to be set.
+    describe = None
+    if parsed.figure_crops:
+        client = make_client(cfg.figure)
+        describe = functools.partial(describe_page_figures, client=client)
     enriched = enrich_markdown(parsed, cfg.figure, describe=describe)
     enriched = _relativize_image_links(enriched, md_out.parent)
 

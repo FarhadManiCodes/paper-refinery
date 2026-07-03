@@ -12,21 +12,19 @@ from __future__ import annotations
 import io
 import json
 import os
-import time
 from pathlib import Path
 
 from .config import FigureConfig
+from .retry import call_with_backoff
 
 
 def _generate(client, model, contents, cfg: FigureConfig):
-    """generate_content with exponential backoff (handles transient rate limits)."""
-    for i in range(cfg.retry_attempts):
-        try:
-            return client.models.generate_content(model=model, contents=contents)
-        except Exception:
-            if i == cfg.retry_attempts - 1:
-                raise
-            time.sleep(cfg.retry_base_delay * (2**i))
+    """generate_content with exponential backoff on transient errors (see retry.py)."""
+    return call_with_backoff(
+        lambda: client.models.generate_content(model=model, contents=contents),
+        cfg.retry_attempts,
+        cfg.retry_base_delay,
+    )
 
 
 def _crop_bytes(crop: Path, max_px: int) -> bytes:
