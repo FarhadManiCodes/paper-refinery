@@ -155,7 +155,10 @@ def _scan_numbered(
     """
     valid = _number_index(extracted)
     spans = _math_spans(markdown)
-    max_eq_tag = max((int(t) for t in _EQ_TAG_RE.findall(markdown)), default=0)
+    # the equation-tag bound belongs to the paren guard alone; don't scan for brackets
+    max_eq_tag = (
+        max((int(t) for t in _EQ_TAG_RE.findall(markdown)), default=0) if form == "paren" else 0
+    )
     pattern = _BRACKET_MARKER_RE if form == "bracket" else _PAREN_MARKER_RE
     markers: list[Marker] = []
     for m in pattern.finditer(markdown):
