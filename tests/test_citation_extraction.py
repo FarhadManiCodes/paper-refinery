@@ -1,0 +1,135 @@
+"""Tests for citation_extraction.py (pure/mocked; the real Gemini call is live-only)."""
+
+from __future__ import annotations
+
+import pytest
+
+from paper_refinery.citation_extraction import (
+    Author,
+    ExtractedReference,
+    extract_references,
+    make_client,
+)
+from paper_refinery.config import CitationConfig
+
+# ---------------------------------------------------------------------------
+# schema sanity
+# ---------------------------------------------------------------------------
+
+
+def test_extracted_reference_requires_only_title():
+    ref = ExtractedReference(title="Paper A")
+    assert ref.title == "Paper A"
+    assert ref.authors == []
+    assert ref.year is None
+
+
+def test_extracted_reference_model_dump_excludes_none():
+    ref = ExtractedReference(title="Paper A", year=2020)
+    assert ref.model_dump(exclude_none=True) == {"title": "Paper A", "authors": [], "year": 2020}
+
+
+def test_author_given_is_optional():
+    a = Author(family="Smith")
+    assert a.given is None
+
+
+# ---------------------------------------------------------------------------
+# make_client
+# ---------------------------------------------------------------------------
+
+
+def test_make_client_requires_api_key(monkeypatch):
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="GOOGLE_API_KEY"):
+        make_client(CitationConfig())
+
+
+# ---------------------------------------------------------------------------
+# extract_references
+# ---------------------------------------------------------------------------
+
+
+def test_extract_references_returns_empty_for_no_input():
+    assert extract_references([], CitationConfig()) == []
+
+
+def test_extract_references_uses_response_parsed():
+    parsed = [
+        ExtractedReference(title="Paper A", authors=[Author(family="Smith", given="J.")]),
+        ExtractedReference(title="Paper B", year=2020),
+    ]
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                return type("R", (), {"parsed": parsed})()
+
+    out = extract_references(["ref one", "ref two"], CitationConfig(), client=FakeClient())
+    assert out == [
+        {"title": "Paper A", "authors": [{"family": "Smith", "given": "J."}]},
+        {"title": "Paper B", "authors": [], "year": 2020},
+    ]
+
+
+def test_extract_references_pads_when_model_returns_fewer_items():
+    parsed = [ExtractedReference(title="Only One")]
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                return type("R", (), {"parsed": parsed})()
+
+    with pytest.warns(UserWarning, match="got 1 items for 2 input"):
+        out = extract_references(["ref one", "ref two"], CitationConfig(), client=FakeClient())
+    assert out == [{"title": "Only One", "authors": []}, {}]
+
+
+def test_extract_references_retries_then_succeeds():
+    parsed = [ExtractedReference(title="Paper A")]
+    calls = []
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                calls.append(1)
+                if len(calls) < 3:
+                    raise RuntimeError("transient")
+                return type("R", (), {"parsed": parsed})()
+
+    cfg = CitationConfig(retry_attempts=4, retry_base_delay=0.0)
+    out = extract_references(["ref one"], cfg, client=FakeClient())
+    assert out == [{"title": "Paper A", "authors": []}]
+    assert len(calls) == 3
+
+
+def test_extract_references_raises_after_exhausting_retries():
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                raise RuntimeError("permanent failure")
+
+    cfg = CitationConfig(retry_attempts=2, retry_base_delay=0.0)
+    with pytest.raises(RuntimeError, match="permanent failure"):
+        extract_references(["ref one"], cfg, client=FakeClient())
+
+
+def test_extract_references_sends_schema_and_deterministic_config():
+    seen = {}
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                seen["model"] = model
+                seen["config"] = config
+                return type("R", (), {"parsed": [ExtractedReference(title="Paper A")]})()
+
+    extract_references(["ref one"], CitationConfig(), client=FakeClient())
+    assert seen["model"] == "gemini-3.1-flash-lite"
+    assert seen["config"].temperature == 0.0
+    assert seen["config"].response_mime_type == "application/json"

@@ -4,6 +4,7 @@ import pytest
 
 from paper_refinery.config import (
     ChunkConfig,
+    CitationConfig,
     FigureConfig,
     ParseConfig,
     RefineryConfig,
@@ -22,6 +23,15 @@ def test_refinery_config_composes_subconfigs():
     assert isinstance(r.chunk, ChunkConfig)
     assert isinstance(r.parse, ParseConfig)
     assert isinstance(r.figure, FigureConfig)
+    assert isinstance(r.citation, CitationConfig)
+
+
+def test_citation_config_defaults():
+    c = CitationConfig()
+    assert c.model == "gemini-3.1-flash-lite"
+    assert c.api_key_env == "GOOGLE_API_KEY"
+    assert c.retry_attempts == 4
+    assert c.retry_base_delay == 4.0
 
 
 def test_parse_config_has_no_dual_backend_flag():
@@ -64,6 +74,14 @@ def test_load_config_overlays_parse_section(tmp_path):
     assert cfg.parse.model_path == "/models/glm-ocr.gguf"
     assert cfg.parse.n_gpu_layers == 20
     assert cfg.parse.mmproj_path == ""  # untouched fields keep their code default
+
+
+def test_load_config_overlays_citation_section(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[citation]\nmodel = "gemini-3.1-flash"\nretry_attempts = 2\n')
+    cfg = load_config(path)
+    assert cfg.citation.model == "gemini-3.1-flash"
+    assert cfg.citation.retry_attempts == 2
 
 
 def test_load_config_rejects_unknown_section(tmp_path):

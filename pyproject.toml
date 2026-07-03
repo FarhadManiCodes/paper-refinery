@@ -8,10 +8,16 @@ license = { text = "GPL-3.0-or-later" }
 dependencies = [
   "glmocr[selfhosted]>=0.1.5",    # GLM-OCR SDK: PP-DocLayout-V3 layout + per-region OCR dispatch
   "llama-index-core>=0.14",       # MarkdownNodeParser / SentenceSplitter (chunking primitives)
-  "google-genai>=1.0",            # Gemini: figure descriptions
+  "google-genai>=1.0",            # Gemini: figure descriptions + citation extraction
   "click>=8.1",                   # CLI
   "beautifulsoup4>=4.12",         # parse GLM-OCR's HTML tables -> markdown
   "pillow>=10.0",                 # image handling (figure crops, page renders)
+  "pydantic>=2.0",                # citation_extraction.py's response schema (already
+                                   # transitive via google-genai; declared explicitly
+                                   # since citation_extraction.py imports it directly)
+  "python-dotenv>=1.0",           # loads API keys from ~/.config/paper-refinery/secrets/
+                                   # (already transitive via glmocr; declared explicitly
+                                   # since config.py imports it directly)
 ]
 
 [project.optional-dependencies]

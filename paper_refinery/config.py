@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import stat
 import tomllib
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -79,30 +82,92 @@ class FigureConfig:
 
 
 @dataclass
+class CitationConfig:
+    """Bibliography extraction: one Gemini call turns each raw OCR'd reference string
+    into rough structured fields (title, authors, year, venue, ...). A labeling guess,
+    not ground truth -- verifying it against real bibliographic data is a separate,
+    not-yet-designed concern, deliberately not part of this config."""
+
+    model: str = "gemini-3.1-flash-lite"
+    api_key_env: str = "GOOGLE_API_KEY"
+    retry_attempts: int = 4  # generate_content attempts before giving up
+    retry_base_delay: float = 4.0  # seconds; doubles each retry
+
+
+@dataclass
 class RefineryConfig:
     """Top-level config bundling each stage."""
 
     chunk: ChunkConfig = field(default_factory=ChunkConfig)
     parse: ParseConfig = field(default_factory=ParseConfig)
     figure: FigureConfig = field(default_factory=FigureConfig)
+    citation: CitationConfig = field(default_factory=CitationConfig)
 
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "paper-refinery" / "config.toml"
+DEFAULT_SECRETS_DIR = Path.home() / ".config" / "paper-refinery" / "secrets"
+#   One small file per service (e.g. google.env holding GOOGLE_API_KEY, hf.env holding
+#   HF_TOKEN) rather than one combined file -- keeps each credential's blast radius
+#   minimal. Deliberately its own directory, never shared with any other tool's secrets
+#   (e.g. papis-ask's own env can set OPENAI_BASE_URL/OPENAI_API_KEY for its local
+#   embedding server -- sourcing that into this process would silently redirect
+#   glmocr's OpenAI-compatible client away from our own local llama-server).
+#   Overridable via $PAPER_REFINERY_SECRETS_DIR. User-managed: paper-refinery only ever
+#   reads files here (via python-dotenv, which no-ops if the directory is absent/empty),
+#   never creates or writes any of them.
+
+
+def _load_secrets(dir_path: Path | None = None) -> None:
+    """Load every ``*.env`` file in the secrets directory into the environment, if any
+    exist.
+
+    Delegates entirely to ``python-dotenv`` for each file -- this code never opens a
+    file itself, never logs or inspects its contents, and never overwrites a variable
+    already set some other way (``load_dotenv``'s default, ``override=False``). The one
+    thing it does check is each file's permission bits, since that's determinable
+    without ever reading what's inside: a warning (not a failure) for a file readable by
+    more than its owner.
+    """
+    from dotenv import load_dotenv
+
+    dir_path = dir_path or Path(
+        os.environ.get("PAPER_REFINERY_SECRETS_DIR", DEFAULT_SECRETS_DIR)
+    )
+    if not dir_path.is_dir():
+        return
+    for env_file in sorted(dir_path.glob("*.env")):
+        mode = stat.S_IMODE(env_file.stat().st_mode)
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            warnings.warn(
+                f"{env_file} is readable by more than its owner (mode {oct(mode)}) -- "
+                f"consider `chmod 600 {env_file}`"
+            )
+        load_dotenv(env_file)
 
 
 def load_config(path: Path | None = None) -> RefineryConfig:
-    """Build a RefineryConfig, overlaying values from a TOML file (XDG-style user config).
+    """Build a RefineryConfig, first loading API keys (see ``_load_secrets``), then
+    overlaying values from a TOML file (XDG-style user config).
 
-    The file is optional -- every field already has a code default -- and only needs to
-    set what differs from that default, e.g. local, machine-specific GLM-OCR model paths::
+    Secrets are loaded here, early, rather than lazily at each Gemini call site: the
+    secrets directory is dedicated to this project alone (no risk of an unrelated
+    tool's env vars, like papis-ask's OPENAI_BASE_URL, leaking in), and HF_TOKEN needs
+    to already be set before parse_pdf() runs, not just before a later Gemini call, to
+    matter for the HF Hub version-check glmocr/transformers make.
+
+    The TOML file is optional -- every field already has a code default -- and only
+    needs to set what differs from that default, e.g. local, machine-specific GLM-OCR
+    model paths::
 
         [parse]
         model_path = "/home/you/.cache/paper-refinery/models/GLM-OCR-f16.gguf"
         mmproj_path = "/home/you/.cache/paper-refinery/models/mmproj-GLM-OCR-Q8_0.gguf"
 
     Each top-level TOML table maps to a ``RefineryConfig`` sub-config by name (``parse``,
-    ``figure``, ``chunk``); each key in it must match a dataclass field on that sub-config.
+    ``figure``, ``chunk``, ``citation``); each key in it must match a dataclass field on
+    that sub-config.
     """
+    _load_secrets()
     cfg = RefineryConfig()
     path = path or DEFAULT_CONFIG_PATH
     if not path.exists():

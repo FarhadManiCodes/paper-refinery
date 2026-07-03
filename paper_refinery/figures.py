@@ -83,7 +83,11 @@ def _parse(text: str | None, cfg: FigureConfig) -> dict[str, str]:
 
 
 def make_client(cfg: FigureConfig | None = None):
-    """Create a Gemini client. Build one and reuse it across pages (see cli.py)."""
+    """Create a Gemini client. Build one and reuse it across pages (see cli.py).
+
+    Assumes API keys are already loaded into the environment -- see
+    ``config.load_config``'s ``_load_secrets`` call.
+    """
     from google import genai
 
     cfg = cfg or FigureConfig()
