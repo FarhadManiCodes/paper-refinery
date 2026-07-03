@@ -318,6 +318,59 @@ def _reclaim_mislabeled_references(
     return out
 
 
+_SURNAME_PARTICLES = frozenset("van von de del della der den da di du la le les ter ten te".split())
+#   lowercase surname prefixes that legitimately START a bibliography entry
+#   ("van Wijk, J. ..."): a lowercase first word alone must not read as a continuation
+
+
+def _looks_like_continuation(text: str) -> bool:
+    """True if ``text`` reads as the tail of a split entry rather than an entry start."""
+    stripped = text.lstrip()
+    if not stripped or not stripped[0].islower():
+        return False
+    first_word = stripped.split()[0].rstrip(",.").lower()
+    return first_word not in _SURNAME_PARTICLES
+
+
+def _join_split_entry(head: str, tail: str) -> str:
+    """Rejoin a split entry; a mid-URL split is glued back without a space."""
+    head, tail = head.rstrip(), tail.lstrip()
+    last_token = head.split()[-1] if head.split() else ""
+    if "://" in last_token or last_token.lower().startswith("www."):
+        return head + tail
+    return f"{head} {tail}"
+
+
+def _merge_split_references(references: list[dict]) -> list[dict]:
+    """Fold a page-break continuation fragment back into the entry it belongs to.
+
+    A bibliography entry crossing a page boundary can come back as two regions --
+    confirmed live on fmech-07-655266: ref 28 ends page 9 mid-URL
+    ("https://journals.sagepub.") and page 10 opens with its tail ("com/home/pij
+    Proc. Inst. ..."), which carries the entry's DOI, so the split also costs
+    resolution its best signal. Deliberately narrow, to never glue two genuine
+    entries: only an entry that (a) is the first on a *later* page than its
+    predecessor, (b) has no paired number region and no leading "[N]"/"N." marker of
+    its own, and (c) starts continuation-like -- lowercase first word that is not a
+    surname particle (see ``_SURNAME_PARTICLES``) -- is merged. Chained fragments
+    fold into the same entry one by one.
+    """
+    out: list[dict] = []
+    for ref in references:
+        prev = out[-1] if out else None
+        if (
+            prev is not None
+            and ref["page"] > prev["page"]
+            and ref.get("number") is None
+            and not _LEADING_REFERENCE_NUMBER_RE.match(ref["text"])
+            and _looks_like_continuation(ref["text"])
+        ):
+            prev["text"] = _join_split_entry(prev["text"], ref["text"])
+            continue
+        out.append(dict(ref))
+    return out
+
+
 def _warn_reference_gaps(references: list[dict]) -> None:
     """Warn (never fix or drop) when a numbered bibliography has holes.
 
@@ -569,7 +622,9 @@ def _build_markdown(
                     references.append({"page": page, "number": region.get("number"), "text": text})
             elif kind == "figure":
                 idx = len(figure_crops.get(page, []))
-                crop_path = _save_figure_crop(region, image_files, used_images, figures_dir, page, idx)
+                crop_path = _save_figure_crop(
+                    region, image_files, used_images, figures_dir, page, idx
+                )
                 if crop_path is None:
                     continue
                 figure_crops.setdefault(page, []).append(crop_path)
@@ -579,6 +634,7 @@ def _build_markdown(
         if body_parts:  # a page can be all references/boilerplate -- no empty part then
             parts.append("\n\n".join(body_parts))
 
+    references = _merge_split_references(references)
     references = _drop_trailing_boilerplate(references)
     references = _sort_references_by_number(references)
     _warn_reference_gaps(references)

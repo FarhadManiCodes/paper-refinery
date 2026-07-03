@@ -19,6 +19,7 @@ from paper_refinery.parse import (
     _drop_trailing_boilerplate,
     _html_table_to_markdown,
     _merge_reference_numbers,
+    _merge_split_references,
     _reading_order,
     _reclaim_mislabeled_references,
     _render_references_markdown,
@@ -161,12 +162,7 @@ def test_html_table_duplicates_colspan_value():
 
 
 def test_html_table_duplicates_rowspan_value():
-    html = (
-        "<table>"
-        "<tr><td rowspan='2'>Method</td><td>1</td></tr>"
-        "<tr><td>2</td></tr>"
-        "</table>"
-    )
+    html = "<table><tr><td rowspan='2'>Method</td><td>1</td></tr><tr><td>2</td></tr></table>"
     md = _html_table_to_markdown(html)
     lines = md.splitlines()
     assert lines[0] == "| Method | 1 |"
@@ -304,6 +300,71 @@ def test_drop_trailing_boilerplate_handles_empty_list():
 # ---------------------------------------------------------------------------
 # _sort_references_by_number
 # ---------------------------------------------------------------------------
+
+
+def test_merge_split_references_glues_page_break_url_split():
+    # the fmech case: ref 28 ends page 9 mid-URL; page 10 opens with its tail
+    refs = [
+        _ref("Quiban, R. (2019). Churning losses. https://journals.sagepub.", page=9),
+        _ref("com/home/pij Proc. Inst. Mech. Eng. doi: 10.1177/1350650119858236", page=10),
+    ]
+    merged = _merge_split_references(refs)
+    assert len(merged) == 1
+    assert "https://journals.sagepub.com/home/pij" in merged[0]["text"]  # no space in URL
+    assert merged[0]["page"] == 9
+
+
+def test_merge_split_references_joins_word_split_with_space():
+    refs = [
+        _ref("Quiban, R. (2019). Churning losses of spiral bevel", page=9),
+        _ref("gears at high rotational speed. J. Tribol.", page=10),
+    ]
+    merged = _merge_split_references(refs)
+    assert len(merged) == 1
+    assert "spiral bevel gears at high" in merged[0]["text"]
+
+
+def test_merge_split_references_keeps_surname_particle_entry():
+    # "van Wijk" legitimately starts an entry -- lowercase alone must not merge it
+    refs = [
+        _ref("Turner, A. (2013). Two phase CFD modelling.", page=9),
+        _ref("van Wijk, J. (2010). Parametric modelling.", page=10),
+    ]
+    assert len(_merge_split_references(refs)) == 2
+
+
+def test_merge_split_references_requires_page_change():
+    # a lowercase fragment mid-page is NOT the page-break split this rule targets
+    refs = [
+        _ref("Turner, A. (2013). Two phase CFD modelling.", page=9),
+        _ref("com/home/pij continuation-looking text", page=9),
+    ]
+    assert len(_merge_split_references(refs)) == 2
+
+
+def test_merge_split_references_keeps_numbered_entries():
+    refs = [
+        _ref("[28] Quiban, R. Churning losses.", page=9),
+        _ref("[29] Saurer, J. Instationaren.", page=10),
+        _ref("Webb, T. (2010).", page=10, number="30"),
+    ]
+    assert len(_merge_split_references(refs)) == 3
+
+
+def test_merge_split_references_chains_fragments():
+    # two continuation regions on the later page fold into the same entry in order
+    refs = [
+        _ref("Quiban, R. (2019). Churning losses of spiral", page=9),
+        _ref("bevel gears at high", page=10),
+        _ref("rotational speed. J. Tribol.", page=10),
+        _ref("Saurer, J. (2000). Instationaren.", page=10),
+    ]
+    merged = _merge_split_references(refs)
+    assert len(merged) == 2
+    assert merged[0]["text"] == (
+        "Quiban, R. (2019). Churning losses of spiral bevel gears at high "
+        "rotational speed. J. Tribol."
+    )
 
 
 def test_sort_references_by_number_fixes_scrambled_order():
