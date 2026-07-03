@@ -18,12 +18,14 @@ from paper_refinery.parse import (
     _build_markdown,
     _dispatch_region,
     _dotted_overrides,
+    _drop_trailing_boilerplate,
     _html_table_to_markdown,
     _llama_server,
     _merge_formula_numbers,
     _merge_reference_numbers,
     _render_references_markdown,
     _save_figure_crop,
+    _sort_references_by_number,
 )
 
 
@@ -270,6 +272,130 @@ def test_render_references_markdown_groups_by_page_with_number_prefix():
 
 def test_render_references_markdown_empty_list():
     assert _render_references_markdown([]) == ""
+
+
+# ---------------------------------------------------------------------------
+# _drop_trailing_boilerplate
+# ---------------------------------------------------------------------------
+
+
+def _ref(text: str, page: int = 1, number: str | None = None) -> dict:
+    return {"page": page, "number": number, "text": text}
+
+
+def test_drop_trailing_boilerplate_removes_single_trailing_entry():
+    refs = [
+        _ref("Smith, J. (2020). Real paper."),
+        _ref(
+            "Conflict of Interest: The authors declare that the research was conducted "
+            "in the absence of any commercial or financial relationships."
+        ),
+    ]
+    cleaned = _drop_trailing_boilerplate(refs)
+    assert cleaned == [refs[0]]
+
+
+def test_drop_trailing_boilerplate_removes_multiple_trailing_entries():
+    refs = [
+        _ref("Smith, J. (2020). Real paper."),
+        _ref("Conflict of Interest: none declared."),
+        _ref("Copyright © 2021 Author. This is an open-access article distributed..."),
+    ]
+    cleaned = _drop_trailing_boilerplate(refs)
+    assert cleaned == [refs[0]]
+
+
+def test_drop_trailing_boilerplate_stops_at_first_non_matching_entry():
+    # a real reference sits between two boilerplate-like entries -- only the
+    # *trailing* run should be dropped, not a match buried earlier in the list
+    refs = [
+        _ref("Smith, J. (2020). Real paper."),
+        _ref("Jones, A. On Copyright Law and Academic Publishing. (2019)."),
+        _ref("Conflict of Interest: none declared."),
+    ]
+    cleaned = _drop_trailing_boilerplate(refs)
+    assert cleaned == refs[:2]
+
+
+def test_drop_trailing_boilerplate_caps_how_many_it_checks():
+    # more than _MAX_TRAILING_BOILERPLATE_CHECK consecutive "boilerplate-looking"
+    # entries -- only the last few are dropped, not the whole list
+    refs = [_ref(f"Copyright © 2021. Entry {i}.") for i in range(5)]
+    cleaned = _drop_trailing_boilerplate(refs)
+    assert len(cleaned) == 2
+
+
+def test_drop_trailing_boilerplate_leaves_clean_list_untouched():
+    refs = [_ref("Smith, J. (2020)."), _ref("Jones, A. (2019).")]
+    assert _drop_trailing_boilerplate(refs) == refs
+
+
+def test_drop_trailing_boilerplate_handles_empty_list():
+    assert _drop_trailing_boilerplate([]) == []
+
+
+# ---------------------------------------------------------------------------
+# _sort_references_by_number
+# ---------------------------------------------------------------------------
+
+
+def test_sort_references_by_number_fixes_scrambled_order():
+    # e.g. kalman-1960.pdf's two-column bibliography: region index order doesn't
+    # match reading order, but every entry has a clean numeric marker
+    refs = [_ref("Wiener", number="2"), _ref("Zadeh", number="1"), _ref("Bode", number="3")]
+    sorted_refs = _sort_references_by_number(refs)
+    assert [r["number"] for r in sorted_refs] == ["1", "2", "3"]
+
+
+def test_sort_references_by_number_leaves_unnumbered_style_untouched():
+    # author-year style (e.g. fmech-07-655266.pdf): no numbers at all
+    refs = [_ref("Bianchini"), _ref("Boness"), _ref("Burberi")]
+    assert _sort_references_by_number(refs) == refs
+
+
+def test_sort_references_by_number_leaves_partial_numbering_untouched():
+    # one entry missing its number (e.g. an unpaired reference_content) -- don't
+    # guess at a partial sort, leave detected order as-is
+    refs = [_ref("Wiener", number="2"), _ref("Zadeh", number=None), _ref("Bode", number="3")]
+    assert _sort_references_by_number(refs) == refs
+
+
+def test_sort_references_by_number_leaves_non_numeric_marker_untouched():
+    # a garbled/non-integer marker on at least one entry -- bail out entirely
+    refs = [_ref("Wiener", number="2"), _ref("Zadeh", number="1a")]
+    assert _sort_references_by_number(refs) == refs
+
+
+def test_sort_references_by_number_handles_empty_list():
+    assert _sort_references_by_number([]) == []
+
+
+def test_sort_references_by_number_falls_back_to_leading_number_in_text():
+    # the real kalman-1960.pdf bug: PP-DocLayout-V3 never produces a separate
+    # reference_number region for this paper at all -- the marker is just the leading
+    # digits of the OCR'd text blob itself, so `number` is None on every entry
+    refs = [
+        _ref("2 L. A. Zadeh and J. R. Ragazzini, An Extension of..."),
+        _ref("1 N. Wiener, The Extrapolation, Interpolation..."),
+        _ref("10 R. C. Davis, On the Theory of Prediction..."),
+        _ref("3 H. W. Bode and C. E. Shannon, A Simplified..."),
+    ]
+    sorted_refs = _sort_references_by_number(refs)
+    assert [r["text"][:2].strip() for r in sorted_refs] == ["1", "2", "3", "10"]
+
+
+def test_sort_references_by_number_falls_back_to_bracketed_number_in_text():
+    refs = [_ref("[2] Second entry"), _ref("[1] First entry")]
+    sorted_refs = _sort_references_by_number(refs)
+    assert [r["text"] for r in sorted_refs] == ["[1] First entry", "[2] Second entry"]
+
+
+def test_sort_references_by_number_mixed_region_and_text_number_sources():
+    # one entry has a real paired `number`, another only has it embedded in the text --
+    # both should still contribute a usable sort key
+    refs = [_ref("Second entry", number="2"), _ref("1 First entry")]
+    sorted_refs = _sort_references_by_number(refs)
+    assert sorted_refs[0]["text"] == "1 First entry"
 
 
 # ---------------------------------------------------------------------------

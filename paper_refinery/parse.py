@@ -421,6 +421,94 @@ def _save_figure_crop(
     return crop_path
 
 
+# Back-matter (Conflict of Interest disclosure, copyright/licensing notice) that
+# PP-DocLayout-V3 can misclassify as a reference_content region -- confirmed live on a
+# Frontiers journal paper, where this text sits immediately after the real bibliography
+# in reading order, a plausible source of the misclassification.
+_REFERENCE_BOILERPLATE_SIGNALS = (
+    "conflict of interest",
+    "copyright ©",
+    "creative commons",
+    "open-access article distributed",
+)
+
+
+def _is_reference_boilerplate(text: str) -> bool:
+    """True if ``text`` looks like misclassified back-matter rather than an actual
+    bibliography entry."""
+    lowered = text.lower()
+    return any(signal in lowered for signal in _REFERENCE_BOILERPLATE_SIGNALS)
+
+
+_MAX_TRAILING_BOILERPLATE_CHECK = 3
+
+
+def _drop_trailing_boilerplate(references: list[dict]) -> list[dict]:
+    """Drop a trailing run of misclassified back-matter entries from the bibliography.
+
+    Checks only the last few entries (up to ``_MAX_TRAILING_BOILERPLATE_CHECK``), and
+    only ever removes a *contiguous run starting from the very end* -- stops at the
+    first entry that doesn't match, so a genuine reference is never dropped just for
+    being near the end of the list (e.g. one whose own title happens to mention
+    "copyright"). Sometimes the boilerplate itself splits across more than one entry
+    (e.g. "Conflict of Interest: ..." and "Copyright © ..." as two separate regions),
+    which is why this checks more than just the single last entry.
+    """
+    cleaned = list(references)
+    checked = 0
+    while (
+        cleaned
+        and checked < _MAX_TRAILING_BOILERPLATE_CHECK
+        and _is_reference_boilerplate(cleaned[-1]["text"])
+    ):
+        cleaned.pop()
+        checked += 1
+    return cleaned
+
+
+_LEADING_REFERENCE_NUMBER_RE = re.compile(r"^\s*\[?(\d+)[\]. ]?\s")
+
+
+def _reference_sort_key(ref: dict) -> int | None:
+    """Best-effort integer ordering key for one reference.
+
+    Prefers the region-paired ``number`` field (see ``_merge_reference_numbers``), but
+    that pairing is the *uncommon* case in practice -- confirmed live on kalman-1960.pdf,
+    where PP-DocLayout-V3 never produces a separate reference_number region at all; the
+    marker is just the leading digits of the OCR'd text blob itself (e.g. "2 L. A.
+    Zadeh..."). Falls back to parsing that leading number directly off the text before
+    giving up. Returns ``None`` when neither source yields a clean integer.
+    """
+    raw = ref.get("number")
+    if raw is not None:
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    match = _LEADING_REFERENCE_NUMBER_RE.match(ref["text"])
+    return int(match.group(1)) if match else None
+
+
+def _sort_references_by_number(references: list[dict]) -> list[dict]:
+    """Re-sort references by their best-effort numeric marker, when doing so is
+    unambiguous.
+
+    PP-DocLayout-V3's own region ``index`` (used to order regions before merging, see
+    ``_build_markdown``) isn't always reading order for a multi-column bibliography --
+    confirmed live on kalman-1960.pdf, where two side-by-side columns produced entries
+    out of numeric order (2, 1, 3, 4, 5, 7, 6, ...). Since a numbered bibliography always
+    prints in ascending order, re-sorting by the parsed number is a safe, unambiguous
+    fix -- but only when *every* entry yields a clean integer key (see
+    ``_reference_sort_key``); a style with no numbers at all (author-year, e.g.
+    fmech-07-655266) or a partial/garbled parse is left in detected order rather than
+    guessing at a partial sort.
+    """
+    keys = [_reference_sort_key(ref) for ref in references]
+    if any(key is None for key in keys):
+        return references
+    return [ref for _, ref in sorted(zip(keys, references), key=lambda pair: pair[0])]
+
+
 def _build_markdown(
     pages_regions: list[list[dict]],
     image_files: dict,
@@ -460,6 +548,9 @@ def _build_markdown(
 
         parts.append(page_marker(page))
         parts.append("\n\n".join(body_parts))
+
+    references = _drop_trailing_boilerplate(references)
+    references = _sort_references_by_number(references)
 
     return "\n\n".join(parts), figure_crops, references
 
