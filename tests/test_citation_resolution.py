@@ -254,6 +254,23 @@ def test_accepts_year_within_tolerance(monkeypatch):
     assert out["verified"]
 
 
+def test_provider_year_below_printed_is_kept_out(monkeypatch):
+    # user decision: never pull the year backward -- a provider year below the printed
+    # one is the preprint's (S2 merges preprint+published, reports the earliest year)
+    monkeypatch.setattr(cr, "crossref_search", lambda t, c: None)
+    monkeypatch.setattr(cr, "s2_search", lambda t, c: {**S2_PAPER, "year": 1959})
+    out = cr.verify_and_resolve(dict(EXTRACTED), "no doi", _cfg())
+    assert out["verified"] and out["year"] == 1960  # printed year wins
+
+
+def test_provider_year_above_printed_is_taken(monkeypatch):
+    # the paper cited the preprint; the provider knows the later published version
+    monkeypatch.setattr(cr, "crossref_search", lambda t, c: None)
+    monkeypatch.setattr(cr, "s2_search", lambda t, c: {**S2_PAPER, "year": 1961})
+    out = cr.verify_and_resolve(dict(EXTRACTED), "no doi", _cfg())
+    assert out["verified"] and out["year"] == 1961
+
+
 def test_missing_extracted_year_skips_year_check(monkeypatch):
     monkeypatch.setattr(cr, "crossref_search", lambda t, c: None)
     monkeypatch.setattr(cr, "s2_search", lambda t, c: dict(S2_PAPER))

@@ -477,8 +477,16 @@ def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> d
             candidate["abstract"] = followup["abstract"]
 
     for fld in ("title", "year", "doi", "abstract", "authors"):
-        if candidate.get(fld):
-            out[fld] = candidate[fld]
+        if not candidate.get(fld):
+            continue
+        if fld == "year" and out.get("year") and candidate["year"] < out["year"]:
+            # never pull the year backward (user decision): a provider year *below*
+            # the printed one is the preprint's (S2 merges preprint+published and
+            # reports the earliest year, confirmed live) -- the paper's own printed
+            # year is the published one, keep it. Years still gate acceptance the
+            # same way either side (`_acceptable`).
+            continue
+        out[fld] = candidate[fld]
     out["source"] = candidate.get("source")
     out["provider_type"] = candidate.get("provider_type")
     return {**out, "verified": True, "match": match}
