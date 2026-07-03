@@ -143,6 +143,32 @@ def test_paren_rejects_equation_context():
     assert "(2)" in res.ambiguous
 
 
+def test_paren_eq_context_accepted_above_max_equation_tag():
+    # the brunton case: "...equations (44, 45)" is a genuine citation -- the paper's
+    # own \tag'd equations only go up to [2] here, so 44/45 can't be equation numbers
+    md = (
+        "$$ x = y \\tag{[1]} $$\n\n$$ z \\tag{[2]} $$\n\n"
+        "simulations of the Navier-Stokes equations (44, 45)."
+    )
+    res = link_citations(md, _numbered(50, style="{}."))
+    assert [m.text for m in res.markers] == ["(44, 45)"]
+
+
+def test_paren_eq_context_still_rejected_within_tag_range():
+    md = "$$ x \\tag{[1]} $$\n\n$$ y \\tag{[6]} $$\n\nsee equations (3, 4), while (5) is cited."
+    res = link_citations(md, _numbered(10, style="{}."))
+    assert [m.text for m in res.markers] == ["(5)"]
+    assert "(3, 4)" in res.ambiguous
+
+
+def test_paren_eq_context_rejected_when_no_tags_detected():
+    # no machine-readable equation numbering -> the relaxation has no basis; stay strict
+    md = "as shown in (7), the governing equations (44, 45) are solved."
+    res = link_citations(md, _numbered(50, style="{}."))
+    assert [m.text for m in res.markers] == ["(7)"]
+    assert "(44, 45)" in res.ambiguous
+
+
 def test_paren_rejects_standalone_equation_tag_paragraph():
     md = "Some text before.\n\n(3)\n\nMore text (3) citing."
     res = link_citations(md, _numbered(5, style="{}."))

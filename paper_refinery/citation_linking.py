@@ -133,6 +133,9 @@ def _expand_number_group(group: str) -> list[int] | None:
 _BRACKET_MARKER_RE = re.compile(r"\[(\d{1,3}(?:\s*[,;]\s*\d{1,3}|\s*[-–]\s*\d{1,3})*)\]")
 _PAREN_MARKER_RE = re.compile(r"\((\d{1,3}(?:\s*[,;]\s*\d{1,3}|\s*[-–]\s*\d{1,3})*)\)")
 _EQ_BEFORE_RE = re.compile(r"(?:\bEqs?\.?|\bequations?)\s*$", re.IGNORECASE)
+_EQ_TAG_RE = re.compile(r"\\tag\{\[?(\d{1,3})\]?\}")
+#   display equations OCR'd with an explicit number carry a LaTeX \tag ("\tag{[4]}" in
+#   brunton/PNAS) -- their maximum bounds the paper's equation numbering
 
 
 def _scan_numbered(
@@ -144,10 +147,15 @@ def _scan_numbered(
     rejecting hyco's ``[0,1]`` unit-square interval (0 is never a reference) and
     brunton's out-of-range equation numbers in one rule. Markers inside math spans are
     skipped. The paren form additionally rejects "Eq. (12)"-style contexts and markers
-    that are an entire paragraph on their own (a stray equation-number region).
+    that are an entire paragraph on their own (a stray equation-number region). The
+    Eq-context guard is relaxed (user's idea) when the paper's own equation tags prove
+    the numbers can't be equations: brunton tags its equations [1]-[6], so
+    "Navier-Stokes equations (44, 45)" must be a citation. Only when tags were
+    actually detected -- with none, "equation (3)" stays uncheckable and rejected.
     """
     valid = _number_index(extracted)
     spans = _math_spans(markdown)
+    max_eq_tag = max((int(t) for t in _EQ_TAG_RE.findall(markdown)), default=0)
     pattern = _BRACKET_MARKER_RE if form == "bracket" else _PAREN_MARKER_RE
     markers: list[Marker] = []
     for m in pattern.finditer(markdown):
@@ -161,7 +169,9 @@ def _scan_numbered(
             continue
         if form == "paren":
             before = markdown[max(0, m.start() - 12) : m.start()]
-            if _EQ_BEFORE_RE.search(before):
+            if _EQ_BEFORE_RE.search(before) and not (
+                max_eq_tag and all(n > max_eq_tag for n in numbers)
+            ):
                 ambiguous.append(m.group(0))
                 continue
             # a marker that IS its whole paragraph is an equation tag, not a citation
