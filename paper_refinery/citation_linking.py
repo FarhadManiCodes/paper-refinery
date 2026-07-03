@@ -304,9 +304,12 @@ def link_citations(markdown: str, extracted: list[dict]) -> LinkResult:
 
     ``extracted`` is layer-1 output (citation_extraction.extract_references), aligned
     with the paper's references. Returns all linked markers plus a coverage view:
-    ``uncited`` (references never linked from the body -- detection misses or
-    OCR-corrupted markers) and ``ambiguous`` (candidates a guard rejected, for
-    inspection). The body is never modified here.
+    ``uncited`` (references never linked from the body) and ``ambiguous`` (candidates
+    a guard rejected, for inspection). Both are diagnostic hints, not error signals --
+    an uncited entry can mean a detection miss, an OCR-corrupted marker, a parse-layer
+    artifact (fmech's split-URL fragment), or a reference genuinely never cited in the
+    text, which legitimately happens. Only reading the entry tells which. The body is
+    never modified here.
     """
     result = LinkResult(style=infer_marker_style(extracted), markers=[])
     if not extracted:
