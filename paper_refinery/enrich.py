@@ -136,21 +136,39 @@ def _caption_bbox(
     return None
 
 
+def _axis_gaps(a, b) -> tuple[float, float]:
+    """(x_gap, y_gap) between two boxes; a gap of 0 means the boxes overlap (or
+    touch) on that axis."""
+    x_gap = max(b[0] - a[2], a[0] - b[2], 0.0)
+    y_gap = max(b[1] - a[3], a[1] - b[3], 0.0)
+    return x_gap, y_gap
+
+
+_CLUSTER_GAP_FRACTION = 0.05  # of page span: max gutter between sibling panels
+
+
 def _pair_crops(
     crops: list[CropRegion],
     caption_bboxes: list[tuple[float, float, float, float] | None],
 ) -> dict[int, list[int]]:
     """Assign each crop to a caption geometrically: caption index -> [crop indices].
 
-    A crop belongs to the caption nearest by vertical edge gap among captions with any
-    x-overlap (captions sit directly above/below their figure; horizontal-center
-    distance breaks ties). Captions naturally collect several crops -- that IS the
-    multi-panel case. A crop overlapping no caption horizontally (a banner, a logo)
-    stays unassigned: no rename, no Gemini call. When any bbox is missing, geometry
-    can't be trusted: a single-caption page assigns ALL crops to that caption (the
-    multi-panel assumption -- live: brunton's regex-recovered "Fig. 3." has no region
-    bbox, and its six panel crops have nothing else on the page to belong to);
-    multi-caption pages fall back to positional pairing (crop i <-> caption i).
+    A crop belongs to the nearest caption it overlaps on at least one axis: x-overlap
+    for captions above/below their figure, y-overlap for a SIDE caption (live:
+    brunton's "Fig. 3." caption sits in the right column beside its panels -- an
+    x-overlap-only rule orphaned all six). Distance is the edge gap on the
+    non-overlapping axis, center distance breaking ties; a crop separated from every
+    caption on BOTH axes is a diagonal neighbor of none of them. Captions naturally
+    collect several crops -- that IS the multi-panel case.
+
+    On a single-caption page, unassigned crops then grow the panel cluster: a panel
+    always sits adjacent to a sibling panel (axis overlap + a gutter-sized gap), so
+    a diagonal panel of a large composite joins, while a banner floating far from
+    the cluster stays out -- no rename, no Gemini call.
+
+    When any bbox is missing, geometry can't be trusted at all: a single-caption
+    page assigns ALL crops to that caption; multi-caption pages fall back to
+    positional pairing (crop i <-> caption i).
     """
     if not crops or not caption_bboxes:
         return {}
@@ -158,19 +176,42 @@ def _pair_crops(
         if len(caption_bboxes) == 1:
             return {0: list(range(len(crops)))}
         return {i: [i] for i in range(min(len(crops), len(caption_bboxes)))}
+
     assignment: dict[int, list[int]] = defaultdict(list)
+    unassigned: list[int] = []
     for ci, crop in enumerate(crops):
         best, best_key = None, None
         for ki, box in enumerate(caption_bboxes):
-            overlap = min(crop.bbox[2], box[2]) - max(crop.bbox[0], box[0])
-            if overlap <= 0:
-                continue
-            gap = max(box[1] - crop.bbox[3], crop.bbox[1] - box[3], 0.0)
-            centers = abs((crop.bbox[0] + crop.bbox[2]) - (box[0] + box[2])) / 2
-            if best_key is None or (gap, centers) < best_key:
-                best, best_key = ki, (gap, centers)
+            x_gap, y_gap = _axis_gaps(crop.bbox, box)
+            if x_gap > 0 and y_gap > 0:
+                continue  # separated on both axes: a diagonal neighbor, not this caption
+            cx = (crop.bbox[0] + crop.bbox[2] - box[0] - box[2]) / 2
+            cy = (crop.bbox[1] + crop.bbox[3] - box[1] - box[3]) / 2
+            key = (max(x_gap, y_gap), cx * cx + cy * cy)
+            if best_key is None or key < best_key:
+                best, best_key = ki, key
         if best is not None:
             assignment[best].append(ci)
+        else:
+            unassigned.append(ci)
+
+    if len(caption_bboxes) == 1 and unassigned and assignment:
+        boxes = [c.bbox for c in crops] + [b for b in caption_bboxes if b]
+        span = (max(b[2] for b in boxes) - min(b[0] for b in boxes)) or 1.0
+        near = _CLUSTER_GAP_FRACTION * span
+        member = set(assignment[0])
+        changed = True
+        while changed:
+            changed = False
+            for ci in list(unassigned):
+                for mi in member:
+                    x_gap, y_gap = _axis_gaps(crops[ci].bbox, crops[mi].bbox)
+                    if (x_gap == 0 or y_gap == 0) and max(x_gap, y_gap) <= near:
+                        member.add(ci)
+                        unassigned.remove(ci)
+                        changed = True
+                        break
+        assignment[0] = sorted(member)
     return dict(assignment)
 
 

@@ -418,3 +418,60 @@ def test_enrich_known_filter_still_strict_for_covered_numbers():
 
     out = enrich_markdown(parsed, describe=boom)
     assert "Figure description" not in out
+
+
+def test_enrich_side_caption_pairs_by_y_overlap(tmp_path):
+    # the brunton Fig-3 case: caption in the right column BESIDE its panels -- no
+    # x-overlap with any crop, but full y-overlap
+    panel = tmp_path / "page_5_fig_0.png"
+    panel.write_bytes(b"p")
+    md = (
+        "<page_number>5</page_number>\n\n"
+        f"![FIGURE_CROP 5:0]({panel})\n\n"
+        "Fig. 3. Side caption text.\n\n"
+    )
+    parsed = ParseResult(
+        md,
+        figure_crops={5: [CropRegion(panel, (60, 87, 700, 300))]},
+        figure_captions={5: [CaptionRegion("Fig. 3. Side caption text.", (731, 87, 937, 308))]},
+    )
+    calls = []
+
+    def fake(crops, number, caption, context, cfg):
+        calls.append((number, [c.name for c in crops]))
+        return None
+
+    enrich_markdown(parsed, describe=fake)
+    assert calls == [("3", ["fig_3.png"])]
+
+
+def test_enrich_diagonal_panel_joins_cluster_on_single_caption_page(tmp_path):
+    # side caption top-right; panels fill the page; the bottom-LEFT panel is diagonal
+    # to the caption but adjacent to its sibling panels -> cluster growth pulls it in
+    top = tmp_path / "page_5_fig_0.png"
+    bottom_left = tmp_path / "page_5_fig_1.png"
+    top.write_bytes(b"t")
+    bottom_left.write_bytes(b"bl")
+    md = (
+        "<page_number>5</page_number>\n\n"
+        f"![FIGURE_CROP 5:0]({top})\n\n![FIGURE_CROP 5:1]({bottom_left})\n\n"
+        "Fig. 3. Side caption.\n\n"
+    )
+    parsed = ParseResult(
+        md,
+        figure_crops={
+            5: [
+                CropRegion(top, (60, 87, 700, 300)),  # y-overlaps the caption
+                CropRegion(bottom_left, (60, 320, 400, 600)),  # diagonal to it
+            ]
+        },
+        figure_captions={5: [CaptionRegion("Fig. 3. Side caption.", (731, 87, 937, 308))]},
+    )
+    calls = []
+
+    def fake(crops, number, caption, context, cfg):
+        calls.append((number, [c.name for c in crops]))
+        return None
+
+    enrich_markdown(parsed, describe=fake)
+    assert calls == [("3", ["fig_3_1.png", "fig_3_2.png"])]
