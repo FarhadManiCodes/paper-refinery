@@ -348,9 +348,9 @@ def test_enrich_renames_crop_and_rewrites_link_positional(tmp_path):
     assert f"![FIGURE_CROP 2:0]({crop})" not in out
 
 
-def test_enrich_extra_crop_without_bbox_stays_unmatched(tmp_path):
-    # positional fallback with more crops than captions: the extra crop pairs with
-    # nothing -- name unchanged, no describe call for it
+def test_enrich_single_caption_page_without_geometry_takes_all_crops(tmp_path):
+    # the brunton Fig-3 case: one caption, several crops, no usable bboxes -- the
+    # multi-panel assumption wins: every crop on the page belongs to that caption
     crop0 = tmp_path / "page_2_fig_0.png"
     crop1 = tmp_path / "page_2_fig_1.png"
     crop0.write_bytes(b"a")
@@ -360,9 +360,61 @@ def test_enrich_extra_crop_without_bbox_stays_unmatched(tmp_path):
         f"![FIGURE_CROP 2:0]({crop0})\n\n![FIGURE_CROP 2:1]({crop1})\n\n"
         "FIGURE 5. Only one caption.\n\n"
     )
+    calls = []
+
+    def fake(crops, number, caption, context, cfg):
+        calls.append((number, [c.name for c in crops]))
+        return None
+
     enrich_markdown(
         ParseResult(md, figure_crops={2: [CropRegion(crop0), CropRegion(crop1)]}),
-        describe=lambda *a: None,
+        describe=fake,
     )
-    assert (tmp_path / "fig_5.png").exists()
-    assert crop1.exists()  # unmatched; left as-is
+    assert calls == [("5", ["fig_5_1.png", "fig_5_2.png"])]  # one call, both crops
+
+
+def test_enrich_regex_caption_survives_known_filter_when_number_uncovered(tmp_path):
+    # the layout model produced a caption region for FIGURE 1 but MISSED Fig. 3
+    # entirely (live: brunton page 5): the strict known filter must not orphan 3
+    crop1 = tmp_path / "page_2_fig_0.png"
+    crop3 = tmp_path / "page_5_fig_0.png"
+    crop1.write_bytes(b"one")
+    crop3.write_bytes(b"three")
+    md = (
+        "<page_number>2</page_number>\n\n"
+        f"![FIGURE_CROP 2:0]({crop1})\n\n"
+        "FIGURE 1. Known caption.\n\n"
+        "<page_number>5</page_number>\n\n"
+        f"![FIGURE_CROP 5:0]({crop3})\n\n"
+        "Fig. 3. Regex-only caption the layout model missed.\n\n"
+    )
+    parsed = ParseResult(
+        md,
+        figure_crops={2: [CropRegion(crop1)], 5: [CropRegion(crop3)]},
+        figure_captions={2: [CaptionRegion("FIGURE 1. Known caption.")]},
+    )
+    calls = []
+
+    def fake(crops, number, caption, context, cfg):
+        calls.append(number)
+        return None
+
+    enrich_markdown(parsed, describe=fake)
+    assert sorted(calls) == ["1", "3"]
+    assert (tmp_path / "fig_3.png").exists()
+
+
+def test_enrich_known_filter_still_strict_for_covered_numbers():
+    # FIGURE 7 HAS a caption region: a non-matching line for 7 stays rejected
+    md = "<page_number>2</page_number>\n\nFigure 7 shows the general trend in prose form.\n\n"
+    parsed = ParseResult(
+        md,
+        figure_crops={2: [CropRegion(Path("page_2_fig_0.png"))]},
+        figure_captions={2: [CaptionRegion("Figure 7. The real caption text.")]},
+    )
+
+    def boom(*a):
+        raise AssertionError("the mention must not anchor a describe call")
+
+    out = enrich_markdown(parsed, describe=boom)
+    assert "Figure description" not in out

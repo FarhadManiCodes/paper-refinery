@@ -79,15 +79,33 @@ def _matches_known(line: str, known: set[str]) -> bool:
     return any(k.startswith(line) or line.startswith(k) for k in known)
 
 
+def _known_numbers(known: set[str]) -> set[str]:
+    """Figure numbers that have a layout-model-detected caption (parsed off the known
+    caption texts with the same regex)."""
+    numbers: set[str] = set()
+    for text in known:
+        m = _CAPTION_LINE.match(text)
+        if m:
+            numbers.add(m.group(2))
+    return numbers
+
+
 def _find_captions(markdown: str, known: set[str] | None = None) -> list[_Caption]:
     """One caption per figure number; an ALL-CAPS "FIGURE"/"FIG" line wins over a
     lower-case in-text mention if both forms exist. With ``known`` (normalized
-    figure_title texts from the parse), non-matching lines are rejected outright."""
+    figure_title texts from the parse), non-matching lines are rejected -- but only
+    for numbers the layout model actually produced a caption region for. A number
+    with NO known caption anywhere falls back to pure regex acceptance: the layout
+    model sometimes misses one caption entirely (live: brunton's "Fig. 3." on page 5
+    was plain text to PP-DocLayout-V3, and the strict filter orphaned all six of that
+    figure's panel crops). Line-anchored matching still keeps mid-paragraph mentions
+    out, and the anti-stealing guarantee is unchanged wherever a region exists."""
     caps: dict[str, _Caption] = {}
+    covered = _known_numbers(known) if known else set()
     for m in _CAPTION_LINE.finditer(markdown):
-        if known and not _matches_known(m.group(0), known):
-            continue
         kind, number = m.group(1), m.group(2)
+        if known and number in covered and not _matches_known(m.group(0), known):
+            continue
         text = (m.group(3) or "").strip().strip("*").strip()  # drop leaked markdown bold
         upper = kind.isupper()
         cur = caps.get(number)
@@ -128,12 +146,17 @@ def _pair_crops(
     x-overlap (captions sit directly above/below their figure; horizontal-center
     distance breaks ties). Captions naturally collect several crops -- that IS the
     multi-panel case. A crop overlapping no caption horizontally (a banner, a logo)
-    stays unassigned: no rename, no Gemini call. Falls back to positional pairing
-    (crop i <-> caption i, the old behavior) whenever any bbox is missing.
+    stays unassigned: no rename, no Gemini call. When any bbox is missing, geometry
+    can't be trusted: a single-caption page assigns ALL crops to that caption (the
+    multi-panel assumption -- live: brunton's regex-recovered "Fig. 3." has no region
+    bbox, and its six panel crops have nothing else on the page to belong to);
+    multi-caption pages fall back to positional pairing (crop i <-> caption i).
     """
     if not crops or not caption_bboxes:
         return {}
     if any(c.bbox is None for c in crops) or any(b is None for b in caption_bboxes):
+        if len(caption_bboxes) == 1:
+            return {0: list(range(len(crops)))}
         return {i: [i] for i in range(min(len(crops), len(caption_bboxes)))}
     assignment: dict[int, list[int]] = defaultdict(list)
     for ci, crop in enumerate(crops):
