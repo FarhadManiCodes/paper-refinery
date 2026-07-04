@@ -211,9 +211,7 @@ def enrich_markdown(
             desc = results.get(caption.number, "")
             if not desc:
                 continue
-            insertions.append(
-                (caption.line_end, f"\n\n> **Figure description (auto):** {desc}")
-            )
+            insertions.append((caption.line_end, f"\n\n> **Figure description (auto):** {desc}"))
 
     # apply back-to-front so earlier offsets stay valid
     for offset, text in sorted(insertions, key=lambda it: it[0], reverse=True):

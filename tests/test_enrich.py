@@ -199,7 +199,9 @@ def test_enrich_leaves_unmatched_crop_name_unchanged(tmp_path):
         f"![FIGURE_CROP 2:0]({crop0})\n\n![FIGURE_CROP 2:1]({crop1})\n\n"
         "FIGURE 5. Only one caption.\n\n"
     )
-    enrich_markdown(ParseResult(md, figure_crops={2: [crop0, crop1]}), describe=lambda c, q, cfg: {})
+    enrich_markdown(
+        ParseResult(md, figure_crops={2: [crop0, crop1]}), describe=lambda c, q, cfg: {}
+    )
 
     assert (tmp_path / "fig_5.png").exists()
     assert crop1.exists()  # unmatched; left as-is

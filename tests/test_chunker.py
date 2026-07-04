@@ -48,8 +48,9 @@ def test_overlap_short_prev_returns_all():
 
 
 def test_overlap_present_on_every_non_first_chunk():
-    cfg = ChunkConfig(max_chars=100_000, min_chars=300,
-                      overlap_lo=200, overlap_hi=400, overlap_ideal=300)
+    cfg = ChunkConfig(
+        max_chars=100_000, min_chars=300, overlap_lo=200, overlap_hi=400, overlap_ideal=300
+    )
     md = f"## A\n\n{_prose('alpha', 60)}\n\n## B\n\n{_prose('beta', 60)}\n\n## C\n\n{_prose('c', 60)}"
     chunks = chunk_markdown(md, cfg)
     assert chunks[0].overlap_chars == 0
@@ -69,7 +70,9 @@ def test_pages_resolved_and_markers_stripped():
 
 def test_page_inherited_when_no_marker():
     cfg = ChunkConfig(max_chars=100_000, min_chars=1)
-    md = f"## A\n\n<page_number>5</page_number>\n{_prose('alpha', 5)}\n\n## B\n\n{_prose('beta', 5)}"
+    md = (
+        f"## A\n\n<page_number>5</page_number>\n{_prose('alpha', 5)}\n\n## B\n\n{_prose('beta', 5)}"
+    )
     chunks = chunk_markdown(md, cfg)
     assert chunks[-1].page_start == 5  # B has no marker -> inherits page 5
 

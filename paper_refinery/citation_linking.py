@@ -36,7 +36,7 @@ _NUMBERED_KEY_RE = re.compile(r"^\[?\(?\d+[]).]?$")
 
 
 def infer_marker_style(extracted: list[dict]) -> str:
-    """"numbered" | "author-year", by majority over layer-1 citation_keys.
+    """ "numbered" | "author-year", by majority over layer-1 citation_keys.
 
     Mostly-null keys mean the bibliography prints no markers at all -> author-year.
     Deliberately NOT distinguishing bracket from bare/paren numbering here: the
@@ -109,7 +109,7 @@ _MAX_RANGE_SPAN = 50  # a "[12-14]" style range wider than this is not a citatio
 
 
 def _expand_number_group(group: str) -> list[int] | None:
-    """"7, 8" / "12-14" / "3" -> explicit numbers; None if any part isn't citation-like."""
+    """ "7, 8" / "12-14" / "3" -> explicit numbers; None if any part isn't citation-like."""
     numbers: list[int] = []
     for part in re.split(r"[,;]", group):
         part = part.strip()
@@ -181,7 +181,9 @@ def _scan_numbered(
             para_start = markdown.rfind("\n\n", 0, m.start()) + 2
             para_end = markdown.find("\n\n", m.end())
             para_end = para_end if para_end != -1 else len(markdown)
-            if not (markdown[para_start : m.start()].strip() or markdown[m.end() : para_end].strip()):
+            if not (
+                markdown[para_start : m.start()].strip() or markdown[m.end() : para_end].strip()
+            ):
                 ambiguous.append(m.group(0))
                 continue
         markers.append(Marker(m.start(), m.end(), m.group(0), [valid[n] for n in numbers]))

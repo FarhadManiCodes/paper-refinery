@@ -75,8 +75,10 @@ def test_llama_server_raises_cleanly_on_early_exit(monkeypatch):
     # uncommon port: the pre-flight _ensure_port_free must not trip over a real
     # llama-server that happens to be running on the default 8080 during tests
     cfg = ParseConfig(
-        model_path="/x/model.gguf", mmproj_path="/x/mmproj.gguf",
-        startup_timeout_s=5, port=59173,
+        model_path="/x/model.gguf",
+        mmproj_path="/x/mmproj.gguf",
+        startup_timeout_s=5,
+        port=59173,
     )
     with pytest.raises(RuntimeError, match="exited early"):
         with _llama_server(cfg):

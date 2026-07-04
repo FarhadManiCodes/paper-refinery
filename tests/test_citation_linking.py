@@ -121,7 +121,11 @@ def test_bracket_evidence_decisive_over_higher_paren_count():
     )
     res = link_citations(md, _numbered(5))
     assert res.style == "numbered-bracket"
-    assert [m.text for m in res.markers] == ["[1]", "[2]", "[3]"]  # unknown number -> rejected, not mislinked
+    assert [m.text for m in res.markers] == [
+        "[1]",
+        "[2]",
+        "[3]",
+    ]  # unknown number -> rejected, not mislinked
 
 
 # ---------------------------------------------------------------------------
@@ -202,9 +206,7 @@ def test_author_year_et_al_and_multi():
 
 def test_author_year_narrative():
     res = link_citations("Vakis et al. (2018) proposed a framework.", AY)
-    assert [(m.text, m.ref_indices) for m in res.markers] == [
-        ("Vakis et al. (2018)", [2])
-    ]
+    assert [(m.text, m.ref_indices) for m in res.markers] == [("Vakis et al. (2018)", [2])]
 
 
 def test_author_year_matches_across_diacritic_inconsistency():

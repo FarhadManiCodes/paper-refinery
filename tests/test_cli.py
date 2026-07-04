@@ -24,9 +24,7 @@ def test_relativize_image_links_leaves_relative_paths_alone():
 
 
 def test_relativize_image_links_handles_multiple_links(tmp_path):
-    md = (
-        f"![a]({tmp_path}/figures/a.png) text ![b]({tmp_path}/other/b.png)"
-    )
+    md = f"![a]({tmp_path}/figures/a.png) text ![b]({tmp_path}/other/b.png)"
     out = _relativize_image_links(md, tmp_path)
     assert "](figures/a.png)" in out
     assert "](other/b.png)" in out

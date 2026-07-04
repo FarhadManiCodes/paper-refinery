@@ -166,9 +166,7 @@ def _load_secrets(dir_path: Path | None = None) -> None:
     """
     from dotenv import load_dotenv
 
-    dir_path = dir_path or Path(
-        os.environ.get("PAPER_REFINERY_SECRETS_DIR", DEFAULT_SECRETS_DIR)
-    )
+    dir_path = dir_path or Path(os.environ.get("PAPER_REFINERY_SECRETS_DIR", DEFAULT_SECRETS_DIR))
     if not dir_path.is_dir():
         return
     for env_file in sorted(dir_path.glob("*.env")):

@@ -140,9 +140,7 @@ _S2_FIELDS = "title,year,abstract,authors,externalIds,publicationTypes"
 
 def s2_by_doi(doi: str, cfg: CitationConfig) -> dict | None:
     url = f"{cfg.s2_api_base}/paper/DOI:{urllib.parse.quote(doi)}?fields={_S2_FIELDS}"
-    return _get_json(
-        url, cfg, headers=_s2_headers(cfg), before_fetch=lambda: _s2_throttle(cfg)
-    )
+    return _get_json(url, cfg, headers=_s2_headers(cfg), before_fetch=lambda: _s2_throttle(cfg))
 
 
 def s2_search(title: str, cfg: CitationConfig) -> dict | None:
@@ -150,9 +148,7 @@ def s2_search(title: str, cfg: CitationConfig) -> dict | None:
         f"{cfg.s2_api_base}/paper/search"
         f"?query={urllib.parse.quote(title)}&fields={_S2_FIELDS}&limit=1"
     )
-    data = _get_json(
-        url, cfg, headers=_s2_headers(cfg), before_fetch=lambda: _s2_throttle(cfg)
-    )
+    data = _get_json(url, cfg, headers=_s2_headers(cfg), before_fetch=lambda: _s2_throttle(cfg))
     hits = (data or {}).get("data") or []
     return hits[0] if hits else None
 
@@ -186,9 +182,7 @@ def reconstruct_openalex_abstract(inverted_index: dict | None) -> str | None:
     and join in order."""
     if not inverted_index:
         return None
-    placed = [
-        (pos, word) for word, positions in inverted_index.items() for pos in positions
-    ]
+    placed = [(pos, word) for word, positions in inverted_index.items() for pos in positions]
     return " ".join(word for _, word in sorted(placed)) or None
 
 
@@ -333,10 +327,7 @@ def _acceptable(extracted: dict, candidate: dict, cfg: CitationConfig) -> bool:
     if similarity >= cfg.title_similarity_relaxed:
         family, cand_family = _first_family(extracted), _first_family(candidate)
         return (
-            year is not None
-            and year == cand_year
-            and family is not None
-            and family == cand_family
+            year is not None and year == cand_year and family is not None and family == cand_family
         )
     return False
 
@@ -572,22 +563,14 @@ def format_resolution_report(extracted: list[dict], resolved: list[dict]) -> str
             continue
         similarity = title_similarity(ext.get("title"), r.get("title"))
         year_ext, year_res = ext.get("year"), r.get("year")
-        year_note = (
-            f"{year_ext}->{year_res}" if year_ext != year_res else f"{year_res}"
-        )
-        gained = [
-            f
-            for f in ("doi", "abstract")
-            if r.get(f) and not ext.get(f)
-        ]
+        year_note = f"{year_ext}->{year_res}" if year_ext != year_res else f"{year_res}"
+        gained = [f for f in ("doi", "abstract") if r.get(f) and not ext.get(f)]
         authors_note = ""
         if r.get("authors") and r.get("authors") != ext.get("authors"):
             authors_note = f" | authors: {_fmt_authors(ext)} -> {_fmt_authors(r)}"
         lines.append(
             f"[{num:>3}] {r.get('match'):<15} title-sim {similarity:.2f} | "
-            f"year {year_note}"
-            + (f" | +{'+'.join(gained)}" if gained else "")
-            + authors_note
+            f"year {year_note}" + (f" | +{'+'.join(gained)}" if gained else "") + authors_note
         )
         lines.append(f"      {(r.get('title') or '')[:90]}")
 
@@ -597,7 +580,9 @@ def format_resolution_report(extracted: list[dict], resolved: list[dict]) -> str
         lines.append(f"UNVERIFIED ({len(unverified)}) -- layer-1 guess kept untouched:")
         for i, r in unverified:
             ext = extracted[i] if i < len(extracted) else {}
-            lines.append(f"[{r.get('number') or '?':>3}] {(ext.get('title') or r.get('raw_text') or '')[:80]}")
+            lines.append(
+                f"[{r.get('number') or '?':>3}] {(ext.get('title') or r.get('raw_text') or '')[:80]}"
+            )
             miss = r.get("near_miss")
             if miss:
                 lines.append(

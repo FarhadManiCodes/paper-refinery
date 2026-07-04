@@ -73,7 +73,12 @@ def test_title_similarity_near_identical_scores_high():
 
 
 def test_title_similarity_unrelated_scores_low():
-    assert cr.title_similarity("A new approach to optimal filtering", "Deep residual learning for image recognition") < 0.5
+    assert (
+        cr.title_similarity(
+            "A new approach to optimal filtering", "Deep residual learning for image recognition"
+        )
+        < 0.5
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +198,9 @@ EXTRACTED = {
 
 def test_doi_first_skips_similarity_entirely(monkeypatch):
     # candidate title is nothing like the extracted one -- a DOI match wins regardless
-    monkeypatch.setattr(cr, "s2_by_doi", lambda doi, cfg: {**S2_PAPER, "title": "Utterly Different"})
+    monkeypatch.setattr(
+        cr, "s2_by_doi", lambda doi, cfg: {**S2_PAPER, "title": "Utterly Different"}
+    )
     monkeypatch.setattr(cr, "s2_search", lambda t, c: pytest.fail("must not title-search"))
     out = cr.verify_and_resolve(dict(EXTRACTED), "Kalman... doi:10.1115/1.3662552", _cfg())
     assert out["verified"] and out["match"] == "doi"
@@ -217,12 +224,15 @@ def test_provider_chain_order_crossref_s2_openalex(monkeypatch):
     monkeypatch.setattr(
         cr,
         "openalex_search",
-        lambda t, c: (calls.append("openalex"), {
-            "display_name": EXTRACTED["title"],
-            "publication_year": 1960,
-            "doi": "https://doi.org/10.1115/1.3662552",
-            "type": "article",
-        })[1],
+        lambda t, c: (
+            calls.append("openalex"),
+            {
+                "display_name": EXTRACTED["title"],
+                "publication_year": 1960,
+                "doi": "https://doi.org/10.1115/1.3662552",
+                "type": "article",
+            },
+        )[1],
     )
     out = cr.verify_and_resolve(dict(EXTRACTED), "no doi here", _cfg())
     assert calls == ["crossref", "s2", "openalex"]
@@ -230,7 +240,9 @@ def test_provider_chain_order_crossref_s2_openalex(monkeypatch):
 
 
 def test_rejects_low_similarity_match(monkeypatch):
-    monkeypatch.setattr(cr, "s2_search", lambda t, c: {**S2_PAPER, "title": "Completely Unrelated Work"})
+    monkeypatch.setattr(
+        cr, "s2_search", lambda t, c: {**S2_PAPER, "title": "Completely Unrelated Work"}
+    )
     monkeypatch.setattr(cr, "crossref_search", lambda t, c: None)
     monkeypatch.setattr(cr, "openalex_search", lambda t, c: None)
     out = cr.verify_and_resolve(dict(EXTRACTED), "no doi", _cfg())
@@ -327,7 +339,9 @@ def test_relaxed_tier_rejects_without_surname_match(monkeypatch):
         "year": 1960,
         "authors": [{"family": "Wiener"}],  # wrong surname -> corroboration fails
     }
-    monkeypatch.setattr(cr, "s2_search", lambda t, c: {**S2_PAPER, "authors": [{"name": "R. E. Kalman"}]})
+    monkeypatch.setattr(
+        cr, "s2_search", lambda t, c: {**S2_PAPER, "authors": [{"name": "R. E. Kalman"}]}
+    )
     monkeypatch.setattr(cr, "crossref_search", lambda t, c: None)
     monkeypatch.setattr(cr, "openalex_search", lambda t, c: None)
     out = cr.verify_and_resolve(garbled, "no doi", _cfg())
@@ -376,9 +390,12 @@ def test_unverified_carries_best_near_miss(monkeypatch):
     monkeypatch.setattr(cr, "s2_search", lambda t, c: {**S2_PAPER, "title": "Unrelated A"})
     monkeypatch.setattr(cr, "crossref_search", lambda t, c: None)
     monkeypatch.setattr(
-        cr, "openalex_search",
-        lambda t, c: {"display_name": "A new approach to linear filtering wrong year",
-                      "publication_year": 1999},
+        cr,
+        "openalex_search",
+        lambda t, c: {
+            "display_name": "A new approach to linear filtering wrong year",
+            "publication_year": 1999,
+        },
     )
     out = cr.verify_and_resolve(dict(EXTRACTED), "no doi", _cfg())
     assert not out["verified"]
@@ -451,15 +468,28 @@ def test_report_summarizes_verified_and_unverified():
     ]
     resolved = [
         {
-            "number": "1", "title": "Paper A", "year": 2020, "doi": "10.1/a",
-            "abstract": "abs", "authors": [{"family": "Ay"}],
-            "verified": True, "match": "doi",
+            "number": "1",
+            "title": "Paper A",
+            "year": 2020,
+            "doi": "10.1/a",
+            "abstract": "abs",
+            "authors": [{"family": "Ay"}],
+            "verified": True,
+            "match": "doi",
         },
         {
-            "number": "2", "title": "Paper B", "year": 2021, "verified": False,
-            "match": None, "raw_text": "2 Paper B...",
-            "near_miss": {"provider": "crossref", "similarity": 0.81,
-                          "title": "Paper B-ish", "year": 2021},
+            "number": "2",
+            "title": "Paper B",
+            "year": 2021,
+            "verified": False,
+            "match": None,
+            "raw_text": "2 Paper B...",
+            "near_miss": {
+                "provider": "crossref",
+                "similarity": 0.81,
+                "title": "Paper B-ish",
+                "year": 2021,
+            },
         },
     ]
     report = cr.format_resolution_report(extracted, resolved)

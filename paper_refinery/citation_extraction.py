@@ -33,7 +33,7 @@ class ExtractedReference(BaseModel):
 
     citation_key: str | None = Field(
         default=None,
-        description='The exact citation marker printed for this entry, if any '
+        description="The exact citation marker printed for this entry, if any "
         '(e.g. "[1]", "[14]", "Smith, 2023"). Null if this bibliography style has no '
         "separate marker.",
     )
@@ -41,9 +41,7 @@ class ExtractedReference(BaseModel):
         description="The work's title, exactly as printed, with residual Markdown "
         "artifacts and trailing punctuation stripped."
     )
-    authors: list[Author] = Field(
-        default_factory=list, description="Authors in the order printed."
-    )
+    authors: list[Author] = Field(default_factory=list, description="Authors in the order printed.")
     year: int | None = Field(default=None, description="Publication year, if printed.")
     container_title: str | None = Field(
         default=None, description="Journal, conference, or book title."
@@ -63,8 +61,8 @@ _PROMPT = (
     "You extract structured bibliographic metadata from unstructured Markdown reference "
     "lists (parsed from academic PDFs). The response shape is enforced by a JSON schema, "
     "so focus entirely on extraction quality and preventing hallucinations:\n\n"
-    "1. Preserve citation keys: capture the exact citation marker (e.g. \"[1]\", \"[14]\", "
-    "or \"Smith, 2023\") associated with each entry, if one is present -- this is the key "
+    '1. Preserve citation keys: capture the exact citation marker (e.g. "[1]", "[14]", '
+    'or "Smith, 2023") associated with each entry, if one is present -- this is the key '
     "for downstream inline-citation resolution.\n"
     "2. Strict faithfulness: extract titles, authors, and venues exactly as written. If a "
     "nullable field (DOI, year, volume, page) is genuinely absent from the input text, "
@@ -73,10 +71,10 @@ _PROMPT = (
     "real-world metadata can differ from what this specific citation prints (a different "
     "version, a typo, a preprint vs. published date).\n"
     "3. Normalize for API search: strip residual Markdown artifacts (**, *, stray "
-    "newlines) and trailing punctuation from the title (\"Attention is all you need.\" -> "
-    "\"Attention is all you need\").\n"
+    'newlines) and trailing punctuation from the title ("Attention is all you need." -> '
+    '"Attention is all you need").\n'
     "4. Author formatting: keep the author list exactly as it appears. Do not abbreviate "
-    "to \"et al.\" unless that is literally printed in the text.\n"
+    'to "et al." unless that is literally printed in the text.\n'
     "5. One entry per line: each numbered line below is meant to be one bibliography "
     "entry, but OCR noise occasionally blurs two entries together. If a line visibly "
     "contains more than one distinct entry (e.g. two citation markers), extract only the "
@@ -101,9 +99,7 @@ def make_client(cfg: CitationConfig):
     return genai.Client(api_key=api_key)
 
 
-def extract_references(
-    raw_texts: list[str], cfg: CitationConfig, client=None
-) -> list[dict]:
+def extract_references(raw_texts: list[str], cfg: CitationConfig, client=None) -> list[dict]:
     """Extract rough structured fields from each raw reference string, in one batched,
     schema-enforced Gemini call.
 
