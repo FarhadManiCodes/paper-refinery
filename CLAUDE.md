@@ -46,8 +46,9 @@ have missed real OCR-ordering bugs.
 ## Architecture
 
 Pipeline stages, each a single-purpose module; `cli.py::_refine` owns all wiring, the
-modules own logic (never call each other except `enrich`→`parse` for its result type
-and `parse`→`references` for bibliography repair):
+modules own logic (never call each other except `enrich`→`parse` for its result type,
+`parse`→`references` for bibliography repair, and `citation_resolution`→
+`citation_providers` for the actual provider HTTP calls):
 
 ```
 backend.py               llama-server + GlmOcr lifecycle; ocr_backend() is reusable across PDFs
@@ -70,11 +71,16 @@ enrich.py                pair crops to captions geometrically (bboxes from parse
 citation_extraction.py   layer 1: one Gemini call -> rough structured reference fields
                           (citation_key/title/authors/year/...); sanitizes Gemini-fabricated
                           numeric citation_keys for markerless bibliographies
+citation_providers.py    HTTP layer for layer 2/3: talks to CrossRef/S2/OpenAlex (one GET
+                          each, disk-cached at ~/.cache/paper-refinery/api-cache) and
+                          normalizes their very different response shapes into one common
+                          candidate shape -- knows how to ask, not what to trust
 citation_resolution.py   layer 2/3: verify/enrich each reference against CrossRef -> S2 ->
                           OpenAlex (DOI-first shortcut, title-similarity + year-tolerance
-                          acceptance), disk-cached (~/.cache/paper-refinery/api-cache); a
-                          verified year never overwrites *below* the printed one (providers
-                          can merge preprint+published and report the earlier year)
+                          acceptance); a verified year never overwrites *below* the printed
+                          one (providers can merge preprint+published and report the
+                          earlier year) -- decides what to trust from citation_providers.py's
+                          answers
 citation_linking.py      layer 4: deterministic (no LLM) in-text marker detection against
                           the layer-1 EXTRACTED (printed-form) entries, plus the
                           resolution-verified-only `[surname_year]` citekey rewrite
