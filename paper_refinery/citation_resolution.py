@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -125,8 +126,6 @@ def _user_agent(cfg: CitationConfig) -> str:
 
 
 def _s2_headers(cfg: CitationConfig) -> dict:
-    import os
-
     key = os.environ.get(cfg.s2_api_key_env or "", "")
     return {"x-api-key": key} if key else {}
 
