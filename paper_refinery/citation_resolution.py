@@ -23,7 +23,6 @@ import os
 import re
 import threading
 import time
-import unicodedata
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +31,7 @@ from pathlib import Path
 
 from .config import CitationConfig
 from .retry import call_with_backoff
+from .text_utils import fold_name, leading_number
 
 # ---------------------------------------------------------------------------
 # DOI extraction (from the RAW OCR text, not the extractor's guess)
@@ -290,17 +290,10 @@ def title_similarity(a: str | None, b: str | None) -> float:
     return SequenceMatcher(None, _normalize_title(a), _normalize_title(b)).ratio()
 
 
-def _fold_name(name: str) -> str:
-    """Lowercased, diacritic-folded surname form (same idea as citation_linking._fold --
-    kept as a local copy so neither citation module imports the other)."""
-    decomposed = unicodedata.normalize("NFKD", name)
-    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).lower()
-
-
 def _first_family(entry: dict) -> str | None:
     authors = entry.get("authors") or []
     family = authors[0].get("family") if authors else None
-    return _fold_name(family) if family else None
+    return fold_name(family) if family else None
 
 
 def _acceptable(extracted: dict, candidate: dict, cfg: CitationConfig) -> bool:
@@ -482,16 +475,6 @@ def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> d
     return {**out, "verified": True, "match": match}
 
 
-_LEADING_NUMBER_RE = re.compile(r"^\s*\[?(\d+)[\]. ]?\s")
-#   deliberately duplicated from parse.py (tiny) rather than imported -- this module
-#   stays free of the parse layer's heavy imports and lifecycle
-
-
-def _leading_number(text: str) -> str | None:
-    m = _LEADING_NUMBER_RE.match(text or "")
-    return m.group(1) if m else None
-
-
 def resolve_references(
     extracted: list[dict], raw_references: list[dict], cfg: CitationConfig
 ) -> list[dict]:
@@ -511,7 +494,7 @@ def resolve_references(
         resolved = verify_and_resolve(padded[i], raw["text"], cfg)
         entry = {
             "page": raw.get("page"),
-            "number": raw.get("number") or _leading_number(raw["text"]),
+            "number": raw.get("number") or leading_number(raw["text"]),
             "raw_text": raw["text"],
             **resolved,
         }

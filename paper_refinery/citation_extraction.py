@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from .config import CitationConfig
 from .retry import call_with_backoff
+from .text_utils import leading_number
 
 
 class Author(BaseModel):
@@ -150,9 +151,6 @@ def extract_references(raw_texts: list[str], cfg: CitationConfig, client=None) -
 
 
 _NUMERIC_KEY_RE = re.compile(r"\[?\(?(\d+)[\]).]?")  # a pure marker form: [12] / 12. / (12) / 12
-_LEADING_NUMBER_RE = re.compile(r"^\s*\[?(\d+)[\]. ]?\s")
-#   deliberately duplicated tiny regex (parse.py, citation_resolution.py have their own)
-#   rather than importing across module boundaries
 
 
 def _sanitize_citation_keys(raw_texts: list[str], items: list[dict]) -> list[dict]:
@@ -173,7 +171,7 @@ def _sanitize_citation_keys(raw_texts: list[str], items: list[dict]) -> list[dic
         marker = _NUMERIC_KEY_RE.fullmatch(key.strip())
         if marker is None:
             continue  # absent, or not a numeric marker form: nothing to cross-check
-        head = _LEADING_NUMBER_RE.match(raw or "")
-        if head is None or head.group(1) != marker.group(1):
+        head = leading_number(raw)
+        if head is None or head != marker.group(1):
             item.pop("citation_key", None)
     return items

@@ -25,6 +25,7 @@ import warnings
 from pathlib import Path
 
 from .markers import page_marker
+from .text_utils import leading_number
 
 # a bibliography-entry-looking start: "[12] " or "12. " (bracket/dot required -- a bare
 # "2 " would match too much ordinary body text to be safe as a reclaim signal)
@@ -125,7 +126,7 @@ def _merge_split_references(references: list[dict]) -> list[dict]:
             prev is not None
             and ref["page"] > prev["page"]
             and ref.get("number") is None
-            and not _LEADING_REFERENCE_NUMBER_RE.match(ref["text"])
+            and leading_number(ref["text"]) is None
             and _looks_like_continuation(ref["text"])
         ):
             prev["text"] = _join_split_entry(prev["text"], ref["text"])
@@ -287,9 +288,6 @@ def _recover_missing_references(references: list[dict], pdf_path: Path | None) -
     return _splice_missing_from_layer(references, layer_text, missing)
 
 
-_LEADING_REFERENCE_NUMBER_RE = re.compile(r"^\s*\[?(\d+)[\]. ]?\s")
-
-
 def _reference_sort_key(ref: dict) -> int | None:
     """Best-effort integer ordering key for one reference.
 
@@ -307,8 +305,8 @@ def _reference_sort_key(ref: dict) -> int | None:
             return int(raw)
         except ValueError:
             return None
-    match = _LEADING_REFERENCE_NUMBER_RE.match(ref["text"])
-    return int(match.group(1)) if match else None
+    n = leading_number(ref["text"])
+    return int(n) if n is not None else None
 
 
 def _sort_references_by_number(references: list[dict]) -> list[dict]:
