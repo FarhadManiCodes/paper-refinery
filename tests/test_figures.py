@@ -208,3 +208,33 @@ def test_describe_figure_empty_cache_dir_disables_caching(tmp_path):
     describe_figure([crop], "2", "Cap.", {}, cfg, client=_client(parsed, calls))
     describe_figure([crop], "2", "Cap.", {}, cfg, client=_client(parsed, calls))
     assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# orphan combining-mark cleanup (kalman mojibake)
+# ---------------------------------------------------------------------------
+
+
+def test_strip_orphan_combining_drops_glyphs_with_no_base():
+    from paper_refinery.figures import _strip_orphan_combining
+
+    # the live kalman case: a stray combining mark where "Phi" belongs
+    assert (
+        _strip_orphan_combining("through a block labeled ̓(t + 1; t) back")
+        == "through a block labeled (t + 1; t) back"
+    )
+    # start-of-string orphan
+    assert _strip_orphan_combining("̀abc") == "abc"
+
+
+def test_strip_orphan_combining_keeps_genuine_accents():
+    from paper_refinery.figures import _strip_orphan_combining
+
+    decomposed = "Hénon map"  # e + combining acute: a real accent, attached
+    assert _strip_orphan_combining(decomposed) == decomposed
+
+
+def test_describe_figure_cleans_description(tmp_path):
+    parsed = FigureDescription(figure_type="block_diagram", description="gain ̓(t) loop")
+    out = describe_figure([_png(tmp_path)], "1", "Cap.", {}, _cfg(tmp_path), client=_client(parsed))
+    assert out["description"] == "gain (t) loop"

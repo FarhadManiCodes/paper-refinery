@@ -89,6 +89,9 @@ class FigureConfig:
         "are visibly plotted in the image.\n"
         "- Do not report precise numeric values read off plotted curves -- give "
         "ranges or directions only.\n"
+        "- Write mathematical symbols in plain readable text: Greek letters by name "
+        "(Phi, Sigma, alpha), sub/superscripts inline (x(t+1), P_LG0). Never emit "
+        "isolated combining or diacritical glyphs.\n"
         "- First identify the figure type from the FIGURE TYPES list below, then pay "
         "attention to the aspects that type calls out. Write 2-5 sentences."
     )

@@ -26,6 +26,7 @@ import hashlib
 import io
 import json
 import os
+import unicodedata
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -75,6 +76,24 @@ class FigureDescription(BaseModel):
     description: str = Field(
         description="The visual-only description (2-5 sentences); empty for non_figure."
     )
+
+
+def _strip_orphan_combining(text: str) -> str:
+    """Drop combining marks that have no letter to combine with.
+
+    Live-confirmed on kalman-1960: the model echoes a diagram's Greek glyphs as
+    orphan combining characters (a stray U+0313 where "Phi" belongs), which render as
+    mojibake. A combining mark following a letter is genuine (e.g. a decomposed
+    accent) and stays; one following a space, punctuation, or the start of the string
+    combines with nothing and is dropped. The prompt now asks for Greek-by-name, so
+    this is the belt-and-braces cleanup, not the primary fix.
+    """
+    out: list[str] = []
+    for ch in text:
+        if unicodedata.combining(ch) and (not out or not out[-1].isalpha()):
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 def _crop_bytes(crop: Path, max_px: int) -> bytes:
@@ -195,7 +214,7 @@ def describe_figure(
         return None  # schema coercion failed -- not cached, next run retries
     result: dict | None = {
         "figure_type": parsed.figure_type.strip(),
-        "description": parsed.description.strip(),
+        "description": _strip_orphan_combining(parsed.description).strip(),
     }
     if result["figure_type"] == "non_figure" or not result["description"]:
         result = None
