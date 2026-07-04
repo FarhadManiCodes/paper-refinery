@@ -7,6 +7,7 @@ import pytest
 from paper_refinery.citation_extraction import (
     Author,
     ExtractedReference,
+    _sanitize_citation_keys,
     extract_references,
     make_client,
 )
@@ -157,3 +158,36 @@ def test_extract_references_sends_schema_and_deterministic_config():
     assert seen["model"] == "gemini-3.1-flash-lite"
     assert seen["config"].temperature == 0.0
     assert seen["config"].response_mime_type == "application/json"
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_citation_keys (fabricated-key guard)
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_drops_fabricated_keys_for_markerless_bibliography():
+    # the live fmech failure: Gemini invented "1."/"2."/... for an author-year
+    # bibliography that prints no markers -- style inference then flips to numbered
+    raws = ["Bianchini, C. (2017). Windage losses.", "Boness, R. J. (1989). Churning."]
+    items = [{"citation_key": "1.", "title": "A"}, {"citation_key": "2.", "title": "B"}]
+    out = _sanitize_citation_keys(raws, items)
+    assert all("citation_key" not in item for item in out)
+
+
+def test_sanitize_keeps_keys_confirmed_by_raw_text_head():
+    raws = ["[6] Liverani, L. (2025).", "3. Bongard J (2007).", "2 L. A. Zadeh (1950)."]
+    items = [{"citation_key": "[6]"}, {"citation_key": "3."}, {"citation_key": "2"}]
+    out = _sanitize_citation_keys(raws, items)
+    assert [i.get("citation_key") for i in out] == ["[6]", "3.", "2"]
+
+
+def test_sanitize_drops_key_whose_number_mismatches_raw_head():
+    out = _sanitize_citation_keys(["12. Smith, J."], [{"citation_key": "13."}])
+    assert "citation_key" not in out[0]
+
+
+def test_sanitize_leaves_absent_and_non_numeric_keys_alone():
+    raws = ["Smith, J. (2020).", "Jones, K. (2021)."]
+    items = [{}, {"citation_key": "Jones2021"}]
+    out = _sanitize_citation_keys(raws, items)
+    assert out[0] == {} and out[1]["citation_key"] == "Jones2021"

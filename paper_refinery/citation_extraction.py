@@ -11,6 +11,7 @@ separate concern, deliberately not this file's job.
 from __future__ import annotations
 
 import os
+import re
 import warnings
 
 from pydantic import BaseModel, Field
@@ -144,4 +145,35 @@ def extract_references(raw_texts: list[str], cfg: CitationConfig, client=None) -
             f"extract_references: got {len(items)} items for {len(raw_texts)} input "
             "lines; padding/truncating to align by position"
         )
-    return (items + [{}] * len(raw_texts))[: len(raw_texts)]
+    items = (items + [{}] * len(raw_texts))[: len(raw_texts)]
+    return _sanitize_citation_keys(raw_texts, items)
+
+
+_NUMERIC_KEY_RE = re.compile(r"\[?\(?(\d+)[\]).]?")  # a pure marker form: [12] / 12. / (12) / 12
+_LEADING_NUMBER_RE = re.compile(r"^\s*\[?(\d+)[\]. ]?\s")
+#   deliberately duplicated tiny regex (parse.py, citation_resolution.py have their own)
+#   rather than importing across module boundaries
+
+
+def _sanitize_citation_keys(raw_texts: list[str], items: list[dict]) -> list[dict]:
+    """Drop fabricated citation_keys: a numeric key is only real if the same number is
+    printed at the head of the entry's own raw OCR text.
+
+    Confirmed live (fmech, 2026-07-04): despite temperature 0, one extraction run
+    invented sequential keys "1."-"35." for an author-year bibliography that prints no
+    markers at all -- most plausibly mirroring the prompt listing's own "1./2./..."
+    line numbers. citation_key is exactly what linking's style inference trusts
+    ("declared by the bibliography"), so a fabricated set silently flips an
+    author-year paper to numbered and loses every marker. The cross-check is
+    deterministic and one-sided: genuine "[6] "/"3. "/"2 " heads keep their key,
+    anything unconfirmed loses it (linking treats a missing key positionally).
+    """
+    for raw, item in zip(raw_texts, items):
+        key = item.get("citation_key") or ""
+        marker = _NUMERIC_KEY_RE.fullmatch(key.strip())
+        if marker is None:
+            continue  # absent, or not a numeric marker form: nothing to cross-check
+        head = _LEADING_NUMBER_RE.match(raw or "")
+        if head is None or head.group(1) != marker.group(1):
+            item.pop("citation_key", None)
+    return items
