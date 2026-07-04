@@ -42,15 +42,20 @@ have missed real OCR-ordering bugs.
 ## Architecture
 
 Pipeline stages, each a single-purpose module; `cli.py::_refine` owns all wiring, the
-modules own logic (never call each other except `enrich`→`parse` for its result type):
+modules own logic (never call each other except `enrich`→`parse` for its result type
+and `parse`→`references` for bibliography repair):
 
 ```
-backend.py   llama-server + GlmOcr lifecycle; ocr_backend() is reusable across PDFs
-parse.py     PDF -> ParseResult (body markdown + figure crops + raw references)
-figures.py   describe one page's figure crops via Gemini (one call per page, not per figure)
-enrich.py    splice figure descriptions next to their captions in the markdown
-chunker.py   section-aware split + guaranteed soft-overlap + page ranges -> list[Chunk]
-cli.py       orchestrate the above; write .chunks.json / .refinery.md / .references.md
+backend.py     llama-server + GlmOcr lifecycle; ocr_backend() is reusable across PDFs
+parse.py       PDF -> ParseResult (body markdown + figure crops + raw references)
+references.py  bibliography repair, used only by parse.py: reclaim mislabeled entries,
+               merge page-break splits, drop copyright tails, recover layout-skipped
+               entries from the PDF text layer, contiguity-guarded number sort --
+               every rule exists because a live paper broke the raw list
+figures.py     describe one page's figure crops via Gemini (one call per page, not per figure)
+enrich.py      splice figure descriptions next to their captions in the markdown
+chunker.py     section-aware split + guaranteed soft-overlap + page ranges -> list[Chunk]
+cli.py         orchestrate the above; write .chunks.json / .refinery.md / .references.md
 ```
 
 `citation_extraction.py` (layer 1: one Gemini call → rough structured reference fields) is
