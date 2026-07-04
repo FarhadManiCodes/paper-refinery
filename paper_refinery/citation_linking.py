@@ -16,10 +16,11 @@ a bracketed math interval ``[0,1]`` alongside real ``[N]`` citations (hyco); PNA
 paren citations ``(3, 4)`` colliding with equation numbers (brunton); pure author-year
 with no numbers anywhere (fmech).
 
-Body rewriting to papis ``author_year`` citekeys is a pure function here
-(``rewrite_markers``) so its logic is testable now, but it is deliberately NOT wired
-into the pipeline: citekeys should be built from layer-2/3-verified surnames/years --
-an OCR-corrupted surname would otherwise propagate into every citekey in the body.
+Body rewriting to papis ``author_year`` citekeys (``rewrite_markers``) is wired into
+``cli._refine`` after resolution: citekeys are built from layer-2/3-verified
+surnames/years, never layer-1's raw guess -- an OCR-corrupted surname would otherwise
+propagate into every citekey in the body. A marker is rewritten only when every
+reference it points at has a citekey; anything else is left exactly as printed.
 """
 
 from __future__ import annotations
@@ -361,7 +362,7 @@ def rewrite_markers(markdown: str, markers: list[Marker], citekeys: list[str | N
 
     Pure function, applied back-to-front so offsets stay valid. A marker is rewritten
     only when EVERY reference it points at has a citekey; anything else stays exactly
-    as printed. Not wired into the pipeline until citekeys come from verified data.
+    as printed.
     """
     out = markdown
     for mk in sorted(markers, key=lambda m: m.start, reverse=True):

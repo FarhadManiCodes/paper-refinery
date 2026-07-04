@@ -198,6 +198,77 @@ def test_main_runs_citation_stack_and_writes_citations_json(tmp_path, monkeypatc
     assert "citations: 1/1 verified" in result.output
 
 
+def test_main_rewrites_markers_to_verified_citekeys_before_chunking(tmp_path, monkeypatch):
+    # stage 3b: the printed marker becomes a papis-style citekey built from the
+    # RESOLVED (verified) surname/year, not layer-1's guess -- and the rewrite must
+    # land in both the reviewable refinery.md and the chunks that ship to papis-ask
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    parsed = ParseResult(
+        markdown="Body cites Smith (2019) here.",
+        references=_REFS,
+        references_markdown="[1] Smith...",
+    )
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+    monkeypatch.setattr(cli, "parse_pdf", lambda p, d, c: parsed)
+    monkeypatch.setattr(cli, "make_client", lambda cfg: object())
+    monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
+
+    seen_chunk_input = {}
+
+    def fake_chunk(md, cfg):
+        seen_chunk_input["md"] = md
+        return [Chunk(md, 0, 1, 1)]
+
+    monkeypatch.setattr(cli, "chunk_markdown", fake_chunk)
+
+    extracted = [{"title": "A title", "year": 2019, "authors": [{"family": "Smith"}]}]
+    resolved = [
+        {**extracted[0], "year": 2020, "verified": True, "match": "crossref", "doi": "10.1/x"}
+    ]
+    monkeypatch.setattr(cli, "extract_references", lambda texts, cfg: extracted)
+    monkeypatch.setattr(cli, "resolve_references", lambda ext, refs, cfg: resolved)
+    monkeypatch.setattr(cli, "format_resolution_report", lambda ext, res: "REPORT")
+
+    result = CliRunner().invoke(cli.main, [str(pdf)])
+    assert result.exit_code == 0, result.output
+
+    work_dir = pdf.with_suffix(".refinery")
+    assert (work_dir / "refinery.md").read_text() == "Body cites [smith_2020] here."
+    assert seen_chunk_input["md"] == "Body cites [smith_2020] here."
+
+
+def test_main_leaves_marker_unrewritten_when_citekey_is_missing(tmp_path, monkeypatch):
+    # an unresolved entry (no verified year) yields no citekey -- the marker is left
+    # exactly as printed rather than guessed at
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    parsed = ParseResult(
+        markdown="Body cites Smith (2019) here.",
+        references=_REFS,
+        references_markdown="[1] Smith...",
+    )
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+    monkeypatch.setattr(cli, "parse_pdf", lambda p, d, c: parsed)
+    monkeypatch.setattr(cli, "make_client", lambda cfg: object())
+    monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
+    monkeypatch.setattr(cli, "chunk_markdown", lambda md, cfg: [Chunk(md, 0, 1, 1)])
+
+    extracted = [{"title": "A title", "year": 2019, "authors": [{"family": "Smith"}]}]
+    resolved = [{**extracted[0], "year": None, "verified": False}]
+    monkeypatch.setattr(cli, "extract_references", lambda texts, cfg: extracted)
+    monkeypatch.setattr(cli, "resolve_references", lambda ext, refs, cfg: resolved)
+    monkeypatch.setattr(cli, "format_resolution_report", lambda ext, res: "REPORT")
+
+    result = CliRunner().invoke(cli.main, [str(pdf)])
+    assert result.exit_code == 0, result.output
+
+    work_dir = pdf.with_suffix(".refinery")
+    assert (work_dir / "refinery.md").read_text() == "Body cites Smith (2019) here."
+
+
 def test_main_citation_failure_degrades_to_warning(tmp_path, monkeypatch):
     # the chunks manifest is the primary product: a citation-stage crash (missing
     # API key, providers down) must warn loudly but never fail the run
