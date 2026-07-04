@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import os
 import unicodedata
 from pathlib import Path
@@ -32,6 +31,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from .config import FigureConfig
+from .disk_cache import cache_path, read_json, write_json
 from .retry import call_with_backoff
 
 # (type id, what to pay attention to) -- shown to the model verbatim. Types cover the
@@ -138,13 +138,11 @@ def _cache_path(crops: list[Path], prompt: str, cfg: FigureConfig) -> Path | Non
     """Cache key = sha256 of the crop BYTES + the exact prompt -- renaming a crop file
     (enrich.py renames to fig_N.png) or re-running an unchanged paper never re-bills;
     any change to the pixels, the context, or the prompt text naturally re-describes."""
-    if not cfg.figure_cache_dir:
-        return None
     digest = hashlib.sha256()
     for crop in crops:
         digest.update(Path(crop).read_bytes())
     digest.update(prompt.encode())
-    return Path(cfg.figure_cache_dir).expanduser() / f"{digest.hexdigest()}.json"
+    return cache_path(cfg.figure_cache_dir, digest.hexdigest())
 
 
 def make_client(cfg: FigureConfig | None = None):
@@ -184,11 +182,8 @@ def describe_figure(
         return None
     prompt = build_prompt(number, caption, context or {}, cfg)
     cache = _cache_path(crops, prompt, cfg)
-    if cache and cache.exists():
-        try:
-            data = json.loads(cache.read_text())
-        except ValueError:
-            data = None  # corrupt entry: fall through to a real call
+    if cache:
+        data = read_json(cache)  # None on a cache miss or a corrupt entry alike
         if isinstance(data, dict):
             return data or None  # {} is a cached non_figure verdict
 
@@ -219,6 +214,5 @@ def describe_figure(
     if result["figure_type"] == "non_figure" or not result["description"]:
         result = None
     if cache:
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps(result or {}))
+        write_json(cache, result or {})
     return result

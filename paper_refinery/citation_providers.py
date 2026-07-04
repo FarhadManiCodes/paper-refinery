@@ -20,6 +20,7 @@ import urllib.request
 from pathlib import Path
 
 from .config import CitationConfig
+from .disk_cache import cache_path, read_json, write_json
 from .retry import call_with_backoff
 
 # ---------------------------------------------------------------------------
@@ -61,10 +62,7 @@ def _s2_throttle(cfg: CitationConfig) -> None:
 
 
 def _cache_path(url: str, cfg: CitationConfig) -> Path | None:
-    if not cfg.api_cache_dir:
-        return None
-    digest = hashlib.sha256(url.encode()).hexdigest()
-    return Path(cfg.api_cache_dir).expanduser() / f"{digest}.json"
+    return cache_path(cfg.api_cache_dir, hashlib.sha256(url.encode()).hexdigest())
 
 
 def _get_json(
@@ -81,11 +79,10 @@ def _get_json(
     status on ``.code``, so retry.is_retryable's 429/5xx-vs-4xx split applies as-is.
     """
     cache = _cache_path(url, cfg)
-    if cache and cache.exists():
-        try:
-            return json.loads(cache.read_text())
-        except ValueError:
-            pass  # corrupt cache entry: fall through to a real fetch
+    if cache:
+        cached = read_json(cache)  # None on a cache miss or a corrupt entry alike
+        if cached is not None:
+            return cached
 
     base_headers = {"User-Agent": _user_agent(cfg)}
     base_headers.update(headers or {})
@@ -102,8 +99,7 @@ def _get_json(
     except Exception:
         return None
     if cache and data is not None:
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps(data))
+        write_json(cache, data)
     return data
 
 
