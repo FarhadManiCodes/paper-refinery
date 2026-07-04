@@ -27,7 +27,7 @@ from .citation_linking import link_citations
 from .citation_resolution import format_resolution_report, resolve_references
 from .config import RefineryConfig, load_config
 from .enrich import enrich_markdown
-from .figures import describe_page_figures, make_client
+from .figures import describe_figure, make_client
 from .parse import ParseResult, parse_pdf
 
 _IMAGE_LINK_RE = re.compile(r"(!\[[^\]]*\]\()([^)\s]+)(\))")
@@ -129,7 +129,7 @@ def _refine(
         describe = None
         if parsed.figure_crops:
             client = make_client(cfg.figure)
-            describe = functools.partial(describe_page_figures, client=client)
+            describe = functools.partial(describe_figure, client=client)
         enriched = enrich_markdown(parsed, cfg.figure, describe=describe)
         enriched = _relativize_image_links(enriched, work_dir)
 

@@ -52,8 +52,13 @@ references.py  bibliography repair, used only by parse.py: reclaim mislabeled en
                merge page-break splits, drop copyright tails, recover layout-skipped
                entries from the PDF text layer, contiguity-guarded number sort --
                every rule exists because a live paper broke the raw list
-figures.py     describe one page's figure crops via Gemini (one call per page, not per figure)
-enrich.py      splice figure descriptions next to their captions in the markdown
+figures.py     describe ONE figure per Gemini call (all its panel crops together):
+               embedded figure-type taxonomy (classify + type-specific attention in the
+               same pass), context used dictionary-only, schema output, disk cache keyed
+               on crop bytes + prompt (~/.cache/paper-refinery/figure-cache)
+enrich.py      pair crops to captions geometrically (bboxes from parse; positional
+               fallback), rename crops to fig_N.png, assemble per-figure context
+               (title/abstract/neighbor paragraphs), splice descriptions after captions
 chunker.py     section-aware split + guaranteed soft-overlap + page ranges -> list[Chunk]
 cli.py         orchestrate the above; write .chunks.json / .refinery.md / .references.md
 ```
@@ -80,9 +85,12 @@ see the plan file referenced in memory.
 - **Figure anchoring is caption-based, not placeholder-based.** Placeholders shift between
   parser runs; the `FIGURE N.M` caption is the stable anchor. When the layout model detected
   caption regions (`ParseResult.figure_captions`), enrich accepts only body lines matching
-  them — the caption regex alone is the fallback. `enrich.py` renames crop files to their
-  figure number (`fig_4.1.png`) by reading-order pairing before any Gemini call, so cropping
-  can be sanity-checked by filename alone.
+  them — the caption regex alone is the fallback. Crops pair with captions *geometrically*
+  (nearest caption with x-overlap, via the bboxes on `CropRegion`/`CaptionRegion`; positional
+  pairing only when geometry is missing): a multi-panel figure's crops all land on one
+  caption (one Gemini call, names `fig_4.1_1.png`…), and a crop overlapping no caption (a
+  banner) is never renamed or described. Renaming happens before any Gemini call, so
+  cropping/pairing can be sanity-checked by filename alone.
 - **Image links are relativized last.** `parse.py` emits absolute crop paths; `cli._refine`
   rewrites them relative to the markdown's own directory (`_relativize_image_links`) at the
   very end, since only `_refine` knows both the crop dir and the final `.md` path. Scratchpad

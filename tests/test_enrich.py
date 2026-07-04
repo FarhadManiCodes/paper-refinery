@@ -1,17 +1,31 @@
-"""Tests for caption-anchored, page-batched figure enrichment (injected describer)."""
+"""Tests for caption-anchored, per-figure enrichment (injected describer).
+
+The describer contract: fake(crops, number, caption, context, cfg) -> dict | None,
+mirroring figures.describe_figure. Geometric pairing fixtures use (x1, y1, x2, y2)
+bboxes with y growing downward, captions sitting below their figures.
+"""
 
 from pathlib import Path
 
 from paper_refinery.config import FigureConfig
-from paper_refinery.enrich import _find_captions, _find_mentions, enrich_markdown
-from paper_refinery.parse import ParseResult
+from paper_refinery.enrich import _find_captions, enrich_markdown
+from paper_refinery.parse import CaptionRegion, CropRegion, ParseResult
 
 MD = (
     "<page_number>1</page_number>\n\n## Intro\n\nWe reference Figure 1 here.\n\n"
     "<page_number>2</page_number>\n\nFIGURE 1. A comparison of methods A and B.\n\n"
     "<page_number>3</page_number>\n\nFIGURE 2. Second figure caption.\n\n"
 )
-CROPS = {2: [Path("page_2_fig_0.png")], 3: [Path("page_3_fig_0.png")]}
+CROPS = {2: [CropRegion(Path("page_2_fig_0.png"))], 3: [CropRegion(Path("page_3_fig_0.png"))]}
+
+
+def _desc(description="DESC", figure_type="line_plot"):
+    return {"figure_type": figure_type, "description": description}
+
+
+# ---------------------------------------------------------------------------
+# _find_captions
+# ---------------------------------------------------------------------------
 
 
 def test_find_captions_with_pages_and_numbers():
@@ -25,12 +39,6 @@ def test_find_captions_prefers_uppercase_over_a_mention_at_line_start():
     md = "Figure 1 shows stuff here in a sentence.\n\nFIGURE 1. The real caption.\n\n"
     caps = {c.number: c for c in _find_captions(md)}
     assert caps["1"].text == "The real caption." and caps["1"].upper
-
-
-def test_find_mentions_excludes_caption():
-    mentions = _find_mentions(MD, "1")
-    assert any("We reference Figure 1" in m for m in mentions)
-    assert not any(m.startswith("FIGURE 1.") for m in mentions)
 
 
 def test_find_captions_matches_fig_abbreviation():
@@ -68,6 +76,11 @@ def test_find_captions_known_prefix_matches_multiline_caption_first_line():
     assert len(caps) == 1 and caps[0].number == "2"
 
 
+# ---------------------------------------------------------------------------
+# enrich_markdown: anchoring + splicing (positional-fallback fixtures, no bboxes)
+# ---------------------------------------------------------------------------
+
+
 def test_enrich_known_captions_stop_mention_stealing_the_anchor():
     # both lines are the same case, so without known captions the *mention* would win
     # (first match). With layout-model captions provided, it can't.
@@ -78,94 +91,241 @@ def test_enrich_known_captions_stop_mention_stealing_the_anchor():
     )
     parsed = ParseResult(
         md,
-        figure_crops={2: [Path("page_2_fig_0.png")]},
-        figure_captions={2: ["Figure 7. The real caption text."]},
+        figure_crops={2: [CropRegion(Path("page_2_fig_0.png"))]},
+        figure_captions={2: [CaptionRegion("Figure 7. The real caption text.")]},
     )
-    out = enrich_markdown(parsed, describe=lambda c, q, cfg: {n: "DESC" for n, _ in q})
-    assert "The real caption text.\n\n> **Figure description (auto):** DESC" in out
+    out = enrich_markdown(parsed, describe=lambda c, n, cap, ctx, cfg: _desc())
+    assert "The real caption text.\n\n> **Figure description (auto, line plot):** DESC" in out
     assert "general trend of the comparison.\n\n> **Figure" not in out
 
 
-def test_enrich_one_call_per_page_and_splices_after_caption():
+def test_enrich_one_call_per_figure_and_splices_after_caption():
     calls = []
 
-    def fake(crops, requests, cfg):
-        calls.append((crops[0].name, [n for n, _ in requests]))
-        return {num: f"DESC-{num}" for num, _ in requests}
+    def fake(crops, number, caption, context, cfg):
+        calls.append((crops[0].name, number))
+        return _desc(f"DESC-{number}")
 
     out = enrich_markdown(ParseResult(MD, figure_crops=CROPS), describe=fake)
-    assert ("page_2_fig_0.png", ["1"]) in calls and ("page_3_fig_0.png", ["2"]) in calls
+    assert ("page_2_fig_0.png", "1") in calls and ("page_3_fig_0.png", "2") in calls
     i1, i2 = out.index("FIGURE 1."), out.index("FIGURE 2.")
     assert i1 < out.index("DESC-1") < i2
     assert i2 < out.index("DESC-2")
 
 
-def test_enrich_batches_multiple_figures_on_one_page():
+def test_enrich_description_label_carries_the_figure_type():
+    out = enrich_markdown(
+        ParseResult(MD, figure_crops=CROPS),
+        describe=lambda c, n, cap, ctx, cfg: _desc("X", "convergence_plot"),
+    )
+    assert "> **Figure description (auto, convergence plot):** X" in out
+
+
+def test_enrich_two_captions_one_page_positional_fallback():
     md = "<page_number>5</page_number>\n\nFIGURE 3. First.\n\nFIGURE 4. Second.\n\n"
     calls = []
 
-    def fake(crops, requests, cfg):
-        calls.append(sorted(n for n, _ in requests))
-        return {num: f"D{num}" for num, _ in requests}
+    def fake(crops, number, caption, context, cfg):
+        calls.append((crops[0].name, number))
+        return _desc(f"D{number}")
 
-    out = enrich_markdown(
-        ParseResult(md, figure_crops={5: [Path("page_5_fig_0.png")]}), describe=fake
-    )
-    assert len(calls) == 1 and calls[0] == ["3", "4"]  # one call, both figures
-    assert "FIGURE 3. First.\n\n> **Figure description (auto):** D3" in out
-    assert "FIGURE 4. Second.\n\n> **Figure description (auto):** D4" in out
-
-
-def test_enrich_sends_all_crops_for_a_multi_figure_page():
-    crops = [Path("page_2_fig_0.png"), Path("page_2_fig_1.png")]
-    captured = {}
-
-    def fake(crops_arg, requests, cfg):
-        captured["crops"] = crops_arg
-        return {n: "D" for n, _ in requests}
-
-    enrich_markdown(ParseResult(MD, figure_crops={2: crops}), describe=fake)
-    assert captured["crops"] == crops
+    crops = {5: [CropRegion(Path("page_5_fig_0.png")), CropRegion(Path("page_5_fig_1.png"))]}
+    out = enrich_markdown(ParseResult(md, figure_crops=crops), describe=fake)
+    # no bboxes anywhere -> crop i pairs with caption i
+    assert sorted(calls) == [("page_5_fig_0.png", "3"), ("page_5_fig_1.png", "4")]
+    assert "FIGURE 3. First.\n\n> **Figure description (auto, line plot):** D3" in out
+    assert "FIGURE 4. Second.\n\n> **Figure description (auto, line plot):** D4" in out
 
 
-def test_enrich_context_is_caption_only_by_default():
-    captured = {}
-
-    def fake(crops, requests, cfg):
-        captured["reqs"] = dict(requests)
-        return {n: "D" for n, _ in requests}
-
-    enrich_markdown(ParseResult(MD, figure_crops={2: [Path("page_2_fig_0.png")]}), describe=fake)
-    assert "comparison of methods A and B" in captured["reqs"]["1"]
-    assert "We reference Figure 1" not in captured["reqs"]["1"]
-
-
-def test_enrich_includes_references_when_enabled():
-    captured = {}
-
-    def fake(crops, requests, cfg):
-        captured["reqs"] = dict(requests)
-        return {n: "D" for n, _ in requests}
-
-    enrich_markdown(
-        ParseResult(MD, figure_crops={2: [Path("page_2_fig_0.png")]}),
-        cfg=FigureConfig(include_references=True),
-        describe=fake,
-    )
-    assert "We reference Figure 1" in captured["reqs"]["1"]
-
-
-def test_enrich_skips_figure_with_no_description():
-    out = enrich_markdown(ParseResult(MD, figure_crops=CROPS), describe=lambda c, q, cfg: {})
-    assert "Figure description (auto)" not in out
+def test_enrich_skips_figure_when_describer_returns_none():
+    out = enrich_markdown(ParseResult(MD, figure_crops=CROPS), describe=lambda *a: None)
+    assert "Figure description" not in out
 
 
 def test_enrich_skips_when_no_crops_for_the_page():
-    out = enrich_markdown(ParseResult(MD, figure_crops={}), describe=lambda c, q, cfg: {"1": "X"})
-    assert "Figure description (auto)" not in out
+    def boom(*a):
+        raise AssertionError("no crops -> no describe call")
+
+    out = enrich_markdown(ParseResult(MD, figure_crops={}), describe=boom)
+    assert "Figure description" not in out
 
 
-def test_enrich_renames_crop_to_its_figure_number_before_describing(tmp_path):
+def test_enrich_failed_describer_warns_and_leaves_figure_undescribed(recwarn):
+    def fake(crops, number, caption, context, cfg):
+        if number == "1":
+            raise RuntimeError("gemini down")
+        return _desc("D2")
+
+    out = enrich_markdown(ParseResult(MD, figure_crops=CROPS), describe=fake)
+    assert "D2" in out and "DESC-1" not in out
+    assert any("FIGURE 1" in str(w.message) for w in recwarn.list)
+
+
+# ---------------------------------------------------------------------------
+# context assembly
+# ---------------------------------------------------------------------------
+
+CONTEXT_MD = (
+    "<page_number>1</page_number>\n\n"
+    "# Churning Losses in Spiral Bevel Gears\n\n"
+    "Author One and Author Two\n\n"
+    + "This paper investigates churning power losses in gearboxes. "
+    * 8  # long => abstract
+    + "\n\n<page_number>2</page_number>\n\n"
+    "## Results\n\n"
+    "The paragraph right before the figure.\n\n"
+    "$$ E = mc^2 $$\n\n"
+    "FIGURE 4. Power loss versus rotational speed.\n\n"
+    "![FIGURE_CROP 2:0](page_2_fig_0.png)\n\n"
+    "The paragraph right after the figure.\n\n"
+    "A second trailing paragraph.\n\n"
+)
+
+
+def test_enrich_builds_title_abstract_and_neighbor_context():
+    captured = {}
+
+    def fake(crops, number, caption, context, cfg):
+        captured.update(context, caption=caption)
+        return _desc()
+
+    enrich_markdown(
+        ParseResult(CONTEXT_MD, figure_crops={2: [CropRegion(Path("page_2_fig_0.png"))]}),
+        describe=fake,
+    )
+    assert captured["title"] == "Churning Losses in Spiral Bevel Gears"
+    assert captured["abstract"].startswith("This paper investigates churning power losses")
+    assert captured["caption"] == "Power loss versus rotational speed."
+    # nearest PROSE neighbors: markers, headings, and math blocks are skipped
+    assert "right before the figure" in captured["before"]
+    assert "E = mc^2" not in captured["before"]
+    assert "right after the figure" in captured["after"]
+    assert "second trailing paragraph" in captured["after"]  # context_paragraphs = 2
+
+
+def test_enrich_context_paragraphs_zero_sends_no_neighbors():
+    captured = {}
+
+    def fake(crops, number, caption, context, cfg):
+        captured.update(context)
+        return _desc()
+
+    enrich_markdown(
+        ParseResult(CONTEXT_MD, figure_crops={2: [CropRegion(Path("page_2_fig_0.png"))]}),
+        cfg=FigureConfig(context_paragraphs=0),
+        describe=fake,
+    )
+    assert captured["before"] == "" and captured["after"] == ""
+
+
+# ---------------------------------------------------------------------------
+# geometric pairing + renaming (bbox fixtures)
+# ---------------------------------------------------------------------------
+
+
+def _geo_md(tmp_path, crops):
+    links = "\n\n".join(f"![FIGURE_CROP 2:{i}]({c})" for i, c in enumerate(crops))
+    return (
+        "<page_number>2</page_number>\n\n"
+        f"{links}\n\n"
+        "FIGURE 1. First caption.\n\nFIGURE 2. Second caption.\n\n"
+    )
+
+
+def test_enrich_geometric_pairing_beats_list_order(tmp_path):
+    # crops listed in the REVERSE of their vertical order: positional pairing would
+    # cross-label them; geometry (each caption sits right under its figure) cannot
+    lower = tmp_path / "page_2_fig_0.png"  # y 200-295, belongs to FIGURE 2 (cap at 300)
+    upper = tmp_path / "page_2_fig_1.png"  # y 0-95, belongs to FIGURE 1 (cap at 100)
+    lower.write_bytes(b"lower")
+    upper.write_bytes(b"upper")
+    parsed = ParseResult(
+        _geo_md(tmp_path, [lower, upper]),
+        figure_crops={
+            2: [CropRegion(lower, (0, 200, 100, 295)), CropRegion(upper, (0, 0, 100, 95))]
+        },
+        figure_captions={
+            2: [
+                CaptionRegion("FIGURE 1. First caption.", (0, 100, 100, 110)),
+                CaptionRegion("FIGURE 2. Second caption.", (0, 300, 100, 310)),
+            ]
+        },
+    )
+    calls = {}
+
+    def fake(crops, number, caption, context, cfg):
+        calls[number] = [c.read_bytes() for c in crops]
+        return None
+
+    enrich_markdown(parsed, describe=fake)
+    assert calls["1"] == [b"upper"] and calls["2"] == [b"lower"]
+    assert (tmp_path / "fig_1.png").read_bytes() == b"upper"
+    assert (tmp_path / "fig_2.png").read_bytes() == b"lower"
+
+
+def test_enrich_multi_panel_crops_share_one_caption_and_call(tmp_path):
+    panel_a = tmp_path / "page_2_fig_0.png"
+    panel_b = tmp_path / "page_2_fig_1.png"
+    panel_a.write_bytes(b"a")
+    panel_b.write_bytes(b"b")
+    md = (
+        "<page_number>2</page_number>\n\n"
+        f"![FIGURE_CROP 2:0]({panel_a})\n\n![FIGURE_CROP 2:1]({panel_b})\n\n"
+        "FIGURE 7. Two panels, one figure.\n\n"
+    )
+    parsed = ParseResult(
+        md,
+        figure_crops={
+            2: [CropRegion(panel_a, (0, 0, 45, 90)), CropRegion(panel_b, (55, 0, 100, 90))]
+        },
+        figure_captions={
+            2: [CaptionRegion("FIGURE 7. Two panels, one figure.", (0, 100, 100, 110))]
+        },
+    )
+    calls = []
+
+    def fake(crops, number, caption, context, cfg):
+        calls.append((number, [c.name for c in crops]))
+        return _desc()
+
+    out = enrich_markdown(parsed, describe=fake)
+    assert calls == [("7", ["fig_7_1.png", "fig_7_2.png"])]  # ONE call, both panels
+    assert f"![FIGURE 7]({tmp_path / 'fig_7_1.png'})" in out
+    assert f"![FIGURE 7]({tmp_path / 'fig_7_2.png'})" in out
+
+
+def test_enrich_crop_with_no_x_overlap_is_left_alone(tmp_path):
+    # a decorative banner in the margin: overlaps no caption horizontally -> no
+    # rename, no describe call, placeholder untouched
+    figure = tmp_path / "page_2_fig_0.png"
+    banner = tmp_path / "page_2_fig_1.png"
+    figure.write_bytes(b"f")
+    banner.write_bytes(b"b")
+    md = (
+        "<page_number>2</page_number>\n\n"
+        f"![FIGURE_CROP 2:0]({figure})\n\n![FIGURE_CROP 2:1]({banner})\n\n"
+        "FIGURE 3. The real figure.\n\n"
+    )
+    parsed = ParseResult(
+        md,
+        figure_crops={
+            2: [CropRegion(figure, (0, 0, 100, 90)), CropRegion(banner, (400, 0, 500, 20))]
+        },
+        figure_captions={2: [CaptionRegion("FIGURE 3. The real figure.", (0, 100, 100, 110))]},
+    )
+    calls = []
+
+    def fake(crops, number, caption, context, cfg):
+        calls.append([c.name for c in crops])
+        return _desc()
+
+    out = enrich_markdown(parsed, describe=fake)
+    assert calls == [["fig_3.png"]]
+    assert banner.exists()  # never renamed
+    assert f"![FIGURE_CROP 2:1]({banner})" in out  # placeholder untouched
+
+
+def test_enrich_renames_crop_and_rewrites_link_positional(tmp_path):
     crop = tmp_path / "page_2_fig_0.png"
     crop.write_bytes(b"fake png bytes")
     md = (
@@ -175,11 +335,11 @@ def test_enrich_renames_crop_to_its_figure_number_before_describing(tmp_path):
     )
     captured = {}
 
-    def fake(crops, requests, cfg):
+    def fake(crops, number, caption, context, cfg):
         captured["crops"] = crops
-        return {n: "D" for n, _ in requests}
+        return _desc()
 
-    out = enrich_markdown(ParseResult(md, figure_crops={2: [crop]}), describe=fake)
+    out = enrich_markdown(ParseResult(md, figure_crops={2: [CropRegion(crop)]}), describe=fake)
 
     renamed = tmp_path / "fig_4.1.png"
     assert renamed.exists() and not crop.exists()
@@ -188,8 +348,9 @@ def test_enrich_renames_crop_to_its_figure_number_before_describing(tmp_path):
     assert f"![FIGURE_CROP 2:0]({crop})" not in out
 
 
-def test_enrich_leaves_unmatched_crop_name_unchanged(tmp_path):
-    # more crops than captions on a page: the extra crop has nothing to pair with
+def test_enrich_extra_crop_without_bbox_stays_unmatched(tmp_path):
+    # positional fallback with more crops than captions: the extra crop pairs with
+    # nothing -- name unchanged, no describe call for it
     crop0 = tmp_path / "page_2_fig_0.png"
     crop1 = tmp_path / "page_2_fig_1.png"
     crop0.write_bytes(b"a")
@@ -200,8 +361,8 @@ def test_enrich_leaves_unmatched_crop_name_unchanged(tmp_path):
         "FIGURE 5. Only one caption.\n\n"
     )
     enrich_markdown(
-        ParseResult(md, figure_crops={2: [crop0, crop1]}), describe=lambda c, q, cfg: {}
+        ParseResult(md, figure_crops={2: [CropRegion(crop0), CropRegion(crop1)]}),
+        describe=lambda *a: None,
     )
-
     assert (tmp_path / "fig_5.png").exists()
     assert crop1.exists()  # unmatched; left as-is

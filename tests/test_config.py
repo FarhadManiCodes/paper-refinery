@@ -49,8 +49,10 @@ def test_parse_config_local_backend_defaults():
     assert c.glmocr_config_overrides == {}
 
 
-def test_figure_prompt_forbids_fabricated_numbers():
-    assert "Do NOT" in FigureConfig().prompt
+def test_figure_prompt_constrains_context_and_numbers():
+    prompt = FigureConfig().prompt
+    assert "ONLY as a" in prompt  # reference text is a dictionary, never summarized
+    assert "Do not report precise numeric values" in prompt
 
 
 def test_figure_config_retry_defaults():

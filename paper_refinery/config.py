@@ -63,24 +63,34 @@ class FigureConfig:
 
     model: str = "gemini-3-flash-preview"  # more accurate figure reading than 2.5-flash
     api_key_env: str = "GOOGLE_API_KEY"
-    skip_marker: str = "NOT_A_FIGURE"  # Gemini omits / flags figures not on the page
-    include_references: bool = False  # also feed in-text "Figure N" mentions as context
-    # (off = caption-only context; cross-referencing is a future improvement)
     max_image_px: int = 1024  # downscale each crop's long side before sending (saves tokens)
     retry_attempts: int = 4  # generate_content attempts before giving up
     retry_base_delay: float = 4.0  # seconds; doubles each retry (4, 8, 16, ...)
-    max_workers: int = 4  # concurrent per-page describe_page_figures calls in enrich.py
-    # One call per page: describe every listed figure, return JSON {number: description}.
+    max_workers: int = 4  # concurrent per-figure describe_figure calls in enrich.py
+    context_paragraphs: int = 2  # body paragraphs on each side of the caption sent as context
+    figure_cache_dir: str = "~/.cache/paper-refinery/figure-cache"
+    #   every schema-valid description (including a definitive non-figure verdict) is
+    #   cached here, keyed by crop bytes + assembled prompt -- re-running an unchanged
+    #   paper makes zero Gemini calls. Sibling of the api-cache; safe to delete anytime.
+    # Critical instructions for the per-figure call; figures.py appends the figure-type
+    # taxonomy and the REFERENCE TEXT block (title/abstract/caption/neighbor paragraphs).
     prompt: str = (
-        "The attached image(s) are cropped figure/chart regions from a scientific "
-        "paper page. Together they contain the figure(s) listed below by caption. "
-        "For EACH listed figure, write a 2-4 "
-        "sentence description for search and retrieval: what is compared, the "
-        "variables/axes, and the qualitative trends or conclusions. Do NOT report "
-        "precise numeric values read off plotted curves — give ranges or directions "
-        "only. Respond with ONLY a JSON object mapping each figure number (as a "
-        'string) to its description, e.g. {"4.1": "...", "4.2": "..."}. If a listed '
-        "figure is not actually present on the page, omit it from the JSON."
+        "You are analyzing ONE figure cropped from a scientific paper (multiple "
+        "attached images are panels of that SAME figure). Provide a strict, "
+        "visual-only description for search and retrieval: what is plotted or "
+        "depicted, the variables/axes/labels, and the qualitative trends or "
+        "relationships visible in the image itself.\n\n"
+        "CRITICAL INSTRUCTIONS:\n"
+        "- The REFERENCE TEXT below is context from the paper. Use it ONLY as a "
+        "dictionary to resolve acronyms, variable names, and axis labels that appear "
+        "in the image.\n"
+        "- Do not summarize the reference text.\n"
+        "- Do not state conclusions, physics, or behaviors from the text unless they "
+        "are visibly plotted in the image.\n"
+        "- Do not report precise numeric values read off plotted curves -- give "
+        "ranges or directions only.\n"
+        "- First identify the figure type from the FIGURE TYPES list below, then pay "
+        "attention to the aspects that type calls out. Write 2-5 sentences."
     )
 
 

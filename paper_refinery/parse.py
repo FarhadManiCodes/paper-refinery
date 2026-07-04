@@ -96,18 +96,41 @@ def _strip_heading_prefix(content: str) -> str:
     return _HEADING_PREFIX_RE.sub("", content)
 
 
+@dataclass(frozen=True)
+class CropRegion:
+    """One saved figure/chart crop with its layout-detected bbox ([x1, y1, x2, y2] in
+    page pixels; None when the layout model gave no well-formed box)."""
+
+    path: Path
+    bbox: tuple[float, float, float, float] | None = None
+
+
+@dataclass(frozen=True)
+class CaptionRegion:
+    """One figure_title region's text + bbox, same coordinate space as CropRegion.
+
+    The bbox is what lets enrich.py pair captions with crops *geometrically* (nearest
+    caption with x-overlap) instead of by position-in-list -- positional pairing
+    mislabels the moment a multi-panel figure splits into more crops than captions.
+    """
+
+    text: str
+    bbox: tuple[float, float, float, float] | None = None
+
+
 @dataclass
 class ParseResult:
     # markdown with one authoritative <page_number>N</page_number> per page boundary,
     # boilerplate/reference regions removed, tables as markdown, formulas as LaTeX
     markdown: str
-    figure_crops: dict[int, list[Path]] = field(default_factory=dict)  # page -> crop paths
-    # figure/table caption texts as detected by the layout model (figure_title regions),
-    # page -> texts in reading order. The same text also stays in `markdown` as plain
+    figure_crops: dict[int, list[CropRegion]] = field(default_factory=dict)  # page -> crops
+    # figure/table captions as detected by the layout model (figure_title regions),
+    # page -> regions in reading order. The same text also stays in `markdown` as plain
     # body content; this field exists so enrich.py can anchor descriptions on known
     # captions instead of regex-guessing them from body text (where an in-text
-    # "Figure 4 shows..." paragraph could otherwise steal the anchor).
-    figure_captions: dict[int, list[str]] = field(default_factory=dict)
+    # "Figure 4 shows..." paragraph could otherwise steal the anchor), and its bboxes
+    # drive geometric crop-to-caption pairing.
+    figure_captions: dict[int, list[CaptionRegion]] = field(default_factory=dict)
     # raw bibliography, routed out of `markdown` entirely -- structuring/linking these
     # is a separate, later concern (not this module's job)
     references: list[dict] = field(default_factory=list)  # [{"page", "number", "text"}, ...]
@@ -330,6 +353,14 @@ def _save_figure_crop(
 # PP-DocLayout-V3 can misclassify as a reference_content region -- confirmed live on a
 # Frontiers journal paper, where this text sits immediately after the real bibliography
 # in reading order, a plausible source of the misclassification.
+def _region_bbox(region: dict) -> tuple[float, float, float, float] | None:
+    """The region's ``bbox_2d`` as an (x1, y1, x2, y2) tuple; None unless well-formed."""
+    box = region.get("bbox_2d")
+    if isinstance(box, (list, tuple)) and len(box) == 4:
+        return tuple(float(v) for v in box)
+    return None
+
+
 _WIDE_FRACTION = 0.6  # of page width: a region this wide spans columns (title, wide table)
 _COLUMN_OVERLAP = 0.5  # of the narrower region's width: x-overlap needed to share a column
 _Y_TOL_FRACTION = 0.01  # of page width: y-difference treated as "same line" (~half a line)
@@ -398,15 +429,15 @@ def _build_markdown(
     figures_dir: Path,
     cfg: ParseConfig,
     pdf_path: Path | None = None,
-) -> tuple[str, dict[int, list[Path]], dict[int, list[str]], list[dict]]:
+) -> tuple[str, dict[int, list[CropRegion]], dict[int, list[CaptionRegion]], list[dict]]:
     """Assemble page-marked markdown, figure crops, known captions, and a raw
     references list from glmocr's per-page region lists.
 
     ``pdf_path`` enables text-layer recovery of skipped bibliography entries
     (``_recover_missing_references``); None (tests, callers without the file) skips it."""
     parts: list[str] = []
-    figure_crops: dict[int, list[Path]] = {}
-    figure_captions: dict[int, list[str]] = {}
+    figure_crops: dict[int, list[CropRegion]] = {}
+    figure_captions: dict[int, list[CaptionRegion]] = {}
     references: list[dict] = []
     used_images: set[str] = set()
 
@@ -426,7 +457,9 @@ def _build_markdown(
             elif kind == "caption":
                 if text.strip():
                     body_parts.append(text)  # stays in the body markdown as-is...
-                    figure_captions.setdefault(page, []).append(text)  # ...and is known
+                    figure_captions.setdefault(page, []).append(  # ...and is known
+                        CaptionRegion(text, _region_bbox(region))
+                    )
             elif kind == "reference":
                 if text.strip():
                     references.append({"page": page, "number": region.get("number"), "text": text})
@@ -437,7 +470,9 @@ def _build_markdown(
                 )
                 if crop_path is None:
                     continue
-                figure_crops.setdefault(page, []).append(crop_path)
+                figure_crops.setdefault(page, []).append(
+                    CropRegion(crop_path, _region_bbox(region))
+                )
                 body_parts.append(f"![FIGURE_CROP {page}:{idx}]({crop_path})")
 
         parts.append(page_marker(page))
@@ -493,6 +528,11 @@ def parse_pdf(
     pdf_path, image_dir = Path(pdf_path), Path(image_dir)
     figures_dir = image_dir / cfg.figures_dir_name
     figures_dir.mkdir(parents=True, exist_ok=True)
+    for stale in (*figures_dir.glob("page_*_fig_*"), *figures_dir.glob("fig_*")):
+        # crops are wholly derived artifacts; leftovers from a previous run (under
+        # either the raw or the enrich-renamed naming) would otherwise accumulate and
+        # break checking crop pairing by filename. Only our own patterns are touched.
+        stale.unlink()
 
     if backend is None:
         with ocr_backend(cfg) as own:

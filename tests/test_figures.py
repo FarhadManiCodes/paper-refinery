@@ -1,108 +1,210 @@
-"""Tests for Gemini figure descriptions (pure helpers; the network call is live-only)."""
+"""Tests for per-figure Gemini description (pure/mocked; the real call is live-only)."""
 
 import io
 
 from paper_refinery.config import FigureConfig
-from paper_refinery.figures import _crop_bytes, _parse, _prompt
+from paper_refinery.figures import FigureDescription, _crop_bytes, build_prompt, describe_figure
 
 
-def test_prompt_lists_each_figure_with_its_caption():
-    cfg = FigureConfig()
-    p = _prompt([("4.1", "Gray-Scott evolution"), ("4.2", "Helmholtz coefficients")], cfg)
-    assert cfg.prompt in p
-    assert "- 4.1: Gray-Scott evolution" in p
-    assert "- 4.2: Helmholtz coefficients" in p
+def _cfg(tmp_path=None, **kw) -> FigureConfig:
+    # never let a unit test touch the real on-disk cache
+    kw.setdefault("figure_cache_dir", str(tmp_path / "cache") if tmp_path else "")
+    return FigureConfig(**kw)
 
 
-def test_parse_reads_number_to_description_json():
-    out = _parse('{"4.1": "desc one", "4.2": "desc two"}', FigureConfig())
-    assert out == {"4.1": "desc one", "4.2": "desc two"}
+def _png(tmp_path, name="crop.png", size=(40, 30), color="red"):
+    from PIL import Image
+
+    path = tmp_path / name
+    Image.new("RGB", size, color).save(path)
+    return path
 
 
-def test_parse_tolerates_fences_and_prose():
-    out = _parse('Sure:\n```json\n{"4.1": "d"}\n```', FigureConfig())
-    assert out == {"4.1": "d"}
+def _client(parsed, calls=None):
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                if calls is not None:
+                    calls.append((model, contents, config))
+                return type("R", (), {"parsed": parsed})()
+
+    return FakeClient()
 
 
-def test_parse_drops_skip_marker_and_handles_garbage():
-    cfg = FigureConfig()
-    assert _parse('{"4.1": "NOT_A_FIGURE", "4.2": "real"}', cfg) == {"4.2": "real"}
-    assert _parse("no json here", cfg) == {}
-    assert _parse(None, cfg) == {}
+# ---------------------------------------------------------------------------
+# build_prompt
+# ---------------------------------------------------------------------------
 
 
-def test_parse_ignores_stray_brace_in_leading_prose():
-    # a greedy \{.*\} regex would span from the example's brace all the way to the
-    # real answer's closing brace, producing malformed JSON and silently losing the
-    # answer -- the real JSON here is the last one, closest '{' to the final '}'
-    text = 'The format looks like {"example": "ignore this"}. Here:\n{"4.1": "real desc"}'
-    assert _parse(text, FigureConfig()) == {"4.1": "real desc"}
+def test_build_prompt_layers_instructions_taxonomy_and_reference_text():
+    cfg = _cfg()
+    context = {
+        "title": "Churning Losses in Gearboxes",
+        "abstract": "We study churning losses.",
+        "before": "The preceding paragraph.",
+        "after": "The succeeding paragraph.",
+    }
+    p = build_prompt("4", "Power loss vs speed.", context, cfg)
+    assert p.startswith(cfg.prompt)
+    assert "- convergence_plot: attend to" in p  # taxonomy embedded
+    assert "- non_figure:" in p
+    assert "Caption: FIGURE 4. Power loss vs speed." in p
+    assert "Title: Churning Losses in Gearboxes" in p
+    assert "Preceding paragraphs: The preceding paragraph." in p
+    assert "Succeeding paragraphs: The succeeding paragraph." in p
+
+
+def test_build_prompt_omits_empty_context_fields():
+    p = build_prompt("2", "A caption.", {"title": "", "abstract": "  "}, _cfg())
+    assert "Title:" not in p
+    assert "Abstract:" not in p
+    assert "Caption: FIGURE 2. A caption." in p
+
+
+# ---------------------------------------------------------------------------
+# _crop_bytes
+# ---------------------------------------------------------------------------
 
 
 def test_crop_bytes_downscales_long_side(tmp_path):
     from PIL import Image
 
-    src = tmp_path / "crop.png"
-    Image.new("RGB", (2000, 2600), "white").save(src)
-    w, h = Image.open(io.BytesIO(_crop_bytes(src, max_px=1024))).size
-    assert 1020 <= max(w, h) <= 1024  # long side at the cap
-    assert h > w  # portrait aspect preserved
+    out = _crop_bytes(_png(tmp_path, size=(400, 200)), max_px=100)
+    img = Image.open(io.BytesIO(out))
+    assert max(img.size) <= 100
 
 
 def test_crop_bytes_does_not_upscale_small_images(tmp_path):
     from PIL import Image
 
-    src = tmp_path / "small.png"
-    Image.new("RGB", (500, 400), "white").save(src)
-    assert Image.open(io.BytesIO(_crop_bytes(src, max_px=1024))).size == (500, 400)
+    out = _crop_bytes(_png(tmp_path, size=(40, 30)), max_px=100)
+    img = Image.open(io.BytesIO(out))
+    assert img.size == (40, 30)
 
 
-def test_describe_page_figures_uses_injected_client(tmp_path):
-    # an injected client means no make_client / no API key needed
-    from PIL import Image
-
-    from paper_refinery.figures import describe_page_figures
-
-    img = tmp_path / "crop.png"
-    Image.new("RGB", (80, 100), "white").save(img)
-
-    class FakeClient:
-        class models:
-            @staticmethod
-            def generate_content(model, contents):
-                return type("R", (), {"text": '{"4.1": "a description"}'})()
-
-    out = describe_page_figures([img], [("4.1", "caption")], client=FakeClient())
-    assert out == {"4.1": "a description"}
+# ---------------------------------------------------------------------------
+# describe_figure
+# ---------------------------------------------------------------------------
 
 
-def test_describe_page_figures_sends_one_image_part_per_crop(tmp_path):
-    from PIL import Image
-
-    from paper_refinery.figures import describe_page_figures
-
-    crop1, crop2 = tmp_path / "c1.png", tmp_path / "c2.png"
-    Image.new("RGB", (40, 40), "white").save(crop1)
-    Image.new("RGB", (40, 40), "white").save(crop2)
-
+def test_describe_figure_returns_type_and_description(tmp_path):
+    crop = _png(tmp_path)
+    parsed = FigureDescription(figure_type="line_plot", description="Two curves compared.")
     calls = []
+    out = describe_figure(
+        [crop], "4", "A caption.", {}, _cfg(tmp_path), client=_client(parsed, calls)
+    )
+    assert out == {"figure_type": "line_plot", "description": "Two curves compared."}
+    # one image part per crop, prompt as the trailing text part
+    (model, contents, config) = calls[0]
+    assert len(contents) == 2
+    assert isinstance(contents[-1], str) and contents[-1].startswith(_cfg().prompt[:20])
+    assert config.response_schema is FigureDescription
 
-    class FakeClient:
+
+def test_describe_figure_sends_all_panels_in_one_call(tmp_path):
+    crops = [_png(tmp_path, "a.png", color="red"), _png(tmp_path, "b.png", color="blue")]
+    parsed = FigureDescription(figure_type="multi_panel_composite", description="Panels.")
+    calls = []
+    describe_figure(crops, "3", "Cap.", {}, _cfg(tmp_path), client=_client(parsed, calls))
+    assert len(calls[0][1]) == 3  # two image parts + one prompt
+
+
+def test_describe_figure_non_figure_returns_none(tmp_path):
+    parsed = FigureDescription(figure_type="non_figure", description="")
+    out = describe_figure(
+        [_png(tmp_path)], "1", "Banner.", {}, _cfg(tmp_path), client=_client(parsed)
+    )
+    assert out is None
+
+
+def test_describe_figure_empty_description_returns_none(tmp_path):
+    parsed = FigureDescription(figure_type="line_plot", description="   ")
+    out = describe_figure([_png(tmp_path)], "1", "Cap.", {}, _cfg(tmp_path), client=_client(parsed))
+    assert out is None
+
+
+def test_describe_figure_no_crops_returns_none():
+    def boom():
+        raise AssertionError("no client should be built")
+
+    assert describe_figure([], "1", "Cap.", {}, _cfg(), client=boom) is None
+
+
+# ---------------------------------------------------------------------------
+# the disk cache
+# ---------------------------------------------------------------------------
+
+
+def test_describe_figure_cache_hit_skips_the_call(tmp_path):
+    crop = _png(tmp_path)
+    cfg = _cfg(tmp_path)
+    parsed = FigureDescription(figure_type="mesh_discretization", description="A mesh.")
+    calls = []
+    first = describe_figure([crop], "2", "Cap.", {}, cfg, client=_client(parsed, calls))
+
+    class ExplodingClient:
         class models:
             @staticmethod
-            def generate_content(model, contents):
-                calls.append(contents)
-                return type("R", (), {"text": '{"1": "d1", "2": "d2"}'})()
+            def generate_content(model, contents, config):
+                raise AssertionError("cache hit must not call Gemini")
 
-    out = describe_page_figures(
-        [crop1, crop2], [("1", "cap one"), ("2", "cap two")], client=FakeClient()
-    )
-    assert out == {"1": "d1", "2": "d2"}
-    # two image parts + one trailing text prompt
-    assert len(calls[0]) == 3
+    second = describe_figure([crop], "2", "Cap.", {}, cfg, client=ExplodingClient())
+    assert first == second and len(calls) == 1
 
 
-def test_describe_page_figures_returns_empty_without_crops():
-    from paper_refinery.figures import describe_page_figures
+def test_describe_figure_cache_key_includes_context(tmp_path):
+    # different context -> different prompt -> a fresh call, not a stale cache hit
+    crop = _png(tmp_path)
+    cfg = _cfg(tmp_path)
+    calls = []
+    parsed = FigureDescription(figure_type="line_plot", description="D.")
+    describe_figure([crop], "2", "Cap.", {"title": "A"}, cfg, client=_client(parsed, calls))
+    describe_figure([crop], "2", "Cap.", {"title": "B"}, cfg, client=_client(parsed, calls))
+    assert len(calls) == 2
 
-    assert describe_page_figures([], [("1", "cap")], client=object()) == {}
+
+def test_describe_figure_caches_non_figure_verdict(tmp_path):
+    crop = _png(tmp_path)
+    cfg = _cfg(tmp_path)
+    parsed = FigureDescription(figure_type="non_figure", description="")
+    assert describe_figure([crop], "1", "Cap.", {}, cfg, client=_client(parsed)) is None
+
+    class ExplodingClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                raise AssertionError("a cached non_figure verdict must stay free")
+
+    assert describe_figure([crop], "1", "Cap.", {}, cfg, client=ExplodingClient()) is None
+
+
+def test_describe_figure_schema_failure_is_not_cached(tmp_path):
+    crop = _png(tmp_path)
+    cfg = _cfg(tmp_path)
+    assert describe_figure([crop], "1", "Cap.", {}, cfg, client=_client(None)) is None
+    assert not any((tmp_path / "cache").glob("*.json"))  # next run gets to retry
+
+
+def test_describe_figure_rename_does_not_invalidate_cache(tmp_path):
+    # enrich renames crops to fig_N.png AFTER pairing -- the cache keys on bytes
+    crop = _png(tmp_path, "page_2_fig_0.png")
+    cfg = _cfg(tmp_path)
+    parsed = FigureDescription(figure_type="line_plot", description="D.")
+    calls = []
+    describe_figure([crop], "2", "Cap.", {}, cfg, client=_client(parsed, calls))
+    renamed = crop.with_name("fig_2.png")
+    crop.replace(renamed)
+    describe_figure([renamed], "2", "Cap.", {}, cfg, client=_client(parsed, calls))
+    assert len(calls) == 1
+
+
+def test_describe_figure_empty_cache_dir_disables_caching(tmp_path):
+    crop = _png(tmp_path)
+    cfg = _cfg(figure_cache_dir="")
+    parsed = FigureDescription(figure_type="line_plot", description="D.")
+    calls = []
+    describe_figure([crop], "2", "Cap.", {}, cfg, client=_client(parsed, calls))
+    describe_figure([crop], "2", "Cap.", {}, cfg, client=_client(parsed, calls))
+    assert len(calls) == 2

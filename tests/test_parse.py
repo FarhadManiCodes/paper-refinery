@@ -379,7 +379,7 @@ def test_build_markdown_saves_figure_crop_and_inserts_placeholder(tmp_path):
     md, crops, _caps, refs = _build_markdown(pages, image_files, tmp_path, ParseConfig())
 
     assert 1 in crops and len(crops[1]) == 1
-    assert crops[1][0].exists()
+    assert crops[1][0].path.exists()
     assert "FIGURE_CROP 1:0" in md
 
 
@@ -400,7 +400,8 @@ def test_build_markdown_collects_captions_and_keeps_them_in_body(tmp_path):
     ]
     md, _, caps, _ = _build_markdown(pages, {}, tmp_path, ParseConfig())
     assert "FIGURE 2. A comparison of things." in md  # still body markdown...
-    assert caps == {1: ["FIGURE 2. A comparison of things."]}  # ...and known
+    assert [c.text for c in caps[1]] == ["FIGURE 2. A comparison of things."]  # ...and known
+    assert caps[1][0].bbox is None  # fixture region carries no bbox_2d
 
 
 def test_build_markdown_all_reference_page_emits_no_empty_part(tmp_path):
@@ -470,6 +471,23 @@ def test_parse_pdf_with_backend_builds_full_result(tmp_path):
     assert "Smith" not in result.markdown
     assert len(result.references) == 1
     assert "1. Smith J (2020) Things." in result.references_markdown
+
+
+def test_parse_pdf_clears_stale_crops_but_not_foreign_files(tmp_path):
+    # crops are derived artifacts: leftovers from a previous run (raw or enrich-renamed
+    # naming) would accumulate in the reused work dir and break check-by-filename
+    figures_dir = tmp_path / "figures"
+    figures_dir.mkdir()
+    (figures_dir / "page_2_fig_0.png").write_bytes(b"stale raw")
+    (figures_dir / "fig_4.1.png").write_bytes(b"stale renamed")
+    (figures_dir / "notes.txt").write_bytes(b"not ours")
+
+    backend = OcrBackend(parser=_FakeParser(_FakeResult([[]])), server=_FakeServer())
+    parse_pdf(tmp_path / "x.pdf", tmp_path, ParseConfig(), backend=backend)
+
+    assert not (figures_dir / "page_2_fig_0.png").exists()
+    assert not (figures_dir / "fig_4.1.png").exists()
+    assert (figures_dir / "notes.txt").exists()  # only our own patterns are touched
 
 
 def test_parse_pdf_watchdog_kills_server_and_raises(tmp_path):
