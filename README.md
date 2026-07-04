@@ -3,22 +3,29 @@
 Parse, figure-enrich, and chunk papers into RAG-ready chunks for **papis-ask**.
 
 It is a standalone preprocessor: it turns a PDF into a set of clean, section-aware,
-overlapping text chunks (with figure descriptions and page numbers) that papis-ask
-ingests directly — bypassing pypdf's blind char-window chunking.
+overlapping text chunks (with figure descriptions, page numbers, and standardized
+`[surname_year]` in-text citekeys) that papis-ask ingests directly — bypassing pypdf's
+blind char-window chunking.
 
 ## Pipeline
 
 ```
 PDF
- └─ parse    local GLM-OCR -> clean body markdown (LaTeX + markdown tables) + figure crops + page markers
-             (llama-server + glmocr SDK: PP-DocLayout-V3 layout, per-region OCR)
-             boilerplate (headers/footers/page numbers) dropped; bibliography routed to its own raw markdown
- └─ figures  Gemini        -> describe each figure crop (what's compared, trends; never fabricated numbers)
- └─ enrich                 -> splice figure descriptions next to their captions
- └─ chunker                -> section-aware split + guaranteed soft-overlap + page numbers
- └─ paper.chunks.json      -> consumed by papis-ask via aadd_texts
- └─ paper.references.md    -> raw bibliography, in reading order (not chunked/embedded; structuring is a
-                              separate, later stage -- see the plan doc)
+ └─ parse       local GLM-OCR -> clean body markdown (LaTeX + markdown tables) + figure crops + page markers
+                (llama-server + glmocr SDK: PP-DocLayout-V3 layout, per-region OCR)
+                boilerplate (headers/footers/page numbers) dropped; bibliography routed to its own raw markdown
+ └─ figures     Gemini        -> describe each figure crop, one call per figure (what's compared, trends;
+                                 never fabricated numbers)
+ └─ enrich                    -> splice figure descriptions next to their captions
+ └─ citations   Gemini + APIs -> extract raw references, verify/enrich against CrossRef/Semantic
+                                 Scholar/OpenAlex (cached), detect + link in-text markers, rewrite
+                                 them to `[surname_year]` citekeys -- runs concurrently with figures
+ └─ chunker                   -> section-aware split + guaranteed soft-overlap + page numbers
+ └─ paper.chunks.json         -> consumed by papis-ask via aadd_texts
+ └─ paper.citations.json      -> verified/enriched bibliography + in-text linking map
+ └─ paper.refinery/           -> everything reviewable: refinery.md (enriched markdown, citekeys
+                                 already rewritten), references.md (raw bibliography),
+                                 resolution_report.txt (per-reference verification diff), figures/
 ```
 
 ## Why
@@ -29,7 +36,8 @@ chunked text instead. See the design notes for the validated chunking policy.
 
 Parsing runs entirely locally: a small (0.9B) OCR model served via `llama.cpp`, orchestrated
 by the official `glmocr` SDK, replaces the cloud-based LlamaParse step -- no per-paper API
-cost, no network dependency for parsing itself (only figure description still calls Gemini).
+cost, no network dependency for parsing itself (figure description calls Gemini; citation
+resolution calls CrossRef/Semantic Scholar/OpenAlex, all keyless and disk-cached).
 
 ## Local OCR backend setup
 
@@ -89,5 +97,5 @@ model, plus the `glmocr` SDK to drive layout detection and per-region OCR agains
 ## Usage
 
 ```bash
-refinery path/to/paper.pdf            # -> path/to/paper.chunks.json (+ .refinery.md, .references.md)
+refinery path/to/paper.pdf            # -> path/to/paper.chunks.json, .citations.json, .refinery/
 ```

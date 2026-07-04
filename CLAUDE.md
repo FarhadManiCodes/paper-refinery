@@ -5,10 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A standalone preprocessor for **papis-ask**: it turns a PDF into section-aware, overlapping
-text chunks (with figure descriptions and page numbers) that papis-ask ingests via
-paper-qa's `Docs.aadd_texts` — replacing pypdf's blind char-window chunking. The end product
-is `<pdf>.chunks.json`; secondary artifacts are `<pdf>.refinery.md` (reviewable enriched
-markdown) and `<pdf>.references.md` (raw bibliography).
+text chunks (with figure descriptions, page numbers, and standardized `[surname_year]`
+in-text citekeys) that papis-ask ingests via paper-qa's `Docs.aadd_texts` — replacing
+pypdf's blind char-window chunking. Two finals land next to the PDF: `<pdf>.chunks.json`
+(the hand-off) and `<pdf>.citations.json` (verified/enriched bibliography + in-text
+linking map). Everything reviewable or intermediate goes in `<pdf>.refinery/`:
+`refinery.md` (enriched markdown, citekeys already rewritten — the last human-readable
+form before chunking), `references.md` (raw bibliography), `resolution_report.txt`
+(per-reference verification diff), `figures/`.
 
 ## Commands
 
@@ -46,27 +50,39 @@ modules own logic (never call each other except `enrich`→`parse` for its resul
 and `parse`→`references` for bibliography repair):
 
 ```
-backend.py     llama-server + GlmOcr lifecycle; ocr_backend() is reusable across PDFs
-parse.py       PDF -> ParseResult (body markdown + figure crops + raw references)
-references.py  bibliography repair, used only by parse.py: reclaim mislabeled entries,
-               merge page-break splits, drop copyright tails, recover layout-skipped
-               entries from the PDF text layer, contiguity-guarded number sort --
-               every rule exists because a live paper broke the raw list
-figures.py     describe ONE figure per Gemini call (all its panel crops together):
-               embedded figure-type taxonomy (classify + type-specific attention in the
-               same pass), context used dictionary-only, schema output, disk cache keyed
-               on crop bytes + prompt (~/.cache/paper-refinery/figure-cache)
-enrich.py      pair crops to captions geometrically (bboxes from parse; positional
-               fallback), rename crops to fig_N.png, assemble per-figure context
-               (title/abstract/neighbor paragraphs), splice descriptions after captions
-chunker.py     section-aware split + guaranteed soft-overlap + page ranges -> list[Chunk]
-cli.py         orchestrate the above; write .chunks.json / .refinery.md / .references.md
+backend.py               llama-server + GlmOcr lifecycle; ocr_backend() is reusable across PDFs
+parse.py                 PDF -> ParseResult (body markdown + figure crops + raw references)
+references.py            bibliography repair, used only by parse.py: reclaim mislabeled
+                          entries, merge page-break splits, drop copyright tails, recover
+                          layout-skipped entries from the PDF text layer, contiguity-guarded
+                          number sort -- every rule exists because a live paper broke the
+                          raw list
+figures.py               describe ONE figure per Gemini call (all its panel crops together):
+                          embedded figure-type taxonomy (classify + type-specific attention
+                          in the same pass), context used dictionary-only, schema output,
+                          disk cache keyed on crop bytes + prompt
+                          (~/.cache/paper-refinery/figure-cache)
+enrich.py                pair crops to captions geometrically (bboxes from parse; overlap on
+                          either axis so side captions work, positional fallback when bboxes
+                          are missing), rename crops to fig_N.png, assemble per-figure context
+                          (title/abstract/neighbor paragraphs), splice descriptions after
+                          captions
+citation_extraction.py   layer 1: one Gemini call -> rough structured reference fields
+                          (citation_key/title/authors/year/...); sanitizes Gemini-fabricated
+                          numeric citation_keys for markerless bibliographies
+citation_resolution.py   layer 2/3: verify/enrich each reference against CrossRef -> S2 ->
+                          OpenAlex (DOI-first shortcut, title-similarity + year-tolerance
+                          acceptance), disk-cached (~/.cache/paper-refinery/api-cache); a
+                          verified year never overwrites *below* the printed one (providers
+                          can merge preprint+published and report the earlier year)
+citation_linking.py      layer 4: deterministic (no LLM) in-text marker detection against
+                          the layer-1 EXTRACTED (printed-form) entries, plus the
+                          resolution-verified-only `[surname_year]` citekey rewrite
+chunker.py                section-aware split + guaranteed soft-overlap + page ranges ->
+                          list[Chunk]
+cli.py                    orchestrate the above (citations run concurrently with figure
+                          enrich); write .chunks.json / .citations.json / paper.refinery/
 ```
-
-`citation_extraction.py` (layer 1: one Gemini call → rough structured reference fields) is
-built but **not yet wired into `cli.py`**. A layer-2/3 `citation_resolution.py` (API
-verification against Semantic Scholar / CrossRef / OpenAlex) is planned but unimplemented —
-see the plan file referenced in memory.
 
 ### Key cross-cutting contracts
 
@@ -86,15 +102,28 @@ see the plan file referenced in memory.
   parser runs; the `FIGURE N.M` caption is the stable anchor. When the layout model detected
   caption regions (`ParseResult.figure_captions`), enrich accepts only body lines matching
   them — the caption regex alone is the fallback. Crops pair with captions *geometrically*
-  (nearest caption with x-overlap, via the bboxes on `CropRegion`/`CaptionRegion`; positional
-  pairing only when geometry is missing): a multi-panel figure's crops all land on one
-  caption (one Gemini call, names `fig_4.1_1.png`…), and a crop overlapping no caption (a
-  banner) is never renamed or described. Renaming happens before any Gemini call, so
-  cropping/pairing can be sanity-checked by filename alone.
+  (nearest caption overlapping on EITHER axis — a caption beside its panels, not just above
+  them, still pairs — via the bboxes on `CropRegion`/`CaptionRegion`, plus single-caption-page
+  cluster growth for diagonal panels; positional pairing only when geometry is missing): a
+  multi-panel figure's crops all land on one caption (one Gemini call, names `fig_4.1_1.png`…),
+  and a crop overlapping no caption on either axis (a banner) is never renamed or described.
+  Renaming happens before any Gemini call, so cropping/pairing can be sanity-checked by
+  filename alone.
 - **Image links are relativized last.** `parse.py` emits absolute crop paths; `cli._refine`
   rewrites them relative to the markdown's own directory (`_relativize_image_links`) at the
   very end, since only `_refine` knows both the crop dir and the final `.md` path. Scratchpad
   scripts that call `parse_pdf` directly bypass this and will show absolute paths — expected.
+- **Citation detection matches the printed form; citekeys come only from verified data.**
+  `citation_linking.link_citations` always runs against layer-1 EXTRACTED entries, never
+  resolved ones — resolution legitimately moves years/authors off what the paper prints
+  (confirmed live: linking against resolved entries lost 7/36 fmech markers). Detection runs
+  on the fully ENRICHED markdown (after figure descriptions are spliced in), so marker
+  offsets match the text that gets chunked — figure descriptions never introduce
+  citation-shaped text by construction (dictionary-only prompt). `rewrite_markers` then
+  builds `[surname_year]` citekeys from resolution-VERIFIED entries only, and only rewrites
+  a marker when every reference it points at has one; everything else is left exactly as
+  printed. Citations and figure-enrich still run concurrently in `cli._refine` — only this
+  final rewrite pass is serialized after both join.
 
 ### Config & secrets
 
