@@ -17,7 +17,10 @@ form before chunking), `references.md` (raw bibliography), `resolution_report.tx
 ## Commands
 
 Tooling lives in `.venv/` (no `uv.lock` — this is a plain venv). Prefix commands with the
-venv or activate it first.
+venv or activate it first. Rebuilding the venv from scratch needs a specific two-step
+install (CPU-only torch first) — see README.md's "Development setup" section; a plain
+`uv pip install -e .` alone pulls PyPI's CUDA-bundled torch (~3.4GB of unused
+`nvidia-*`/`triton` packages on a machine without an NVIDIA GPU).
 
 ```bash
 .venv/bin/pytest                              # full test suite

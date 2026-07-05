@@ -32,3 +32,11 @@ build-backend = "hatchling.build"
 
 [tool.ruff]
 line-length = 100
+
+# glmocr's PP-DocLayout-V3 runs on CPU here (no NVIDIA GPU on this machine -- see
+# glmocr/layout/layout_detector.py's torch.cuda.is_available() fallback). The default
+# PyPI torch wheel bundles the full CUDA toolkit regardless (~3.4GB of nvidia_*/triton
+# packages that are never exercised). A [tool.uv.pip] index pin here does NOT reliably
+# take effect for `uv pip install` (confirmed: it silently let PyPI's CUDA build win
+# over the pinned index) -- install torch/torchvision explicitly from the CPU index
+# FIRST, then install the project; see README's setup section for the exact commands.

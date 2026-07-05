@@ -39,6 +39,28 @@ by the official `glmocr` SDK, replaces the cloud-based LlamaParse step -- no per
 cost, no network dependency for parsing itself (figure description calls Gemini; citation
 resolution calls CrossRef/Semantic Scholar/OpenAlex, all keyless and disk-cached).
 
+## Development setup
+
+Tooling lives in `.venv/` (no `uv.lock` -- this is a plain venv managed with `uv pip`,
+not `uv sync`). `glmocr[selfhosted]` depends on `torch`/`torchvision`; on a machine
+without an NVIDIA GPU, PyPI's default wheel still bundles the full CUDA toolkit
+(~3.4GB of unused `nvidia-*`/`triton` packages) because pip has no hardware detection.
+Install the CPU-only build first, then the project, so it never gets swapped back in:
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python --no-config \
+  --default-index https://download.pytorch.org/whl/cpu \
+  torch torchvision
+uv pip install --python .venv/bin/python -e ".[dev]"
+```
+
+A `[tool.uv.pip]` index pin in `pyproject.toml` does NOT reliably take effect for
+`uv pip install` (confirmed live: it silently let PyPI's CUDA build win over the
+pinned index) -- the two-step CLI install above is the only version that has been
+verified to stick. This only matters for hosts without a CUDA GPU; skip it if you
+have one and want GPU-accelerated layout detection.
+
 ## Local OCR backend setup
 
 Parsing requires a locally running `llama-server` (from `llama.cpp`) serving the GLM-OCR
