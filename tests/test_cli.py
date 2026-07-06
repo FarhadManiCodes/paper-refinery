@@ -51,7 +51,9 @@ def test_main_wires_stages_and_writes_json(tmp_path, monkeypatch):
 
     seen = {}
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c: ParseResult(markdown="MD"))
+    monkeypatch.setattr(
+        cli, "parse_pdf_cached", lambda p, d, c, force=False: ParseResult(markdown="MD")
+    )
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
 
     def fake_enrich(parsed, cfg, describe):
@@ -83,7 +85,7 @@ def test_main_defaults_work_dir_next_to_pdf(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_parse_pdf(p, d, c):
+    def fake_parse_pdf(p, d, c, force=False):
         seen["image_dir"] = d
         return ParseResult(markdown="MD")
 
@@ -111,7 +113,9 @@ def test_main_needs_no_gemini_client_for_figureless_paper(tmp_path, monkeypatch)
         raise AssertionError("no Gemini-dependent stage may run without figures/references")
 
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c: ParseResult(markdown="MD"))
+    monkeypatch.setattr(
+        cli, "parse_pdf_cached", lambda p, d, c, force=False: ParseResult(markdown="MD")
+    )
     monkeypatch.setattr(cli, "make_client", boom)
     monkeypatch.setattr(cli, "extract_references", boom)
     monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
@@ -130,7 +134,7 @@ def test_main_writes_references_markdown_and_keeps_it_out_of_chunking(tmp_path, 
     monkeypatch.setattr(
         cli,
         "parse_pdf_cached",
-        lambda p, d, c: ParseResult(markdown="MD", references_markdown=refs_md),
+        lambda p, d, c, force=False: ParseResult(markdown="MD", references_markdown=refs_md),
     )
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
     monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
@@ -167,7 +171,7 @@ def test_main_runs_citation_stack_and_writes_citations_json(tmp_path, monkeypatc
         references_markdown="[1] Smith...",
     )
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c: parsed)
+    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c, force=False: parsed)
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
     monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
     monkeypatch.setattr(cli, "chunk_markdown", lambda md, cfg: [Chunk(md, 0, 1, 1)])
@@ -211,7 +215,7 @@ def test_main_rewrites_markers_to_verified_citekeys_before_chunking(tmp_path, mo
         references_markdown="[1] Smith...",
     )
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c: parsed)
+    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c, force=False: parsed)
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
     monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
 
@@ -251,7 +255,7 @@ def test_main_leaves_marker_unrewritten_when_citekey_is_missing(tmp_path, monkey
         references_markdown="[1] Smith...",
     )
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c: parsed)
+    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c, force=False: parsed)
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
     monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
     monkeypatch.setattr(cli, "chunk_markdown", lambda md, cfg: [Chunk(md, 0, 1, 1)])
@@ -277,7 +281,7 @@ def test_main_citation_failure_degrades_to_warning(tmp_path, monkeypatch):
 
     parsed = ParseResult(markdown="MD", references=_REFS, references_markdown="[1] Smith...")
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c: parsed)
+    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c, force=False: parsed)
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
     monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
     monkeypatch.setattr(cli, "chunk_markdown", lambda md, cfg: [Chunk(md, 0, 1, 1)])
@@ -296,3 +300,68 @@ def test_main_citation_failure_degrades_to_warning(tmp_path, monkeypatch):
     assert pdf.with_suffix(".chunks.json").exists()
     assert not pdf.with_suffix(".citations.json").exists()
     assert any("citation stage failed" in str(w.message) for w in caught)
+
+
+def test_force_parse_flag_controls_the_checkpoint_bypass(tmp_path, monkeypatch):
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    seen = {}
+
+    def fake_parse(p, d, c, force=False):
+        seen["force"] = force
+        return ParseResult(markdown="MD")
+
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+    monkeypatch.setattr(cli, "parse_pdf_cached", fake_parse)
+    monkeypatch.setattr(cli, "make_client", lambda cfg: object())
+    monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
+    monkeypatch.setattr(cli, "chunk_markdown", lambda md, cfg: [Chunk(md, 0, 1, 1)])
+
+    CliRunner().invoke(cli.main, [str(pdf)])
+    assert seen["force"] is False  # default reuses the parse checkpoint
+    CliRunner().invoke(cli.main, [str(pdf), "--force-parse"])
+    assert seen["force"] is True  # flag forces a re-OCR
+
+
+def test_from_chunk_rechunks_refinery_md_without_running_upstream(tmp_path, monkeypatch):
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    work_dir = pdf.with_suffix(".refinery")
+    work_dir.mkdir()
+    (work_dir / "refinery.md").write_text("Enriched body [smith_2020].")
+
+    def boom(*a, **k):
+        raise AssertionError("--from chunk must not run any upstream stage")
+
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+    monkeypatch.setattr(cli, "parse_pdf_cached", boom)
+    monkeypatch.setattr(cli, "enrich_markdown", boom)
+    monkeypatch.setattr(cli, "extract_references", boom)
+
+    seen = {}
+
+    def fake_chunk(md, cfg):
+        seen["md"] = md
+        return [Chunk(md, 0, 1, 1)]
+
+    monkeypatch.setattr(cli, "chunk_markdown", fake_chunk)
+
+    result = CliRunner().invoke(cli.main, [str(pdf), "--from", "chunk"])
+    assert result.exit_code == 0, result.output
+    assert seen["md"] == "Enriched body [smith_2020]."  # chunked straight from refinery.md
+    data = json.loads(pdf.with_suffix(".chunks.json").read_text())
+    assert data["chunks"][0]["text"] == "Enriched body [smith_2020]."
+    assert data["docname"] == "p"
+    assert "re-chunked" in result.output
+
+
+def test_from_chunk_errors_when_refinery_md_missing(tmp_path, monkeypatch):
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+
+    result = CliRunner().invoke(cli.main, [str(pdf), "--from", "chunk"])
+    assert result.exit_code != 0
+    assert "refinery.md" in result.output

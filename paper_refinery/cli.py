@@ -81,8 +81,29 @@ def _run_citations(
     return extracted, resolved
 
 
+def _rechunk(pdf: Path, out: Path, work_dir: Path, cfg: RefineryConfig) -> list[str]:
+    """`--from chunk`: re-chunk the saved enriched refinery.md, skipping parse/enrich/
+    citations entirely. For iterating on chunk policy without paying the (expensive)
+    upstream stages -- refinery.md is the exact input the full run feeds to the chunker,
+    so this reproduces the same chunks. The citations manifest is left untouched."""
+    md_path = work_dir / "refinery.md"
+    if not md_path.exists():
+        raise click.ClickException(
+            f"--from chunk needs {md_path} from a previous full run, but it's missing. "
+            f"Run `refinery {pdf.name}` once first."
+        )
+    chunks = chunk_markdown(md_path.read_text(), cfg.chunk)
+    write_chunks(chunks, pdf.stem, str(pdf), out)
+    return [f"re-chunked {len(chunks)} chunks (from {md_path.name}) -> {out}"]
+
+
 def _refine(
-    pdf: Path, out: Path, citations_out: Path, work_dir: Path, cfg: RefineryConfig
+    pdf: Path,
+    out: Path,
+    citations_out: Path,
+    work_dir: Path,
+    cfg: RefineryConfig,
+    force_parse: bool = False,
 ) -> list[str]:
     """Run the pipeline; returns human-readable summary lines for the CLI to echo.
 
@@ -91,9 +112,12 @@ def _refine(
     figures need the crops) and both are network-bound. A citation-stage failure
     (missing GOOGLE_API_KEY, providers down) degrades to a loud warning: the chunks
     manifest is the primary product and must still be written.
+
+    ``force_parse`` bypasses the parse checkpoint (re-runs OCR); otherwise a matching
+    checkpoint is reused (see parse_cache.parse_pdf_cached).
     """
     work_dir.mkdir(parents=True, exist_ok=True)
-    parsed = parse_pdf_cached(pdf, work_dir, cfg.parse)
+    parsed = parse_pdf_cached(pdf, work_dir, cfg.parse, force=force_parse)
     summary: list[str] = []
 
     if parsed.references_markdown:
@@ -199,6 +223,20 @@ def _refine(
     default=None,
     help="GLM-OCR GGUF vision projector (default: 'parse.mmproj_path' in config.toml).",
 )
+@click.option(
+    "--force-parse",
+    is_flag=True,
+    default=False,
+    help="Re-run OCR, bypassing the parse checkpoint (<pdf>.refinery/parse_cache/).",
+)
+@click.option(
+    "--from",
+    "from_stage",
+    type=click.Choice(["chunk"]),
+    default=None,
+    help="Resume from a stage, reusing earlier artifacts. 'chunk' re-chunks the saved "
+    "refinery.md only (instant; for chunk-policy tuning).",
+)
 def main(
     pdf: Path,
     out: Path | None,
@@ -206,6 +244,8 @@ def main(
     work_dir: Path | None,
     model_path: Path | None,
     mmproj_path: Path | None,
+    force_parse: bool,
+    from_stage: str | None,
 ) -> None:
     """Parse, figure-enrich, citation-verify, and chunk PDF for papis-ask."""
     cfg = load_config()
@@ -217,7 +257,10 @@ def main(
     citations_out = citations_out or pdf.with_suffix(".citations.json")
     work_dir = work_dir or pdf.with_suffix(".refinery")
 
-    summary = _refine(pdf, out, citations_out, work_dir, cfg)
+    if from_stage == "chunk":
+        summary = _rechunk(pdf, out, work_dir, cfg)
+    else:
+        summary = _refine(pdf, out, citations_out, work_dir, cfg, force_parse=force_parse)
     click.echo("\n".join(summary))
 
 
