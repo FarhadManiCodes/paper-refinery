@@ -162,3 +162,55 @@ def test_hit_restores_raw_crops_after_enrich_renamed_them(tmp_path):
     assert r2.figure_crops[1][0].path == raw
     assert r2.figure_crops[1][0].bbox == (0.0, 0.0, 4.0, 4.0)
     assert str(raw) in r2.markdown  # placeholder link matches the restored crop
+
+
+def test_round_trip_preserves_captions_references_and_multiple_crops(tmp_path):
+    # a fuller checkpoint: two pages, two crops on page 1 (one with a bbox, one without)
+    # plus a caption and a reference, one crop on page 2. The warm result must equal the
+    # cold one field-for-field, and every crop must be restored on disk.
+    pdf = _pdf(tmp_path)
+    img = Image.new("RGB", (4, 4), "white")
+    pages = [
+        [
+            _region("doc_title", "Paper", index=0),
+            _region("figure_title", "FIGURE 1. A caption.", bbox_2d=[10, 10, 100, 20], index=1),
+            _region("image", "", bbox_2d=[10, 30, 100, 80], image_path="imgs/a.jpg", index=2),
+            _region("image", "", image_path="imgs/b.jpg", index=3),  # no bbox_2d
+            _region("reference_content", "1. Smith J (2020) Things.", index=4),
+        ],
+        [
+            _region("text", "More body.", index=0),
+            _region("image", "", bbox_2d=[5, 5, 40, 40], image_path="imgs/c.jpg", index=1),
+        ],
+    ]
+    image_files = {"a.jpg": img, "b.jpg": img, "c.jpg": img}
+    backend, parser = _backend(pages, image_files=image_files)
+    cfg = ParseConfig()
+
+    r1 = parse_pdf_cached(pdf, tmp_path, cfg, backend=backend)
+    assert {p: len(c) for p, c in r1.figure_crops.items()} == {1: 2, 2: 1}
+    assert [c.text for c in r1.figure_captions[1]] == ["FIGURE 1. A caption."]
+    assert len(r1.references) == 1
+
+    # simulate enrich moving every crop away
+    for crops in r1.figure_crops.values():
+        for i, cr in enumerate(crops):
+            cr.path.replace(cr.path.with_name(f"fig_{i}{cr.path.suffix}"))
+
+    r2 = parse_pdf_cached(pdf, tmp_path, cfg, backend=backend)
+    assert parser.calls == 1  # no OCR
+
+    # full field-for-field equality of the parse result
+    assert r2.markdown == r1.markdown
+    assert r2.references == r1.references
+    assert r2.references_markdown == r1.references_markdown
+    assert {p: [(c.text, c.bbox) for c in caps] for p, caps in r2.figure_captions.items()} == {
+        p: [(c.text, c.bbox) for c in caps] for p, caps in r1.figure_captions.items()
+    }
+    assert {p: [(c.path, c.bbox) for c in crops] for p, crops in r2.figure_crops.items()} == {
+        p: [(c.path, c.bbox) for c in crops] for p, crops in r1.figure_crops.items()
+    }
+    assert r2.figure_crops[1][1].bbox is None  # the no-bbox crop round-trips as None
+    for crops in r2.figure_crops.values():
+        for cr in crops:
+            assert cr.path.exists()  # every crop restored on disk
