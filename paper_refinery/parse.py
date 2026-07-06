@@ -40,19 +40,18 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
-from functools import cmp_to_key
 from pathlib import Path
-
-from bs4 import BeautifulSoup
 
 from .backend import OcrBackend, ocr_backend
 from .config import ParseConfig, load_config
 from .markers import page_marker
+from .reading_order import reading_order, region_bbox
 from .references import (
     reclaim_mislabeled_references,
     render_references_markdown,
     repair_references,
 )
+from .tables import html_table_to_markdown
 
 # PP-DocLayout-V3 label taxonomy (glmocr's config.yaml `label_task_mapping` / `id2label`).
 _ABANDON_LABELS = {
@@ -148,87 +147,6 @@ def _wrap_formula(content: str) -> str:
     return f"$$\n{text}\n$$"
 
 
-def _int_attr(cell, name: str, default: int = 1) -> int:
-    """A tag's ``rowspan``/``colspan`` attribute as an int, tolerating a malformed value.
-
-    The source HTML is GLM-OCR's own model-generated output, not hand-authored markup --
-    a non-numeric span value is a real (if rare) failure mode, not a "can't happen" input,
-    and one bad cell shouldn't crash the whole page's table conversion.
-    """
-    try:
-        return int(cell.get(name, default) or default)
-    except (TypeError, ValueError):
-        return default
-
-
-def _html_table_to_markdown(html: str) -> str:
-    """Convert a GLM-OCR HTML table to a markdown pipe table.
-
-    Markdown has no merged-cell concept; a rowspan/colspan cell's value is duplicated
-    into every grid position it visually spans rather than silently dropped. This can
-    repeat a spanning header across columns/rows it covers -- an accepted, documented
-    fidelity tradeoff, not a bug.
-    """
-    soup = BeautifulSoup(html or "", "html.parser")
-    table = soup.find("table")
-    if table is None:
-        return (html or "").strip()
-
-    grid: list[list[str]] = []
-    active: dict[int, tuple[int, str]] = {}  # col -> (rows_remaining, text)
-
-    for tr in table.find_all("tr"):
-        row: list[str] = []
-        col = 0
-        placed_this_row: set[int] = set()
-        for cell in tr.find_all(["td", "th"]):
-            while active.get(col, (0, ""))[0] > 0:
-                col += 1
-            text = cell.get_text(" ", strip=True)
-            rowspan = _int_attr(cell, "rowspan")
-            colspan = _int_attr(cell, "colspan")
-            for i in range(colspan):
-                c = col + i
-                while len(row) <= c:
-                    row.append("")
-                row[c] = text
-                placed_this_row.add(c)
-                if rowspan > 1:
-                    active[c] = (rowspan - 1, text)
-            col += colspan
-
-        # fill in columns carried over by an earlier row's rowspan (not one that
-        # originated in this row -- that was already placed above)
-        max_col = max([len(row)] + [c + 1 for c in active])
-        for c in range(max_col):
-            if c in placed_this_row:
-                continue
-            remaining, text = active.get(c, (0, ""))
-            if remaining > 0:
-                while len(row) <= c:
-                    row.append("")
-                if not row[c]:
-                    row[c] = text
-                active[c] = (remaining - 1, text)
-
-        grid.append(row)
-
-    if not grid:
-        return ""
-
-    width = max(len(r) for r in grid)
-    grid = [r + [""] * (width - len(r)) for r in grid]
-
-    def esc(s: str) -> str:
-        return s.replace("|", "\\|").replace("\n", " ")
-
-    lines = ["| " + " | ".join(esc(c) for c in grid[0]) + " |"]
-    lines.append("| " + " | ".join(["---"] * width) + " |")
-    for r in grid[1:]:
-        lines.append("| " + " | ".join(esc(c) for c in r) + " |")
-    return "\n".join(lines)
-
-
 def _dispatch_region(region: dict) -> tuple[str, str]:
     """Classify one glmocr region and format its content.
 
@@ -259,7 +177,7 @@ def _dispatch_region(region: dict) -> tuple[str, str]:
     if label == _REFERENCE_LABEL:
         return "reference", content
     if label == _TABLE_LABEL:
-        return "body", _html_table_to_markdown(content)
+        return "body", html_table_to_markdown(content)
     if label == _ALGORITHM_LABEL:
         return "body", f"```\n{content}\n```"
     if label in _FORMULA_LABELS:
@@ -349,80 +267,6 @@ def _save_figure_crop(
     return crop_path
 
 
-# Back-matter (Conflict of Interest disclosure, copyright/licensing notice) that
-# PP-DocLayout-V3 can misclassify as a reference_content region -- confirmed live on a
-# Frontiers journal paper, where this text sits immediately after the real bibliography
-# in reading order, a plausible source of the misclassification.
-def _region_bbox(region: dict) -> tuple[float, float, float, float] | None:
-    """The region's ``bbox_2d`` as an (x1, y1, x2, y2) tuple; None unless well-formed."""
-    box = region.get("bbox_2d")
-    if isinstance(box, (list, tuple)) and len(box) == 4:
-        return tuple(float(v) for v in box)
-    return None
-
-
-_WIDE_FRACTION = 0.6  # of page width: a region this wide spans columns (title, wide table)
-_COLUMN_OVERLAP = 0.5  # of the narrower region's width: x-overlap needed to share a column
-_Y_TOL_FRACTION = 0.01  # of page width: y-difference treated as "same line" (~half a line)
-
-
-def _reading_order(regions: list[dict]) -> list[dict]:
-    """Regions in reading order: glmocr's own ``index`` order, with local in-column
-    inversions repaired by geometry.
-
-    PP-DocLayout-V3's ``index`` gets the macro order right (which column when), but is
-    frequently wrong *within* a column -- measured live on kalman-1960.pdf: 11 genuine
-    inversions across 12 pages, e.g. "Theorem 4" emitted two regions before the "Fig. 4"
-    caption it follows on the page, and bibliography entries swapped pairwise. Within one
-    column, top-to-bottom *is* reading order, so each contiguous run of same-column
-    regions (x-overlap > ``_COLUMN_OVERLAP`` of the narrower one) is re-sorted by its
-    top edge. Deliberately conservative everywhere else:
-
-    - regions wider than ``_WIDE_FRACTION`` of the page (titles, column-spanning
-      tables/figures) break runs, so left/right-column text can never interleave;
-    - y-differences within ``_Y_TOL_FRACTION`` of page width count as the same line
-      (confirmed live: one formula split into two side-by-side regions 1px apart --
-      exact-y sorting would swap what glmocr ordered correctly);
-    - any region missing a well-formed ``bbox_2d`` -> plain index order, unchanged.
-    """
-    regs = sorted(regions, key=lambda r: r.get("index", 0))
-    boxes = [r.get("bbox_2d") for r in regs]
-    if not boxes or any(b is None or len(b) != 4 for b in boxes):
-        return regs
-    page_w = (max(b[2] for b in boxes) - min(b[0] for b in boxes)) or 1
-    y_tol = _Y_TOL_FRACTION * page_w
-
-    def is_wide(b) -> bool:
-        return (b[2] - b[0]) > _WIDE_FRACTION * page_w
-
-    def same_column(a, b) -> bool:
-        overlap = min(a[2], b[2]) - max(a[0], b[0])
-        return overlap > _COLUMN_OVERLAP * min(a[2] - a[0], b[2] - b[0])
-
-    def by_top(a: dict, b: dict) -> int:
-        dy = a["bbox_2d"][1] - b["bbox_2d"][1]
-        if abs(dy) <= y_tol:
-            return 0  # same line -> stable sort keeps glmocr's order
-        return -1 if dy < 0 else 1
-
-    ordered: list[dict] = []
-    run: list[dict] = []
-    for region in regs:
-        box = region["bbox_2d"]
-        if (
-            run
-            and not is_wide(box)
-            and not is_wide(run[-1]["bbox_2d"])
-            and same_column(run[-1]["bbox_2d"], box)
-        ):
-            run.append(region)
-        else:
-            ordered.extend(sorted(run, key=cmp_to_key(by_top)))
-            run = [region]
-    ordered.extend(sorted(run, key=cmp_to_key(by_top)))
-    return ordered
-
-
 def _build_markdown(
     pages_regions: list[list[dict]],
     image_files: dict,
@@ -443,7 +287,7 @@ def _build_markdown(
 
     for page_idx, regions in enumerate(pages_regions):
         page = page_idx + 1  # glmocr's page_idx is 0-based by input order; confirmed live
-        sorted_regions = _reading_order(regions)
+        sorted_regions = reading_order(regions)
         triples = [(*_dispatch_region(r), r) for r in sorted_regions]
         triples = [t for t in triples if t[0] != "abandon"]
         triples = _merge_reference_numbers(triples)
@@ -458,7 +302,7 @@ def _build_markdown(
                 if text.strip():
                     body_parts.append(text)  # stays in the body markdown as-is...
                     figure_captions.setdefault(page, []).append(  # ...and is known
-                        CaptionRegion(text, _region_bbox(region))
+                        CaptionRegion(text, region_bbox(region))
                     )
             elif kind == "reference":
                 if text.strip():
@@ -470,9 +314,7 @@ def _build_markdown(
                 )
                 if crop_path is None:
                     continue
-                figure_crops.setdefault(page, []).append(
-                    CropRegion(crop_path, _region_bbox(region))
-                )
+                figure_crops.setdefault(page, []).append(CropRegion(crop_path, region_bbox(region)))
                 body_parts.append(f"![FIGURE_CROP {page}:{idx}]({crop_path})")
 
         parts.append(page_marker(page))
