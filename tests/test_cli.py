@@ -365,3 +365,41 @@ def test_from_chunk_errors_when_refinery_md_missing(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli.main, [str(pdf), "--from", "chunk"])
     assert result.exit_code != 0
     assert "refinery.md" in result.output
+
+
+def test_refine_public_api_returns_result_and_writes_artifacts(tmp_path, monkeypatch):
+    # the in-process entry point papis-ask will call: runs the pipeline, returns the
+    # chunks + artifact paths, and writes the same files as the CLI
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    seen = {}
+
+    def fake_parse(p, d, c, force=False):
+        seen["force"] = force
+        return ParseResult(markdown="MD")
+
+    monkeypatch.setattr(cli, "parse_pdf_cached", fake_parse)
+    monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: "ENRICHED")
+    monkeypatch.setattr(cli, "chunk_markdown", lambda md, cfg: [Chunk(md, 0, 1, 1)])
+
+    result = cli.refine(pdf, RefineryConfig())
+
+    assert [c.text for c in result.chunks] == ["ENRICHED"]  # chunks returned in memory
+    assert result.chunks_path == pdf.with_suffix(".chunks.json")  # defaults next to the PDF
+    assert result.citations_path == pdf.with_suffix(".citations.json")
+    assert result.work_dir == pdf.with_suffix(".refinery")
+    data = json.loads(result.chunks_path.read_text())  # and the hand-off JSON is written
+    assert data["chunks"][0]["text"] == "ENRICHED"
+    assert data["docname"] == "p"
+    assert seen["force"] is False
+
+    cli.refine(pdf, RefineryConfig(), force_parse=True)
+    assert seen["force"] is True  # force_parse threads through to the checkpoint
+
+
+def test_refine_is_exported_at_package_top_level():
+    import paper_refinery
+
+    assert paper_refinery.refine is cli.refine
+    assert paper_refinery.RefineResult is cli.RefineResult

@@ -17,6 +17,7 @@ import os
 import re
 import warnings
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
@@ -104,8 +105,8 @@ def _refine(
     work_dir: Path,
     cfg: RefineryConfig,
     force_parse: bool = False,
-) -> list[str]:
-    """Run the pipeline; returns human-readable summary lines for the CLI to echo.
+) -> tuple[list[Chunk], list[str]]:
+    """Run the pipeline; returns the chunks plus human-readable summary lines to echo.
 
     The citation stack runs in a worker thread concurrently with figure describing --
     the two sides are independent (citations need the references + body markdown,
@@ -185,7 +186,50 @@ def _refine(
     chunks = chunk_markdown(enriched, cfg.chunk)
     write_chunks(chunks, pdf.stem, str(pdf), out)
     summary.append(f"wrote {len(chunks)} chunks -> {out}")
-    return summary
+    return chunks, summary
+
+
+@dataclass
+class RefineResult:
+    """What ``refine()`` produced: the chunks in memory plus the on-disk artifacts."""
+
+    chunks: list[Chunk]
+    chunks_path: Path  # <pdf>.chunks.json -- the papis-ask hand-off
+    citations_path: Path  # <pdf>.citations.json -- absent if the paper had no references
+    work_dir: Path  # <pdf>.refinery/ -- refinery.md, references.md, figures/, parse_cache/
+
+
+def refine(
+    pdf: Path,
+    cfg: RefineryConfig | None = None,
+    *,
+    out: Path | None = None,
+    citations_out: Path | None = None,
+    work_dir: Path | None = None,
+    force_parse: bool = False,
+) -> RefineResult:
+    """Run the full pipeline on one PDF and return its chunks + artifact paths.
+
+    The single stable entry point for in-process callers (e.g. papis-ask): parse ->
+    figure-enrich -> citation-verify -> chunk, reusing the parse checkpoint so a repeated
+    call on an unchanged PDF skips OCR (pass ``force_parse=True`` to re-OCR). Writes
+    ``<pdf>.chunks.json`` / ``.citations.json`` and the ``<pdf>.refinery/`` work directory,
+    exactly like the ``refinery`` CLI. Output locations default next to the PDF; override
+    any of them explicitly. ``cfg`` defaults to ``load_config()``.
+
+    Returns refinery's own types/paths only -- no paper-qa objects cross this boundary; the
+    consumer owns converting chunks into whatever its indexer wants (it may read
+    ``chunks_path`` or use the returned ``chunks`` directly).
+    """
+    pdf = Path(pdf)
+    cfg = cfg or load_config()
+    out = out or pdf.with_suffix(".chunks.json")
+    citations_out = citations_out or pdf.with_suffix(".citations.json")
+    work_dir = work_dir or pdf.with_suffix(".refinery")
+    chunks, _summary = _refine(pdf, out, citations_out, work_dir, cfg, force_parse=force_parse)
+    return RefineResult(
+        chunks=chunks, chunks_path=out, citations_path=citations_out, work_dir=work_dir
+    )
 
 
 @click.command()
@@ -260,7 +304,7 @@ def main(
     if from_stage == "chunk":
         summary = _rechunk(pdf, out, work_dir, cfg)
     else:
-        summary = _refine(pdf, out, citations_out, work_dir, cfg, force_parse=force_parse)
+        _chunks, summary = _refine(pdf, out, citations_out, work_dir, cfg, force_parse=force_parse)
     click.echo("\n".join(summary))
 
 
