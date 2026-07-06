@@ -353,6 +353,19 @@ def _parse_with_watchdog(backend: OcrBackend, pdf_path: Path, cfg: ParseConfig):
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+def clear_stale_crops(figures_dir: Path) -> None:
+    """Delete crops left in ``figures_dir`` by a previous run (under either the raw
+    ``page_*_fig_*`` or the enrich-renamed ``fig_*`` naming).
+
+    Crops are wholly derived artifacts; leftovers would otherwise accumulate and break
+    checking crop pairing by filename. Only our own patterns are touched. Shared by
+    ``parse_pdf`` (before a fresh OCR) and ``parse_cache`` (before restoring a snapshot's
+    raw crops on a cache hit), so the two never drift.
+    """
+    for stale in (*figures_dir.glob("page_*_fig_*"), *figures_dir.glob("fig_*")):
+        stale.unlink()
+
+
 def parse_pdf(
     pdf_path: Path,
     image_dir: Path,
@@ -370,11 +383,7 @@ def parse_pdf(
     pdf_path, image_dir = Path(pdf_path), Path(image_dir)
     figures_dir = image_dir / cfg.figures_dir_name
     figures_dir.mkdir(parents=True, exist_ok=True)
-    for stale in (*figures_dir.glob("page_*_fig_*"), *figures_dir.glob("fig_*")):
-        # crops are wholly derived artifacts; leftovers from a previous run (under
-        # either the raw or the enrich-renamed naming) would otherwise accumulate and
-        # break checking crop pairing by filename. Only our own patterns are touched.
-        stale.unlink()
+    clear_stale_crops(figures_dir)
 
     if backend is None:
         with ocr_backend(cfg) as own:

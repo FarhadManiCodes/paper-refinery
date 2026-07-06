@@ -51,7 +51,7 @@ def test_main_wires_stages_and_writes_json(tmp_path, monkeypatch):
 
     seen = {}
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(cli, "parse_pdf", lambda p, d, c: ParseResult(markdown="MD"))
+    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c: ParseResult(markdown="MD"))
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
 
     def fake_enrich(parsed, cfg, describe):
@@ -88,7 +88,7 @@ def test_main_defaults_work_dir_next_to_pdf(tmp_path, monkeypatch):
         return ParseResult(markdown="MD")
 
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(cli, "parse_pdf", fake_parse_pdf)
+    monkeypatch.setattr(cli, "parse_pdf_cached", fake_parse_pdf)
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
     monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
     monkeypatch.setattr(cli, "chunk_markdown", lambda md, cfg: [Chunk(md, 0, 1, 1)])
@@ -111,7 +111,7 @@ def test_main_needs_no_gemini_client_for_figureless_paper(tmp_path, monkeypatch)
         raise AssertionError("no Gemini-dependent stage may run without figures/references")
 
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(cli, "parse_pdf", lambda p, d, c: ParseResult(markdown="MD"))
+    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c: ParseResult(markdown="MD"))
     monkeypatch.setattr(cli, "make_client", boom)
     monkeypatch.setattr(cli, "extract_references", boom)
     monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
@@ -129,7 +129,7 @@ def test_main_writes_references_markdown_and_keeps_it_out_of_chunking(tmp_path, 
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
     monkeypatch.setattr(
         cli,
-        "parse_pdf",
+        "parse_pdf_cached",
         lambda p, d, c: ParseResult(markdown="MD", references_markdown=refs_md),
     )
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
@@ -167,7 +167,7 @@ def test_main_runs_citation_stack_and_writes_citations_json(tmp_path, monkeypatc
         references_markdown="[1] Smith...",
     )
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(cli, "parse_pdf", lambda p, d, c: parsed)
+    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c: parsed)
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
     monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
     monkeypatch.setattr(cli, "chunk_markdown", lambda md, cfg: [Chunk(md, 0, 1, 1)])
@@ -211,7 +211,7 @@ def test_main_rewrites_markers_to_verified_citekeys_before_chunking(tmp_path, mo
         references_markdown="[1] Smith...",
     )
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(cli, "parse_pdf", lambda p, d, c: parsed)
+    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c: parsed)
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
     monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
 
@@ -251,7 +251,7 @@ def test_main_leaves_marker_unrewritten_when_citekey_is_missing(tmp_path, monkey
         references_markdown="[1] Smith...",
     )
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(cli, "parse_pdf", lambda p, d, c: parsed)
+    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c: parsed)
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
     monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
     monkeypatch.setattr(cli, "chunk_markdown", lambda md, cfg: [Chunk(md, 0, 1, 1)])
@@ -277,7 +277,7 @@ def test_main_citation_failure_degrades_to_warning(tmp_path, monkeypatch):
 
     parsed = ParseResult(markdown="MD", references=_REFS, references_markdown="[1] Smith...")
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(cli, "parse_pdf", lambda p, d, c: parsed)
+    monkeypatch.setattr(cli, "parse_pdf_cached", lambda p, d, c: parsed)
     monkeypatch.setattr(cli, "make_client", lambda cfg: object())
     monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
     monkeypatch.setattr(cli, "chunk_markdown", lambda md, cfg: [Chunk(md, 0, 1, 1)])

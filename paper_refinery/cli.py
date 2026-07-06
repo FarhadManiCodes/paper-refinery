@@ -28,7 +28,8 @@ from .citation_resolution import format_resolution_report, resolve_references
 from .config import RefineryConfig, load_config
 from .enrich import enrich_markdown
 from .figures import describe_figure, make_client
-from .parse import ParseResult, parse_pdf
+from .parse import ParseResult
+from .parse_cache import parse_pdf_cached
 
 _IMAGE_LINK_RE = re.compile(r"(!\[[^\]]*\]\()([^)\s]+)(\))")
 
@@ -92,7 +93,7 @@ def _refine(
     manifest is the primary product and must still be written.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
-    parsed = parse_pdf(pdf, work_dir, cfg.parse)
+    parsed = parse_pdf_cached(pdf, work_dir, cfg.parse)
     summary: list[str] = []
 
     if parsed.references_markdown:
