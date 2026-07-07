@@ -177,7 +177,7 @@ def _sanitize_citation_keys(raw_texts: list[str], items: list[dict]) -> list[dic
     deterministic and one-sided: genuine "[6] "/"3. "/"2 " heads keep their key,
     anything unconfirmed loses it (linking treats a missing key positionally).
     """
-    for raw, item in zip(raw_texts, items):
+    for raw, item in zip(raw_texts, items, strict=True):  # items padded to len(raw_texts)
         key = item.get("citation_key") or ""
         marker = _NUMERIC_KEY_RE.fullmatch(key.strip())
         if marker is None:

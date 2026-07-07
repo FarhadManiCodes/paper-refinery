@@ -357,7 +357,7 @@ def _sort_references_by_number(references: list[RawReference]) -> list[RawRefere
     nums = [k for k in keys if k is not None]  # all clean past the guard
     if sorted(nums) != list(range(min(nums), min(nums) + len(nums))):
         return references  # duplicates or gaps -> don't trust the keys
-    return [ref for _, ref in sorted(zip(nums, references), key=lambda pair: pair[0])]
+    return [ref for _, ref in sorted(zip(nums, references, strict=True), key=lambda pair: pair[0])]
 
 
 def render_references_markdown(references: list[RawReference]) -> str:
