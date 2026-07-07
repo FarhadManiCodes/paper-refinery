@@ -22,8 +22,8 @@ to figures.py, which constrains its use to dictionary-only lookups -- see the pr
 
 from __future__ import annotations
 
+import logging
 import re
-import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +34,8 @@ from .config import FigureConfig
 from .figures import describe_figure as _default_describe
 from .markers import PAGE_MARKER_RE
 from .parse import CaptionRegion, CropRegion, ParseResult
+
+logger = logging.getLogger(__name__)
 
 _CAPTION_LINE = re.compile(
     r"(?m)^[ \t]*\**[ \t]*(FIGURE|Figure|FIG|Fig)\.?[ \t]*(\d+(?:\.\d+)?)\b[.:]?[ \t]*(.*)$"
@@ -371,7 +373,7 @@ def enrich_markdown(
                 try:
                     results[key] = future.result()
                 except Exception as exc:  # surface it; leave this figure undescribed
-                    warnings.warn(f"figure description failed for FIGURE {key[1]}: {exc!r}")
+                    logger.warning("figure description failed for FIGURE %s: %r", key[1], exc)
                     results[key] = None
 
     insertions: list[tuple[int, str]] = []

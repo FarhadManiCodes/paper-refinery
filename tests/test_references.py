@@ -4,7 +4,7 @@ page-break split and copyright tail, kalman's out-of-order columns."""
 
 from __future__ import annotations
 
-import pytest
+import logging
 
 from paper_refinery.references import (
     _drop_trailing_boilerplate,
@@ -320,7 +320,7 @@ def test_sort_references_by_number_mixed_region_and_text_number_sources():
 # ---------------------------------------------------------------------------
 
 
-def test_splice_missing_recovers_entry_from_text_layer():
+def test_splice_missing_recovers_entry_from_text_layer(caplog):
     # the brunton case: entry 2 printed in the PDF but no layout region for it
     refs = [
         _ref("1. Jordan MI, Mitchell TM (2015) Machine learning. Science 349:255-260.", page=6),
@@ -332,8 +332,9 @@ def test_splice_missing_recovers_entry_from_text_layer():
         "2. Marx V (2013) Biology: The big challenges of big data. Nature 498:255-260.\n"
         "3. Bongard J, Lipson H (2007) Automated reverse engineering. PNAS.\n"
     )
-    with pytest.warns(UserWarning, match="recovered missing reference 2"):
+    with caplog.at_level(logging.WARNING):
         out = _splice_missing_from_layer(refs, layer, [2])
+    assert "recovered missing reference 2" in caplog.text
     assert [r["text"][:10] for r in out] == ["1. Jordan ", "2. Marx V ", "3. Bongard"]
     assert out[1]["number"] is None  # marker lives in the text, like its OCR'd siblings
     assert "big data" in out[1]["text"]

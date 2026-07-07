@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import stat
 import tomllib
 import types
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Union, get_args, get_origin, get_type_hints
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -211,9 +213,11 @@ def _load_secrets(dir_path: Path | None = None) -> None:
     for env_file in sorted(dir_path.glob("*.env")):
         mode = stat.S_IMODE(env_file.stat().st_mode)
         if mode & (stat.S_IRWXG | stat.S_IRWXO):
-            warnings.warn(
-                f"{env_file} is readable by more than its owner (mode {oct(mode)}) -- "
-                f"consider `chmod 600 {env_file}`"
+            logger.warning(
+                "%s is readable by more than its owner (mode %s) -- consider `chmod 600 %s`",
+                env_file,
+                oct(mode),
+                env_file,
             )
         load_dotenv(env_file)
 

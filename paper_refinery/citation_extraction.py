@@ -10,9 +10,9 @@ separate concern, deliberately not this file's job.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
-import warnings
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
@@ -23,6 +23,8 @@ from .text_utils import leading_number
 
 if TYPE_CHECKING:
     from google.genai import Client
+
+logger = logging.getLogger(__name__)
 
 
 class Author(BaseModel):
@@ -149,9 +151,11 @@ def extract_references(
     rows = parsed if isinstance(parsed, list) else []
     items = [r.model_dump(exclude_none=True) for r in rows if isinstance(r, ExtractedReference)]
     if len(items) != len(raw_texts):
-        warnings.warn(
-            f"extract_references: got {len(items)} items for {len(raw_texts)} input "
-            "lines; padding/truncating to align by position"
+        logger.warning(
+            "extract_references: got %d items for %d input lines; padding/truncating "
+            "to align by position",
+            len(items),
+            len(raw_texts),
         )
     items = (items + [{}] * len(raw_texts))[: len(raw_texts)]
     return _sanitize_citation_keys(raw_texts, items)

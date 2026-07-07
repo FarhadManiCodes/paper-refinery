@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from paper_refinery.citation_extraction import (
@@ -74,7 +76,7 @@ def test_extract_references_uses_response_parsed():
     ]
 
 
-def test_extract_references_pads_when_model_returns_fewer_items():
+def test_extract_references_pads_when_model_returns_fewer_items(caplog):
     parsed = [ExtractedReference(title="Only One")]
 
     class FakeClient:
@@ -83,8 +85,9 @@ def test_extract_references_pads_when_model_returns_fewer_items():
             def generate_content(model, contents, config):
                 return type("R", (), {"parsed": parsed})()
 
-    with pytest.warns(UserWarning, match="got 1 items for 2 input"):
+    with caplog.at_level(logging.WARNING):
         out = extract_references(["ref one", "ref two"], CitationConfig(), client=FakeClient())
+    assert "got 1 items for 2 input" in caplog.text
     assert out == [{"title": "Only One", "authors": []}, {}]
 
 

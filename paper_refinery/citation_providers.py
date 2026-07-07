@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -22,6 +23,8 @@ from pathlib import Path
 from .config import CitationConfig
 from .disk_cache import cache_path, read_json, write_json
 from .retry import call_with_backoff
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # DOI extraction (from the RAW OCR text, not the extractor's guess)
@@ -96,7 +99,8 @@ def _get_json(
         before_fetch()  # e.g. the S2 throttle -- only on a real fetch, never a cache hit
     try:
         data = call_with_backoff(fetch, cfg.api_retry_attempts, cfg.api_retry_base_delay)
-    except Exception:
+    except Exception as exc:
+        logger.debug("provider fetch failed for %s: %r", url, exc)
         return None
     if cache and data is not None:
         write_json(cache, data)

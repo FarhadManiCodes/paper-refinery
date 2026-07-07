@@ -20,13 +20,15 @@ concern (citation_extraction/resolution/linking), not this module's job.
 
 from __future__ import annotations
 
+import logging
 import re
-import warnings
 from pathlib import Path
 from typing import TypedDict
 
 from .markers import page_marker
 from .text_utils import leading_number
+
+logger = logging.getLogger(__name__)
 
 
 class RawReference(TypedDict):
@@ -217,9 +219,11 @@ def _warn_reference_gaps(references: list[RawReference]) -> None:
     """
     missing = _missing_reference_numbers(references)
     if missing:
-        warnings.warn(
-            f"numbered bibliography has {len(missing)} missing entr(ies): {missing} -- "
-            "the layout model likely produced no region for them (unrecoverable here)"
+        logger.warning(
+            "numbered bibliography has %d missing entr(ies): %s -- the layout model "
+            "likely produced no region for them (unrecoverable here)",
+            len(missing),
+            missing,
         )
 
 
@@ -275,7 +279,7 @@ def _splice_missing_from_layer(
         recovered: RawReference = {"page": by_key[prev_key]["page"], "number": None, "text": text}
         out.insert(out.index(by_key[prev_key]) + 1, recovered)
         by_key[n] = recovered
-        warnings.warn(f"recovered missing reference {n} from the PDF's embedded text layer")
+        logger.warning("recovered missing reference %s from the PDF's embedded text layer", n)
     return out
 
 

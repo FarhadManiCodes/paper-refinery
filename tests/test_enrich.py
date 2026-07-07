@@ -5,6 +5,7 @@ mirroring figures.describe_figure. Geometric pairing fixtures use (x1, y1, x2, y
 bboxes with y growing downward, captions sitting below their figures.
 """
 
+import logging
 from pathlib import Path
 
 from paper_refinery.config import FigureConfig
@@ -150,15 +151,16 @@ def test_enrich_skips_when_no_crops_for_the_page():
     assert "Figure description" not in out
 
 
-def test_enrich_failed_describer_warns_and_leaves_figure_undescribed(recwarn):
+def test_enrich_failed_describer_warns_and_leaves_figure_undescribed(caplog):
     def fake(crops, number, caption, context, cfg):
         if number == "1":
             raise RuntimeError("gemini down")
         return _desc("D2")
 
-    out = enrich_markdown(ParseResult(MD, figure_crops=CROPS), describe=fake)
+    with caplog.at_level(logging.WARNING):
+        out = enrich_markdown(ParseResult(MD, figure_crops=CROPS), describe=fake)
     assert "D2" in out and "DESC-1" not in out
-    assert any("FIGURE 1" in str(w.message) for w in recwarn.list)
+    assert "FIGURE 1" in caplog.text
 
 
 # ---------------------------------------------------------------------------

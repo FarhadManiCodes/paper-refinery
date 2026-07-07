@@ -37,8 +37,8 @@ independent of any OCR-detected page-number region (which is discarded as boiler
 from __future__ import annotations
 
 import json
+import logging
 import re
-import warnings
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
@@ -56,6 +56,8 @@ from .references import (
     repair_references,
 )
 from .tables import html_table_to_markdown
+
+logger = logging.getLogger(__name__)
 
 # PP-DocLayout-V3 label taxonomy (glmocr's config.yaml `label_task_mapping` / `id2label`).
 _ABANDON_LABELS = {
@@ -261,7 +263,7 @@ def _save_figure_crop(
                 break
 
     if img is None or filename is None:
-        warnings.warn(f"no cropped image found for a figure/chart region on page {page}")
+        logger.warning("no cropped image found for a figure/chart region on page %s", page)
         return None
 
     used_images.add(filename)

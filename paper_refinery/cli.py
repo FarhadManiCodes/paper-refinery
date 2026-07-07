@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import os
 import re
-import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +31,8 @@ from .enrich import enrich_markdown
 from .figures import describe_figure, make_client
 from .parse import ParseResult
 from .parse_cache import parse_pdf_cached
+
+logger = logging.getLogger(__name__)
 
 _IMAGE_LINK_RE = re.compile(r"(!\[[^\]]*\]\()([^)\s]+)(\))")
 
@@ -156,7 +158,9 @@ def _refine(
             try:
                 extracted, resolved = citations_future.result()
             except Exception as exc:
-                warnings.warn(f"citation stage failed ({exc}) -- {citations_out.name} not written")
+                logger.warning(
+                    "citation stage failed (%s) -- %s not written", exc, citations_out.name
+                )
             else:
                 # Detection matches the PRINTED form (extracted), never the resolved
                 # one: resolution legitimately moves years/authors off what the paper
@@ -241,6 +245,22 @@ def refine(
     )
 
 
+def _setup_logging() -> None:
+    """Route paper-refinery's own logs to stderr for a CLI run.
+
+    Configures only the package logger (not the root), so third-party INFO chatter from
+    glmocr/urllib stays quiet, and guards against duplicate handlers when the CLI is
+    invoked repeatedly in one process (tests). In-process callers of ``refine()`` set up
+    their own logging; WARNINGs still reach them via logging's last-resort handler.
+    """
+    pkg_logger = logging.getLogger("paper_refinery")
+    if not pkg_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        pkg_logger.addHandler(handler)
+    pkg_logger.setLevel(logging.INFO)
+
+
 @click.command()
 @click.argument("pdf", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
@@ -301,6 +321,7 @@ def main(
     from_stage: str | None,
 ) -> None:
     """Parse, figure-enrich, citation-verify, and chunk PDF for papis-ask."""
+    _setup_logging()
     cfg = load_config()
     if model_path is not None:
         cfg.parse.model_path = str(model_path)

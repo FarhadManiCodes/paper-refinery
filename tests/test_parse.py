@@ -8,6 +8,8 @@ test_backend.py), plus one live test with a real llama-server (skipped by defaul
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from paper_refinery.backend import OcrBackend
@@ -173,7 +175,7 @@ def test_build_markdown_reclaims_mislabeled_first_reference(tmp_path):
             _region("reference_content", "2. Bongard J (2007) Automated.", index=2),
         ]
     ]
-    md, _, _, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    md, _, _, refs = _build_markdown(pages, {}, tmp_path)
     assert "Jordan" not in md  # moved out of the body...
     assert [r["text"] for r in refs] == [  # ...into the references, in order
         "1. Jordan MI (2015) Machine learning. Science.",
@@ -181,29 +183,28 @@ def test_build_markdown_reclaims_mislabeled_first_reference(tmp_path):
     ]
 
 
-def test_build_markdown_warns_on_numbered_gap(tmp_path):
+def test_build_markdown_warns_on_numbered_gap(tmp_path, caplog):
     pages = [
         [
             _region("reference_content", "1. First.", index=0),
             _region("reference_content", "3. Third.", index=1),
         ]
     ]
-    with pytest.warns(UserWarning, match=r"missing entr\(ies\): \[2\]"):
-        _build_markdown(pages, {}, tmp_path, ParseConfig())
+    with caplog.at_level(logging.WARNING):
+        _build_markdown(pages, {}, tmp_path)
+    assert "missing entr(ies): [2]" in caplog.text
 
 
-def test_build_markdown_no_gap_warning_when_contiguous(tmp_path):
-    import warnings as warnings_mod
-
+def test_build_markdown_no_gap_warning_when_contiguous(tmp_path, caplog):
     pages = [
         [
             _region("reference_content", "1. First.", index=0),
             _region("reference_content", "2. Second.", index=1),
         ]
     ]
-    with warnings_mod.catch_warnings():
-        warnings_mod.simplefilter("error")
-        _build_markdown(pages, {}, tmp_path, ParseConfig())
+    with caplog.at_level(logging.WARNING):
+        _build_markdown(pages, {}, tmp_path)
+    assert "missing entr" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +221,7 @@ def test_build_markdown_drops_boilerplate_and_keeps_body(tmp_path):
             _region("footer", "1", index=3),
         ]
     ]
-    md, crops, _caps, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    md, crops, _caps, refs = _build_markdown(pages, {}, tmp_path)
     assert "Running Head" not in md
     assert md.count("<page_number>") == 1 and "<page_number>1</page_number>" in md
     assert "# A Paper" in md
@@ -235,7 +236,7 @@ def test_build_markdown_routes_references_out_of_body(tmp_path):
             _region("reference_content", "Smith, J. (2020).", index=1),
         ]
     ]
-    md, crops, _caps, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    md, crops, _caps, refs = _build_markdown(pages, {}, tmp_path)
     assert "Smith, J." not in md
     assert refs == [{"page": 1, "number": None, "text": "Smith, J. (2020)."}]
 
@@ -247,7 +248,7 @@ def test_build_markdown_pairs_reference_number_with_content(tmp_path):
             _region("reference_content", "Smith, J. (2020).", index=1),
         ]
     ]
-    md, crops, _caps, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    md, crops, _caps, refs = _build_markdown(pages, {}, tmp_path)
     assert refs == [{"page": 1, "number": "1", "text": "Smith, J. (2020)."}]
 
 
@@ -258,7 +259,7 @@ def test_build_markdown_saves_figure_crop_and_inserts_placeholder(tmp_path):
     image_files = {"cropped_page0_idx0.jpg": img}
     pages = [[_region("chart", "", index=0, image_path="imgs/cropped_page0_idx0.jpg")]]
 
-    md, crops, _caps, refs = _build_markdown(pages, image_files, tmp_path, ParseConfig())
+    md, crops, _caps, refs = _build_markdown(pages, image_files, tmp_path)
 
     assert 1 in crops and len(crops[1]) == 1
     assert crops[1][0].path.exists()
@@ -267,7 +268,7 @@ def test_build_markdown_saves_figure_crop_and_inserts_placeholder(tmp_path):
 
 def test_build_markdown_multiple_pages_have_distinct_markers(tmp_path):
     pages = [[_region("text", "page one", index=0)], [_region("text", "page two", index=0)]]
-    md, _, _, _ = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    md, _, _, _ = _build_markdown(pages, {}, tmp_path)
     assert "<page_number>1</page_number>" in md and "<page_number>2</page_number>" in md
     assert md.index("<page_number>1</page_number>") < md.index("page one")
     assert md.index("<page_number>2</page_number>") < md.index("page two")
@@ -280,7 +281,7 @@ def test_build_markdown_collects_captions_and_keeps_them_in_body(tmp_path):
             _region("figure_title", "FIGURE 2. A comparison of things.", index=1),
         ]
     ]
-    md, _, caps, _ = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    md, _, caps, _ = _build_markdown(pages, {}, tmp_path)
     assert "FIGURE 2. A comparison of things." in md  # still body markdown...
     assert [c.text for c in caps[1]] == ["FIGURE 2. A comparison of things."]  # ...and known
     assert caps[1][0].bbox is None  # fixture region carries no bbox_2d
@@ -293,7 +294,7 @@ def test_build_markdown_all_reference_page_emits_no_empty_part(tmp_path):
         [_region("text", "body", index=0)],
         [_region("reference_content", "Smith, J. (2020).", index=0)],
     ]
-    md, _, _, refs = _build_markdown(pages, {}, tmp_path, ParseConfig())
+    md, _, _, refs = _build_markdown(pages, {}, tmp_path)
     assert "\n\n\n" not in md
     assert md.endswith("<page_number>2</page_number>")
     assert len(refs) == 1
@@ -304,11 +305,12 @@ def test_build_markdown_all_reference_page_emits_no_empty_part(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_save_figure_crop_warns_and_returns_none_when_missing(tmp_path):
+def test_save_figure_crop_warns_and_returns_none_when_missing(tmp_path, caplog):
     region = {"image_path": None}
-    with pytest.warns(UserWarning):
+    with caplog.at_level(logging.WARNING):
         result = _save_figure_crop(region, {}, set(), tmp_path, page=1, idx=0)
     assert result is None
+    assert "no cropped image" in caplog.text
 
 
 # ---------------------------------------------------------------------------

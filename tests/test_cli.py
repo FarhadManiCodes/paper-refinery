@@ -1,6 +1,7 @@
 """Tests for the CLI: the chunks-manifest writer and the main orchestration wiring."""
 
 import json
+import logging
 
 from click.testing import CliRunner
 
@@ -273,7 +274,7 @@ def test_main_leaves_marker_unrewritten_when_citekey_is_missing(tmp_path, monkey
     assert (work_dir / "refinery.md").read_text() == "Body cites Smith (2019) here."
 
 
-def test_main_citation_failure_degrades_to_warning(tmp_path, monkeypatch):
+def test_main_citation_failure_degrades_to_warning(tmp_path, monkeypatch, caplog):
     # the chunks manifest is the primary product: a citation-stage crash (missing
     # API key, providers down) must warn loudly but never fail the run
     pdf = tmp_path / "p.pdf"
@@ -291,15 +292,12 @@ def test_main_citation_failure_degrades_to_warning(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "extract_references", boom)
 
-    import warnings as warnings_mod
-
-    with warnings_mod.catch_warnings(record=True) as caught:
-        warnings_mod.simplefilter("always")
+    with caplog.at_level(logging.WARNING):
         result = CliRunner().invoke(cli.main, [str(pdf)])
     assert result.exit_code == 0, result.output
     assert pdf.with_suffix(".chunks.json").exists()
     assert not pdf.with_suffix(".citations.json").exists()
-    assert any("citation stage failed" in str(w.message) for w in caught)
+    assert "citation stage failed" in caplog.text
 
 
 def test_force_parse_flag_controls_the_checkpoint_bypass(tmp_path, monkeypatch):
