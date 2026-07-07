@@ -25,10 +25,10 @@ from __future__ import annotations
 import re
 import warnings
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from .config import FigureConfig
 from .figures import describe_figure as _default_describe
@@ -176,17 +176,21 @@ def _pair_crops(
         if len(caption_bboxes) == 1:
             return {0: list(range(len(crops)))}
         return {i: [i] for i in range(min(len(crops), len(caption_bboxes)))}
+    # every bbox is well-formed past the guard; bind non-None copies (index-aligned with
+    # `crops` / `caption_bboxes`) so the geometry below is typed and never subscripts None
+    crop_boxes = [c.bbox for c in crops if c.bbox is not None]
+    cap_boxes = [b for b in caption_bboxes if b is not None]
 
     assignment: dict[int, list[int]] = defaultdict(list)
     unassigned: list[int] = []
-    for ci, crop in enumerate(crops):
+    for ci, crop_box in enumerate(crop_boxes):
         best, best_key = None, None
-        for ki, box in enumerate(caption_bboxes):
-            x_gap, y_gap = _axis_gaps(crop.bbox, box)
+        for ki, box in enumerate(cap_boxes):
+            x_gap, y_gap = _axis_gaps(crop_box, box)
             if x_gap > 0 and y_gap > 0:
                 continue  # separated on both axes: a diagonal neighbor, not this caption
-            cx = (crop.bbox[0] + crop.bbox[2] - box[0] - box[2]) / 2
-            cy = (crop.bbox[1] + crop.bbox[3] - box[1] - box[3]) / 2
+            cx = (crop_box[0] + crop_box[2] - box[0] - box[2]) / 2
+            cy = (crop_box[1] + crop_box[3] - box[1] - box[3]) / 2
             key = (max(x_gap, y_gap), cx * cx + cy * cy)
             if best_key is None or key < best_key:
                 best, best_key = ki, key
@@ -195,8 +199,8 @@ def _pair_crops(
         else:
             unassigned.append(ci)
 
-    if len(caption_bboxes) == 1 and unassigned and assignment:
-        boxes = [c.bbox for c in crops] + [b for b in caption_bboxes if b]
+    if len(cap_boxes) == 1 and unassigned and assignment:
+        boxes = crop_boxes + cap_boxes
         span = (max(b[2] for b in boxes) - min(b[0] for b in boxes)) or 1.0
         near = _CLUSTER_GAP_FRACTION * span
         member = set(assignment[0])
@@ -204,8 +208,8 @@ def _pair_crops(
         while changed:
             changed = False
             for ci in list(unassigned):
-                for mi in member:
-                    x_gap, y_gap = _axis_gaps(crops[ci].bbox, crops[mi].bbox)
+                for mi in list(member):  # snapshot: member is mutated inside the loop
+                    x_gap, y_gap = _axis_gaps(crop_boxes[ci], crop_boxes[mi])
                     if (x_gap == 0 or y_gap == 0) and max(x_gap, y_gap) <= near:
                         member.add(ci)
                         unassigned.remove(ci)
@@ -346,15 +350,17 @@ def enrich_markdown(
     header = _paper_header(md)
 
     # one describe task per figure that has crop(s)
-    tasks: dict[tuple[int | None, str], tuple[list[Path], _Caption, dict]] = {}
+    tasks: dict[tuple[int, str], tuple[list[Path], _Caption, dict]] = {}
     for page, captions in by_page.items():
+        if page is None:  # None-page captions never got crops in the first pass
+            continue
         for caption in captions:
             crops = figure_crops.get((page, caption.number))
             if crops:
                 context = {**header, **_neighbor_context(md, caption, cfg.context_paragraphs)}
                 tasks[(page, caption.number)] = (crops, caption, context)
 
-    results: dict[tuple[int | None, str], dict | None] = {}
+    results: dict[tuple[int, str], dict | None] = {}
     if tasks:
         with ThreadPoolExecutor(max_workers=cfg.max_workers) as pool:
             futures = {

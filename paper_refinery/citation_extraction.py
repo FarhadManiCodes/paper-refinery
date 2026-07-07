@@ -13,12 +13,16 @@ from __future__ import annotations
 import os
 import re
 import warnings
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
 from .config import CitationConfig
 from .retry import call_with_backoff
 from .text_utils import leading_number
+
+if TYPE_CHECKING:
+    from google.genai import Client
 
 
 class Author(BaseModel):
@@ -87,7 +91,7 @@ _PROMPT = (
 )
 
 
-def make_client(cfg: CitationConfig):
+def make_client(cfg: CitationConfig) -> Client:
     """Create a Gemini client. Build one and reuse it across the whole bibliography.
 
     Assumes API keys are already loaded into the environment -- see
@@ -101,7 +105,9 @@ def make_client(cfg: CitationConfig):
     return genai.Client(api_key=api_key)
 
 
-def extract_references(raw_texts: list[str], cfg: CitationConfig, client=None) -> list[dict]:
+def extract_references(
+    raw_texts: list[str], cfg: CitationConfig, client: Client | None = None
+) -> list[dict]:
     """Extract rough structured fields from each raw reference string, in one batched,
     schema-enforced Gemini call.
 
@@ -137,10 +143,11 @@ def extract_references(raw_texts: list[str], cfg: CitationConfig, client=None) -
         cfg.retry_base_delay,
     )
 
-    # response.parsed is None when the model's JSON couldn't be coerced to the schema
-    # at all -- degrade to the same pad-with-{} path as a length mismatch, never crash
-    parsed = response.parsed or []
-    items = [r.model_dump(exclude_none=True) for r in parsed]
+    # response.parsed is None -- or, defensively, any non-list shape -- when the model's
+    # JSON couldn't be coerced to the schema; degrade to the pad-with-{} path, never crash
+    parsed = response.parsed
+    rows = parsed if isinstance(parsed, list) else []
+    items = [r.model_dump(exclude_none=True) for r in rows if isinstance(r, ExtractedReference)]
     if len(items) != len(raw_texts):
         warnings.warn(
             f"extract_references: got {len(items)} items for {len(raw_texts)} input "

@@ -52,6 +52,17 @@ def _relativize_image_links(md: str, base: Path) -> str:
     return _IMAGE_LINK_RE.sub(_rel, md)
 
 
+def _default_outputs(
+    pdf: Path, out: Path | None, citations_out: Path | None, work_dir: Path | None
+) -> tuple[Path, Path, Path]:
+    """Fill in the default artifact locations (next to the PDF) for any left as None."""
+    return (
+        out or pdf.with_suffix(".chunks.json"),
+        citations_out or pdf.with_suffix(".citations.json"),
+        work_dir or pdf.with_suffix(".refinery"),
+    )
+
+
 def write_chunks(chunks: list[Chunk], docname: str, source_pdf: str, out_path: Path) -> None:
     """Serialize chunks to the hand-off JSON that papis-ask ingests via aadd_texts."""
     payload = {
@@ -223,9 +234,7 @@ def refine(
     """
     pdf = Path(pdf)
     cfg = cfg or load_config()
-    out = out or pdf.with_suffix(".chunks.json")
-    citations_out = citations_out or pdf.with_suffix(".citations.json")
-    work_dir = work_dir or pdf.with_suffix(".refinery")
+    out, citations_out, work_dir = _default_outputs(pdf, out, citations_out, work_dir)
     chunks, _summary = _refine(pdf, out, citations_out, work_dir, cfg, force_parse=force_parse)
     return RefineResult(
         chunks=chunks, chunks_path=out, citations_path=citations_out, work_dir=work_dir
@@ -297,9 +306,7 @@ def main(
         cfg.parse.model_path = str(model_path)
     if mmproj_path is not None:
         cfg.parse.mmproj_path = str(mmproj_path)
-    out = out or pdf.with_suffix(".chunks.json")
-    citations_out = citations_out or pdf.with_suffix(".citations.json")
-    work_dir = work_dir or pdf.with_suffix(".refinery")
+    out, citations_out, work_dir = _default_outputs(pdf, out, citations_out, work_dir)
 
     if from_stage == "chunk":
         summary = _rechunk(pdf, out, work_dir, cfg)

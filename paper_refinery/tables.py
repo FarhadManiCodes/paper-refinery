@@ -8,19 +8,24 @@ place ``beautifulsoup4`` is used -- kept apart from parse.py's region-classifica
 
 from __future__ import annotations
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 
-def _int_attr(cell, name: str, default: int = 1) -> int:
+def _int_attr(cell: Tag, name: str, default: int = 1) -> int:
     """A tag's ``rowspan``/``colspan`` attribute as an int, tolerating a malformed value.
 
     The source HTML is GLM-OCR's own model-generated output, not hand-authored markup --
     a non-numeric span value is a real (if rare) failure mode, not a "can't happen" input,
-    and one bad cell shouldn't crash the whole page's table conversion.
+    and one bad cell shouldn't crash the whole page's table conversion. (bs4 types an
+    attribute as ``str | list | None``; a span is never multi-valued, so a list -- like an
+    absent attribute -- falls back to the default.)
     """
+    value = cell.get(name)
+    if not isinstance(value, str):
+        return default
     try:
-        return int(cell.get(name, default) or default)
-    except (TypeError, ValueError):
+        return int(value)
+    except ValueError:
         return default
 
 

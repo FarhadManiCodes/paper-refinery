@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from llama_index.core import Document
 from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
+from llama_index.core.schema import TextNode
 
 from .config import ChunkConfig
 from .markers import PAGE_MARKER_RE
@@ -58,7 +59,9 @@ class Chunk:
 
 def _split_sections(markdown: str) -> list[str]:
     nodes = MarkdownNodeParser().get_nodes_from_documents([Document(text=markdown)])
-    return [n.text for n in nodes]
+    # MarkdownNodeParser emits TextNodes (one per section); the isinstance keeps the
+    # checker honest about `.text`, which lives on TextNode, not the BaseNode return type
+    return [n.text for n in nodes if isinstance(n, TextNode)]
 
 
 def _subsplit(text: str, cfg: ChunkConfig) -> list[str]:

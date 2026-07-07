@@ -27,12 +27,16 @@ import io
 import os
 import unicodedata
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
 from .config import FigureConfig
 from .disk_cache import cache_path, read_json, write_json
 from .retry import call_with_backoff
+
+if TYPE_CHECKING:
+    from google.genai import Client
 
 # (type id, what to pay attention to) -- shown to the model verbatim. Types cover the
 # figures that actually appear in computational engineering / CS / math papers.
@@ -145,7 +149,7 @@ def _cache_path(crops: list[Path], prompt: str, cfg: FigureConfig) -> Path | Non
     return cache_path(cfg.figure_cache_dir, digest.hexdigest())
 
 
-def make_client(cfg: FigureConfig | None = None):
+def make_client(cfg: FigureConfig | None = None) -> Client:
     """Create a Gemini client. Build one and reuse it across figures (see cli.py).
 
     Assumes API keys are already loaded into the environment -- see
@@ -166,7 +170,7 @@ def describe_figure(
     caption: str,
     context: dict | None = None,
     cfg: FigureConfig | None = None,
-    client=None,
+    client: Client | None = None,
 ) -> dict | None:
     """Describe one figure (all its panel crops together) in one Gemini call.
 
@@ -205,8 +209,9 @@ def describe_figure(
         cfg.retry_base_delay,
     )
     parsed = response.parsed
-    if parsed is None:
-        return None  # schema coercion failed -- not cached, next run retries
+    if not isinstance(parsed, FigureDescription):
+        # None or an unexpected shape = schema coercion failed; not cached, retries next run
+        return None
     result: dict | None = {
         "figure_type": parsed.figure_type.strip(),
         "description": _strip_orphan_combining(parsed.description).strip(),

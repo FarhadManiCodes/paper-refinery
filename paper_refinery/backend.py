@@ -21,11 +21,16 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import ParseConfig, load_config
+
+if TYPE_CHECKING:
+    from glmocr import GlmOcr
 
 # "chart"/"image" in glmocr's id2label (config.yaml); re-check on upgrade. Lives here
 # (not parse.py) because it's only used to build the backend's layout-config overrides.
@@ -41,7 +46,7 @@ class OcrBackend:
     HTTP calls loose.
     """
 
-    parser: object  # glmocr.GlmOcr, entered
+    parser: GlmOcr  # the entered glmocr.GlmOcr (imported lazily; typed via TYPE_CHECKING)
     server: subprocess.Popen
 
 
@@ -65,7 +70,7 @@ def _ensure_port_free(cfg: ParseConfig) -> None:
 
 
 @contextmanager
-def _llama_server(cfg: ParseConfig):
+def _llama_server(cfg: ParseConfig) -> Iterator[subprocess.Popen]:
     """Spawn llama-server serving GLM-OCR, wait for it to become healthy, tear it down."""
     if not cfg.model_path:
         raise RuntimeError("ParseConfig.model_path is not set (GLM-OCR GGUF weights)")
@@ -150,7 +155,7 @@ def _dotted_overrides(cfg: ParseConfig) -> dict:
 
 
 @contextmanager
-def ocr_backend(cfg: ParseConfig | None = None):
+def ocr_backend(cfg: ParseConfig | None = None) -> Iterator[OcrBackend]:
     """Spawn llama-server + GlmOcr once and yield a live ``OcrBackend``.
 
     The one place the glmocr SDK is imported/constructed. Reuse the yielded backend

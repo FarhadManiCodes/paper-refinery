@@ -359,5 +359,6 @@ def rewrite_markers(markdown: str, markers: list[Marker], citekeys: list[str | N
         keys = [citekeys[i] if i < len(citekeys) else None for i in mk.ref_indices]
         if any(k is None for k in keys):
             continue
-        out = out[: mk.start] + "[" + "; ".join(keys) + "]" + out[mk.end :]
+        joined = "; ".join(k for k in keys if k is not None)  # all present past the guard
+        out = out[: mk.start] + f"[{joined}]" + out[mk.end :]
     return out

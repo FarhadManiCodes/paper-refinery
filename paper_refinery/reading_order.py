@@ -17,11 +17,15 @@ _COLUMN_OVERLAP = 0.5  # of the narrower region's width: x-overlap needed to sha
 _Y_TOL_FRACTION = 0.01  # of page width: y-difference treated as "same line" (~half a line)
 
 
-def region_bbox(region: dict) -> tuple[float, float, float, float] | None:
+_Box = tuple[float, float, float, float]  # (x1, y1, x2, y2) in page pixels
+
+
+def region_bbox(region: dict) -> _Box | None:
     """The region's ``bbox_2d`` as an (x1, y1, x2, y2) tuple; None unless well-formed."""
     box = region.get("bbox_2d")
     if isinstance(box, (list, tuple)) and len(box) == 4:
-        return tuple(float(v) for v in box)
+        x1, y1, x2, y2 = (float(v) for v in box)
+        return (x1, y1, x2, y2)
     return None
 
 
@@ -45,23 +49,27 @@ def reading_order(regions: list[dict]) -> list[dict]:
     - any region missing a well-formed ``bbox_2d`` -> plain index order, unchanged.
     """
     regs = sorted(regions, key=lambda r: r.get("index", 0))
-    boxes = [r.get("bbox_2d") for r in regs]
-    if not boxes or any(b is None or len(b) != 4 for b in boxes):
+    boxes = [region_bbox(r) for r in regs]
+    if not boxes or any(b is None for b in boxes):
         return regs
+    boxes = [b for b in boxes if b is not None]  # all well-formed past the guard above
     page_w = (max(b[2] for b in boxes) - min(b[0] for b in boxes)) or 1
     y_tol = _Y_TOL_FRACTION * page_w
 
-    def is_wide(b) -> bool:
-        return (b[2] - b[0]) > _WIDE_FRACTION * page_w
+    def is_wide(box: _Box) -> bool:
+        return (box[2] - box[0]) > _WIDE_FRACTION * page_w
 
-    def same_column(a, b) -> bool:
+    def same_column(a: _Box, b: _Box) -> bool:
         overlap = min(a[2], b[2]) - max(a[0], b[0])
         return overlap > _COLUMN_OVERLAP * min(a[2] - a[0], b[2] - b[0])
 
     def by_top(a: dict, b: dict) -> int:
+        # same line (within tolerance) -> 0, so the stable sort keeps glmocr's order.
+        # The tolerance makes this comparator non-transitive by design; validated live
+        # and preferred over line-bucketing -- see the module docstring.
         dy = a["bbox_2d"][1] - b["bbox_2d"][1]
         if abs(dy) <= y_tol:
-            return 0  # same line -> stable sort keeps glmocr's order
+            return 0
         return -1 if dy < 0 else 1
 
     ordered: list[dict] = []
