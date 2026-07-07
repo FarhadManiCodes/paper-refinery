@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 import stat
 import tomllib
+import types
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Union, get_args, get_origin, get_type_hints
 
 
 @dataclass
@@ -153,17 +155,41 @@ class RefineryConfig:
     citation: CitationConfig = field(default_factory=CitationConfig)
 
 
-DEFAULT_CONFIG_PATH = Path.home() / ".config" / "paper-refinery" / "config.toml"
-DEFAULT_SECRETS_DIR = Path.home() / ".config" / "paper-refinery" / "secrets"
-#   One small file per service (e.g. google.env holding GOOGLE_API_KEY, hf.env holding
-#   HF_TOKEN) rather than one combined file -- keeps each credential's blast radius
-#   minimal. Deliberately its own directory, never shared with any other tool's secrets
-#   (e.g. papis-ask's own env can set OPENAI_BASE_URL/OPENAI_API_KEY for its local
-#   embedding server -- sourcing that into this process would silently redirect
-#   glmocr's OpenAI-compatible client away from our own local llama-server).
-#   Overridable via $PAPER_REFINERY_SECRETS_DIR. User-managed: paper-refinery only ever
-#   reads files here (via python-dotenv, which no-ops if the directory is absent/empty),
-#   never creates or writes any of them.
+def _xdg_config_home() -> Path:
+    """XDG base config directory: ``$XDG_CONFIG_HOME`` when set to an absolute path,
+    else ``~/.config`` (per the XDG Base Directory spec)."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg and os.path.isabs(xdg):
+        return Path(xdg)
+    return Path.home() / ".config"
+
+
+def _config_dir() -> Path:
+    return _xdg_config_home() / "paper-refinery"
+
+
+def _default_config_path() -> Path:
+    """Config-file location: ``$PAPER_REFINERY_CONFIG`` if set, else
+    ``<xdg-config-home>/paper-refinery/config.toml``."""
+    override = os.environ.get("PAPER_REFINERY_CONFIG")
+    return Path(override) if override else _config_dir() / "config.toml"
+
+
+def _default_secrets_dir() -> Path:
+    """Secrets directory: ``$PAPER_REFINERY_SECRETS_DIR`` if set, else
+    ``<xdg-config-home>/paper-refinery/secrets``.
+
+    One small file per service (e.g. google.env holding GOOGLE_API_KEY, hf.env holding
+    HF_TOKEN) rather than one combined file -- keeps each credential's blast radius
+    minimal. Deliberately its own directory, never shared with any other tool's secrets
+    (e.g. papis-ask's own env can set OPENAI_BASE_URL/OPENAI_API_KEY for its local
+    embedding server -- sourcing that into this process would silently redirect glmocr's
+    OpenAI-compatible client away from our own local llama-server). User-managed:
+    paper-refinery only ever reads files here (via python-dotenv, which no-ops if the
+    directory is absent/empty), never creates or writes any of them.
+    """
+    override = os.environ.get("PAPER_REFINERY_SECRETS_DIR")
+    return Path(override) if override else _config_dir() / "secrets"
 
 
 def _load_secrets(dir_path: Path | None = None) -> None:
@@ -179,7 +205,7 @@ def _load_secrets(dir_path: Path | None = None) -> None:
     """
     from dotenv import load_dotenv
 
-    dir_path = dir_path or Path(os.environ.get("PAPER_REFINERY_SECRETS_DIR", DEFAULT_SECRETS_DIR))
+    dir_path = dir_path or _default_secrets_dir()
     if not dir_path.is_dir():
         return
     for env_file in sorted(dir_path.glob("*.env")):
@@ -190,6 +216,49 @@ def _load_secrets(dir_path: Path | None = None) -> None:
                 f"consider `chmod 600 {env_file}`"
             )
         load_dotenv(env_file)
+
+
+def _type_name(field_type: object) -> str:
+    return getattr(field_type, "__name__", None) or str(field_type)
+
+
+def _coerce_overlay_value(field_type: object, value: object) -> object:
+    """Validate/coerce one TOML value against a config field's declared type.
+
+    TOML's type set is narrower than Python's, so a little coercion is expected and
+    safe: an int literal fills a float field (``retry_base_delay = 5``), and a list fills
+    a tuple field (``extra_server_args``). Anything genuinely mismatched raises
+    ``TypeError`` (message = the expected type name) so ``load_config`` can surface it at
+    the offending ``[section] key`` instead of letting a wrong-typed value detonate deep
+    in a later stage (e.g. a stringy ``port`` reaching a socket call).
+    """
+    origin = get_origin(field_type)
+    if origin is Union or origin is types.UnionType:  # e.g. `str | None`
+        for member in get_args(field_type):
+            if member is type(None):
+                continue
+            try:
+                return _coerce_overlay_value(member, value)
+            except TypeError:
+                pass
+        raise TypeError(_type_name(field_type))
+    if origin in (tuple, list):
+        if not isinstance(value, list):
+            raise TypeError(_type_name(field_type))
+        (elem_type, *_rest) = get_args(field_type) or (str,)
+        coerced = [_coerce_overlay_value(elem_type, v) for v in value]
+        return tuple(coerced) if origin is tuple else coerced
+    if field_type is float:  # a TOML int legitimately fills a float field
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("float")
+        return float(value)
+    if field_type is int:  # but never let a TOML float/bool masquerade as an int
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError("int")
+        return value
+    if isinstance(field_type, type) and isinstance(value, field_type):  # str, dict, ...
+        return value
+    raise TypeError(_type_name(field_type))
 
 
 def load_config(path: Path | None = None) -> RefineryConfig:
@@ -216,7 +285,7 @@ def load_config(path: Path | None = None) -> RefineryConfig:
     """
     _load_secrets()
     cfg = RefineryConfig()
-    path = path or DEFAULT_CONFIG_PATH
+    path = path or _default_config_path()
     if not path.exists():
         return cfg
     with path.open("rb") as f:
@@ -225,8 +294,16 @@ def load_config(path: Path | None = None) -> RefineryConfig:
         sub = getattr(cfg, section, None)
         if sub is None:
             raise ValueError(f"{path}: unknown config section [{section}]")
+        hints = get_type_hints(type(sub))
         for key, value in values.items():
-            if not hasattr(sub, key):
+            if key not in hints:
                 raise ValueError(f"{path}: unknown key '{key}' in [{section}]")
+            try:
+                value = _coerce_overlay_value(hints[key], value)
+            except TypeError as exc:
+                raise ValueError(
+                    f"{path}: [{section}] {key} expects {exc}, got "
+                    f"{type(value).__name__} ({value!r})"
+                ) from None
             setattr(sub, key, value)
     return cfg

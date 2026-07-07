@@ -8,6 +8,7 @@ from paper_refinery.config import (
     FigureConfig,
     ParseConfig,
     RefineryConfig,
+    _default_config_path,
     load_config,
 )
 
@@ -96,3 +97,38 @@ def test_load_config_rejects_unknown_key(tmp_path):
     path.write_text("[parse]\nnot_a_real_field = 1\n")
     with pytest.raises(ValueError, match="unknown key"):
         load_config(path)
+
+
+def test_load_config_rejects_wrong_type(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[parse]\nport = "8080"\n')  # quoted -> string, but port is an int
+    with pytest.raises(ValueError, match="expects int"):
+        load_config(path)
+
+
+def test_load_config_coerces_int_to_float(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("[parse]\nfigure_crop_margin = 2\n")  # TOML int -> float field
+    cfg = load_config(path)
+    assert cfg.parse.figure_crop_margin == 2.0
+    assert isinstance(cfg.parse.figure_crop_margin, float)
+
+
+def test_load_config_coerces_list_to_tuple_for_server_args(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[parse]\nextra_server_args = ["--flash-attn", "off"]\n')
+    cfg = load_config(path)
+    assert cfg.parse.extra_server_args == ("--flash-attn", "off")
+
+
+def test_default_config_path_honors_xdg_config_home(monkeypatch, tmp_path):
+    monkeypatch.delenv("PAPER_REFINERY_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert _default_config_path() == tmp_path / "paper-refinery" / "config.toml"
+
+
+def test_default_config_path_env_override_wins(monkeypatch, tmp_path):
+    override = tmp_path / "custom.toml"
+    monkeypatch.setenv("PAPER_REFINERY_CONFIG", str(override))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "ignored"))
+    assert _default_config_path() == override
