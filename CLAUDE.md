@@ -48,10 +48,11 @@ have missed real OCR-ordering bugs.
 
 ## Architecture
 
-Pipeline stages, each a single-purpose module; `cli.py::_refine` owns all wiring, the
-modules own logic (never call each other except `enrich`→`parse` for its result type,
-`parse`→`references` for bibliography repair, and `citation_resolution`→
-`citation_providers` for the actual provider HTTP calls):
+Pipeline stages, each a single-purpose module; `cli.py` owns all wiring (`_refine` parses,
+then `_refine_parsed` runs the post-parse stages), the modules own logic (never call each
+other except `enrich`→`parse` for its result type, `parse`→`references` for bibliography
+repair, `citation_resolution`→`citation_providers` for the actual provider HTTP calls, and
+`parse_cache`→`parse`/`backend` for checkpointed parsing):
 
 ```
 backend.py               llama-server + GlmOcr lifecycle; ocr_backend() is reusable across PDFs
@@ -82,15 +83,27 @@ citation_resolution.py   layer 2/3: verify/enrich each reference against CrossRe
                           OpenAlex (DOI-first shortcut, title-similarity + year-tolerance
                           acceptance); a verified year never overwrites *below* the printed
                           one (providers can merge preprint+published and report the
-                          earlier year) -- decides what to trust from citation_providers.py's
-                          answers
+                          earlier year). FAST-PATH: when the SOURCE paper is identified (its
+                          DOI or OCR'd title -> SourcePaper), fetch its whole bibliography in
+                          one S2 bulk /references call (filled from OpenAlex referenced_works
+                          when S2 is publisher-elided), match each printed ref locally, and
+                          fall back to the per-entry provider search only for what doesn't
+                          match -- decides what to trust from citation_providers.py's answers
 citation_linking.py      layer 4: deterministic (no LLM) in-text marker detection against
                           the layer-1 EXTRACTED (printed-form) entries, plus the
                           resolution-verified-only `[surname_year]` citekey rewrite
 chunker.py                section-aware split + guaranteed soft-overlap + page ranges ->
                           list[Chunk]
+parse_cache.py           parse checkpoint: persist ParseResult + its raw crops to
+                          <pdf>.refinery/parse_cache/ keyed on pdf-hash + parse-config
+                          signature, so a re-run skips the (~10-min) OCR pass; parse_pdf_cached()
+                          wraps parse_pdf, restoring crops on a hit
 cli.py                    orchestrate the above (citations run concurrently with figure
-                          enrich); write .chunks.json / .citations.json / paper.refinery/
+                          enrich); write .chunks.json / .citations.json / paper.refinery/.
+                          Public API: refine() (one PDF) and refine_many() (streaming batch --
+                          serial OCR on one shared backend, network stages overlapped across
+                          papers, yields in completion order); CLI flags --force-parse /
+                          --from chunk / --doi
 ```
 
 ### Key cross-cutting contracts
