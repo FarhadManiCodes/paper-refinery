@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
@@ -153,6 +154,29 @@ def _wrap_formula(content: str) -> str:
     return f"$$\n{text}\n$$"
 
 
+# single-label -> (kind, formatted-text) handlers. The membership-set labels
+# (_ABANDON_LABELS / _FORMULA_LABELS / _FIGURE_LABELS) are handled separately in
+# _dispatch_region; every category is disjoint, so a region matches at most one path.
+_REGION_HANDLERS: dict[str, Callable[[str], tuple[str, str]]] = {
+    _DOC_TITLE_LABEL: lambda c: ("body", f"# {_strip_heading_prefix(c)}"),
+    _PARAGRAPH_TITLE_LABEL: lambda c: ("body", f"## {_strip_heading_prefix(c)}"),
+    # kept in the body markdown like plain text, but ALSO surfaced as a known caption
+    # (ParseResult.figure_captions) so enrich.py can anchor on layout-model ground truth
+    # instead of guessing captions from body text by regex alone
+    _FIGURE_TITLE_LABEL: lambda c: ("caption", c),
+    _REFERENCE_NUMBER_LABEL: lambda c: ("reference_number", c),
+    _REFERENCE_LABEL: lambda c: ("reference", c),
+    _TABLE_LABEL: lambda c: ("body", html_table_to_markdown(c)),
+    _ALGORITHM_LABEL: lambda c: ("body", f"```\n{c}\n```"),
+    # standalone equation-number region: glmocr folds these into the formula's own content
+    # upstream by default (enable_merge_formula_numbers), so under default settings this
+    # never fires. If a glmocr_config_overrides caller disables that merge, the number
+    # degrades to its own "(N)" paragraph rather than being dropped -- occasional loss of
+    # \tag{} fidelity is acceptable here.
+    _FORMULA_NUMBER_LABEL: lambda c: ("body", f"({c.strip('() ')})" if c else ""),
+}
+
+
 def _dispatch_region(region: dict) -> tuple[str, str]:
     """Classify one glmocr region and format its content.
 
@@ -162,41 +186,21 @@ def _dispatch_region(region: dict) -> tuple[str, str]:
     "reference_content") over ``label`` (glmocr's coarse text/table/formula/skip bucket,
     e.g. "text"/"formula"), which can't distinguish reference_content from body text, or
     chart from image. Confirmed against a live glmocr response: both keys are present on
-    every region dict.
+    every region dict. Membership-set labels are matched first, then the single-label
+    ``_REGION_HANDLERS`` table, then an unknown label degrades to plain body text.
     """
     label = region.get("native_label") or region.get("label") or ""
     content = (region.get("content") or "").strip()
 
     if label in _ABANDON_LABELS:
         return "abandon", ""
-    if label == _DOC_TITLE_LABEL:
-        return "body", f"# {_strip_heading_prefix(content)}"
-    if label == _PARAGRAPH_TITLE_LABEL:
-        return "body", f"## {_strip_heading_prefix(content)}"
-    if label == _FIGURE_TITLE_LABEL:
-        # kept in the body markdown like plain text, but ALSO surfaced as a known
-        # caption (ParseResult.figure_captions) so enrich.py can anchor on layout-model
-        # ground truth instead of guessing captions from body text by regex alone
-        return "caption", content
-    if label == _REFERENCE_NUMBER_LABEL:
-        return "reference_number", content
-    if label == _REFERENCE_LABEL:
-        return "reference", content
-    if label == _TABLE_LABEL:
-        return "body", html_table_to_markdown(content)
-    if label == _ALGORITHM_LABEL:
-        return "body", f"```\n{content}\n```"
     if label in _FORMULA_LABELS:
         return "body", _wrap_formula(content)
-    if label == _FORMULA_NUMBER_LABEL:
-        # standalone equation-number region: glmocr folds these into the formula's own
-        # content upstream by default (enable_merge_formula_numbers), so under default
-        # settings this never fires. If a glmocr_config_overrides caller disables that
-        # merge, the number degrades to its own "(N)" paragraph rather than being
-        # dropped -- occasional loss of \tag{} fidelity is acceptable here.
-        return "body", f"({content.strip('() ')})" if content else ""
     if label in _FIGURE_LABELS:
         return "figure", ""
+    handler = _REGION_HANDLERS.get(label)
+    if handler is not None:
+        return handler(content)
     return "body", content  # unknown label: keep as text rather than silently drop it
 
 
@@ -272,6 +276,62 @@ def _save_figure_crop(
     return crop_path
 
 
+def _make_figure_crop(
+    page: int,
+    idx: int,
+    region: dict,
+    image_files: dict,
+    used_images: set[str],
+    figures_dir: Path,
+) -> tuple[CropRegion, str] | None:
+    """Save a figure region's crop and return its ``CropRegion`` plus the placeholder image
+    line for the body -- or None when no crop could be produced (source image already used,
+    or the region has no usable image)."""
+    crop_path = _save_figure_crop(region, image_files, used_images, figures_dir, page, idx)
+    if crop_path is None:
+        return None
+    return CropRegion(crop_path, region_bbox(region)), f"![FIGURE_CROP {page}:{idx}]({crop_path})"
+
+
+def _emit_page_body(
+    page: int,
+    triples: list[tuple[str, str, dict]],
+    image_files: dict,
+    used_images: set[str],
+    figures_dir: Path,
+) -> tuple[list[str], list[CaptionRegion], list[RawReference], list[CropRegion]]:
+    """Turn one page's classified ``(kind, text, region)`` triples into its body-markdown
+    parts plus the captions, references, and figure crops found on that page.
+
+    Each page is self-contained (crops are indexed from 0 within the page), so this returns
+    the page's four collections for the caller to merge -- no cross-page shared state.
+    """
+    body_parts: list[str] = []
+    captions: list[CaptionRegion] = []
+    refs: list[RawReference] = []
+    crops: list[CropRegion] = []
+    for kind, text, region in triples:
+        if kind == "body":
+            if text.strip():
+                body_parts.append(text)
+        elif kind == "caption":
+            if text.strip():
+                body_parts.append(text)  # stays in the body markdown as-is...
+                captions.append(CaptionRegion(text, region_bbox(region)))  # ...and is known
+        elif kind == "reference":
+            if text.strip():
+                refs.append({"page": page, "number": region.get("number"), "text": text})
+        elif kind == "figure":
+            figure = _make_figure_crop(
+                page, len(crops), region, image_files, used_images, figures_dir
+            )
+            if figure is not None:
+                crop, image_line = figure
+                crops.append(crop)
+                body_parts.append(image_line)
+    return body_parts, captions, refs, crops
+
+
 def _build_markdown(
     pages_regions: list[list[dict]],
     image_files: dict,
@@ -297,29 +357,14 @@ def _build_markdown(
         triples = _merge_reference_numbers(triples)
         triples = reclaim_mislabeled_references(triples)
 
-        body_parts: list[str] = []
-        for kind, text, region in triples:
-            if kind == "body":
-                if text.strip():
-                    body_parts.append(text)
-            elif kind == "caption":
-                if text.strip():
-                    body_parts.append(text)  # stays in the body markdown as-is...
-                    figure_captions.setdefault(page, []).append(  # ...and is known
-                        CaptionRegion(text, region_bbox(region))
-                    )
-            elif kind == "reference":
-                if text.strip():
-                    references.append({"page": page, "number": region.get("number"), "text": text})
-            elif kind == "figure":
-                idx = len(figure_crops.get(page, []))
-                crop_path = _save_figure_crop(
-                    region, image_files, used_images, figures_dir, page, idx
-                )
-                if crop_path is None:
-                    continue
-                figure_crops.setdefault(page, []).append(CropRegion(crop_path, region_bbox(region)))
-                body_parts.append(f"![FIGURE_CROP {page}:{idx}]({crop_path})")
+        body_parts, captions, page_refs, crops = _emit_page_body(
+            page, triples, image_files, used_images, figures_dir
+        )
+        if captions:
+            figure_captions[page] = captions
+        if crops:
+            figure_crops[page] = crops
+        references.extend(page_refs)
 
         parts.append(page_marker(page))
         if body_parts:  # a page can be all references/boilerplate -- no empty part then

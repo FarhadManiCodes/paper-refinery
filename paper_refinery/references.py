@@ -98,7 +98,26 @@ def repair_references(
     return references
 
 
-_SURNAME_PARTICLES = frozenset("van von de del della der den da di du la le les ter ten te".split())
+_SURNAME_PARTICLES = frozenset(
+    [
+        "van",
+        "von",
+        "de",
+        "del",
+        "della",
+        "der",
+        "den",
+        "da",
+        "di",
+        "du",
+        "la",
+        "le",
+        "les",
+        "ter",
+        "ten",
+        "te",
+    ]
+)
 #   lowercase surname prefixes that legitimately START a bibliography entry
 #   ("van Wijk, J. ..."): a lowercase first word alone must not read as a continuation
 

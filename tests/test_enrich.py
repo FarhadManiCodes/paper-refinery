@@ -257,7 +257,7 @@ def test_enrich_geometric_pairing_beats_list_order(tmp_path):
 
     def fake(crops, number, caption, context, cfg):
         calls[number] = [c.read_bytes() for c in crops]
-        return None
+        return
 
     enrich_markdown(parsed, describe=fake)
     assert calls["1"] == [b"upper"] and calls["2"] == [b"lower"]
@@ -366,7 +366,7 @@ def test_enrich_single_caption_page_without_geometry_takes_all_crops(tmp_path):
 
     def fake(crops, number, caption, context, cfg):
         calls.append((number, [c.name for c in crops]))
-        return None
+        return
 
     enrich_markdown(
         ParseResult(md, figure_crops={2: [CropRegion(crop0), CropRegion(crop1)]}),
@@ -399,7 +399,7 @@ def test_enrich_regex_caption_survives_known_filter_when_number_uncovered(tmp_pa
 
     def fake(crops, number, caption, context, cfg):
         calls.append(number)
-        return None
+        return
 
     enrich_markdown(parsed, describe=fake)
     assert sorted(calls) == ["1", "3"]
@@ -441,7 +441,7 @@ def test_enrich_side_caption_pairs_by_y_overlap(tmp_path):
 
     def fake(crops, number, caption, context, cfg):
         calls.append((number, [c.name for c in crops]))
-        return None
+        return
 
     enrich_markdown(parsed, describe=fake)
     assert calls == [("3", ["fig_3.png"])]
@@ -473,7 +473,7 @@ def test_enrich_diagonal_panel_joins_cluster_on_single_caption_page(tmp_path):
 
     def fake(crops, number, caption, context, cfg):
         calls.append((number, [c.name for c in crops]))
-        return None
+        return
 
     enrich_markdown(parsed, describe=fake)
     assert calls == [("3", ["fig_3_1.png", "fig_3_2.png"])]

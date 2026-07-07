@@ -43,15 +43,19 @@ def test_ensure_port_free_passes_on_free_port():
 
 
 def test_llama_server_requires_model_path():
-    with pytest.raises(RuntimeError, match="model_path"):
-        with _llama_server(ParseConfig(mmproj_path="/x/mmproj.gguf")):
-            pass
+    with (
+        pytest.raises(RuntimeError, match="model_path"),
+        _llama_server(ParseConfig(mmproj_path="/x/mmproj.gguf")),
+    ):
+        pass
 
 
 def test_llama_server_requires_mmproj_path():
-    with pytest.raises(RuntimeError, match="mmproj_path"):
-        with _llama_server(ParseConfig(model_path="/x/model.gguf")):
-            pass
+    with (
+        pytest.raises(RuntimeError, match="mmproj_path"),
+        _llama_server(ParseConfig(model_path="/x/model.gguf")),
+    ):
+        pass
 
 
 def test_llama_server_raises_cleanly_on_early_exit(monkeypatch):
@@ -80,9 +84,8 @@ def test_llama_server_raises_cleanly_on_early_exit(monkeypatch):
         startup_timeout_s=5,
         port=59173,
     )
-    with pytest.raises(RuntimeError, match="exited early"):
-        with _llama_server(cfg):
-            pass
+    with pytest.raises(RuntimeError, match="exited early"), _llama_server(cfg):
+        pass
 
 
 # ---------------------------------------------------------------------------

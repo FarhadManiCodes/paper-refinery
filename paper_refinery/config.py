@@ -231,6 +231,45 @@ def _type_name(field_type: object) -> str:
     return getattr(field_type, "__name__", None) or str(field_type)
 
 
+def _coerce_union_value(field_type: object, value: object) -> object:
+    """Coerce against a ``X | None``-style union: try each non-None member, take the first
+    that accepts ``value``, else raise with the union's own type name."""
+    for member in get_args(field_type):
+        if member is type(None):
+            continue
+        try:
+            return _coerce_overlay_value(member, value)
+        except TypeError:
+            pass
+    raise TypeError(_type_name(field_type))
+
+
+def _coerce_collection_value(field_type: object, value: object) -> object:
+    """Coerce a TOML list into a tuple/list field, coercing each element to the declared
+    element type (defaulting to ``str`` when the field is unparameterized)."""
+    if not isinstance(value, list):
+        raise TypeError(_type_name(field_type))
+    (elem_type, *_rest) = get_args(field_type) or (str,)
+    coerced = [_coerce_overlay_value(elem_type, v) for v in value]
+    return tuple(coerced) if get_origin(field_type) is tuple else coerced
+
+
+def _coerce_scalar_value(field_type: object, value: object) -> object:
+    """Coerce a scalar field: a TOML int legitimately fills a float, but never let a
+    float/bool masquerade as an int; everything else must already match its type."""
+    if field_type is float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("float")
+        return float(value)
+    if field_type is int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError("int")
+        return value
+    if isinstance(field_type, type) and isinstance(value, field_type):  # str, dict, ...
+        return value
+    raise TypeError(_type_name(field_type))
+
+
 def _coerce_overlay_value(field_type: object, value: object) -> object:
     """Validate/coerce one TOML value against a config field's declared type.
 
@@ -239,35 +278,15 @@ def _coerce_overlay_value(field_type: object, value: object) -> object:
     a tuple field (``extra_server_args``). Anything genuinely mismatched raises
     ``TypeError`` (message = the expected type name) so ``load_config`` can surface it at
     the offending ``[section] key`` instead of letting a wrong-typed value detonate deep
-    in a later stage (e.g. a stringy ``port`` reaching a socket call).
+    in a later stage (e.g. a stringy ``port`` reaching a socket call). Dispatches by the
+    field's type category: union -> collection -> scalar.
     """
     origin = get_origin(field_type)
     if origin is Union or origin is types.UnionType:  # e.g. `str | None`
-        for member in get_args(field_type):
-            if member is type(None):
-                continue
-            try:
-                return _coerce_overlay_value(member, value)
-            except TypeError:
-                pass
-        raise TypeError(_type_name(field_type))
+        return _coerce_union_value(field_type, value)
     if origin in (tuple, list):
-        if not isinstance(value, list):
-            raise TypeError(_type_name(field_type))
-        (elem_type, *_rest) = get_args(field_type) or (str,)
-        coerced = [_coerce_overlay_value(elem_type, v) for v in value]
-        return tuple(coerced) if origin is tuple else coerced
-    if field_type is float:  # a TOML int legitimately fills a float field
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise TypeError("float")
-        return float(value)
-    if field_type is int:  # but never let a TOML float/bool masquerade as an int
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise TypeError("int")
-        return value
-    if isinstance(field_type, type) and isinstance(value, field_type):  # str, dict, ...
-        return value
-    raise TypeError(_type_name(field_type))
+        return _coerce_collection_value(field_type, value)
+    return _coerce_scalar_value(field_type, value)
 
 
 def load_config(path: Path | None = None) -> RefineryConfig:

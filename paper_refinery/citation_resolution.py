@@ -189,67 +189,96 @@ def _merge_candidate(out: dict, candidate: dict, match: str) -> dict:
     return {**out, "verified": True, "match": match}
 
 
-def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> dict:
-    """Resolve one reference: DOI-first exact lookup, else CrossRef -> S2 -> OpenAlex
-    title search under the two-tier acceptance bar.
+def _resolve_by_doi(raw_text: str, cfg: CitationConfig) -> tuple[dict, str] | None:
+    """DOI-first exact lookup: a DOI printed in the raw OCR text is definitionally correct,
+    so its S2 record is accepted with no similarity check. None when there's no usable hit."""
+    doi = extract_doi(raw_text)
+    if not doi:
+        return None
+    candidate = normalize_s2(s2_by_doi(doi, cfg))
+    if candidate and candidate.get("title"):
+        return candidate, "doi"
+    return None
 
-    Published-over-preprint (user decision): an acceptable hit that is itself a
-    preprint doesn't stop the provider chain -- it's kept as a fallback while the
-    remaining providers are tried for the published version. Returns the extracted
-    dict merged with the accepted candidate's fields (provider data wins wherever it
-    exists, authors included; extractor's guess kept for fields the provider lacks,
-    commonly volume/page), plus ``verified``/``match``/``source``/``provider_type``.
-    Unverified -> guess returned untouched with ``verified: False`` and, when any
-    provider produced a rejected candidate, a ``near_miss`` record (best-scoring
-    reject) for threshold tuning from the diff report.
+
+def _better_near_miss(
+    near_miss: dict | None, provider: str, source_title: str | None, hit: dict
+) -> dict:
+    """Keep the highest-similarity REJECTED candidate seen so far (a diff-report aid for
+    threshold tuning) -- the incoming hit replaces the incumbent only if it scores higher."""
+    similarity = title_similarity(source_title, hit.get("title"))
+    if near_miss is not None and similarity <= near_miss["similarity"]:
+        return near_miss
+    return {
+        "provider": provider,
+        "similarity": round(similarity, 3),
+        "title": hit.get("title"),
+        "year": hit.get("year"),
+    }
+
+
+def _resolve_by_title(
+    out: dict, cfg: CitationConfig
+) -> tuple[dict | None, str | None, dict | None]:
+    """Title-search fallback across CrossRef -> S2 -> OpenAlex under the two-tier bar.
+
+    CrossRef leads (user decision, 2026-07-05): S2's records blend preprint and published
+    versions -- published DOI but the *earliest* (arXiv) year, confirmed live on 3 hyco refs
+    pulled back a year -- while CrossRef's ``issued`` is the published record's own date.
+    Published-over-preprint: an acceptable *preprint* hit is remembered but doesn't stop the
+    chain, so a later provider's published version can still win. Returns
+    ``(candidate, match, near_miss)``; candidate/match are None when nothing clears the bar.
+    """
+    providers = (
+        ("crossref", crossref_search, normalize_crossref),
+        ("semanticscholar", s2_search, normalize_s2),
+        ("openalex", openalex_search, normalize_openalex),
+    )
+    preprint_fallback: tuple[str, dict] | None = None
+    near_miss: dict | None = None
+    for name, search, normalize in providers:
+        hit = normalize(search(out["title"], cfg))
+        if not hit:
+            continue
+        if not _acceptable(out, hit, cfg):
+            near_miss = _better_near_miss(near_miss, name, out.get("title"), hit)
+            continue
+        if _is_preprint(hit):
+            preprint_fallback = preprint_fallback or (name, hit)
+            continue
+        return hit, name, near_miss
+    if preprint_fallback is not None:
+        name, hit = preprint_fallback
+        return hit, name, near_miss
+    return None, None, near_miss
+
+
+def _fill_crossref_abstract(candidate: dict, match: str, cfg: CitationConfig) -> None:
+    """CrossRef rarely carries an abstract -- one S2-by-DOI follow-up just for that field."""
+    if match == "crossref" and not candidate.get("abstract") and candidate.get("doi"):
+        followup = normalize_s2(s2_by_doi(candidate["doi"], cfg))
+        if followup and followup.get("abstract"):
+            candidate["abstract"] = followup["abstract"]
+
+
+def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> dict:
+    """Resolve one reference: DOI-first exact lookup, else CrossRef -> S2 -> OpenAlex title
+    search under the two-tier acceptance bar (see ``_resolve_by_doi`` / ``_resolve_by_title``).
+
+    Returns the extracted dict merged with the accepted candidate's fields (provider data wins
+    wherever it exists, authors included; extractor's guess kept for fields the provider lacks,
+    commonly volume/page), plus ``verified``/``match``/``source``/``provider_type``. Unverified
+    -> guess returned untouched with ``verified: False`` and, when any provider produced a
+    rejected candidate, a ``near_miss`` record (best-scoring reject) for threshold tuning.
     """
     out = dict(extracted)
-    candidate: dict | None = None
-    match: str | None = None
-
-    # a DOI printed in the raw OCR text is definitionally correct -- exact lookup,
-    # no similarity check
-    doi = extract_doi(raw_text)
-    if doi:
-        candidate = normalize_s2(s2_by_doi(doi, cfg))
-        if candidate and candidate.get("title"):
-            match = "doi"
-        else:
-            candidate = None
-
-    near_miss: dict | None = None
-    if candidate is None and out.get("title"):
-        # CrossRef leads (user decision, 2026-07-05): S2's records blend preprint and
-        # published versions -- published DOI but the *earliest* (arXiv) year, confirmed
-        # live on 3 hyco refs pulled backward a year -- while CrossRef's `issued` is the
-        # published record's own date. S2 keeps DOI-first lookups + abstract follow-ups.
-        providers = (
-            ("crossref", crossref_search, normalize_crossref),
-            ("semanticscholar", s2_search, normalize_s2),
-            ("openalex", openalex_search, normalize_openalex),
-        )
-        preprint_fallback: tuple[str, dict] | None = None
-        for name, search, normalize in providers:
-            hit = normalize(search(out["title"], cfg))
-            if not hit:
-                continue
-            if _acceptable(out, hit, cfg):
-                if _is_preprint(hit):
-                    # keep looking for the published version; remember this one
-                    preprint_fallback = preprint_fallback or (name, hit)
-                    continue
-                candidate, match = hit, name
-                break
-            similarity = title_similarity(out.get("title"), hit.get("title"))
-            if near_miss is None or similarity > near_miss["similarity"]:
-                near_miss = {
-                    "provider": name,
-                    "similarity": round(similarity, 3),
-                    "title": hit.get("title"),
-                    "year": hit.get("year"),
-                }
-        if candidate is None and preprint_fallback is not None:
-            match, candidate = preprint_fallback
+    doi_hit = _resolve_by_doi(raw_text, cfg)
+    if doi_hit is not None:
+        candidate, match, near_miss = doi_hit[0], doi_hit[1], None
+    elif out.get("title"):
+        candidate, match, near_miss = _resolve_by_title(out, cfg)
+    else:
+        candidate, match, near_miss = None, None, None
 
     if candidate is None:
         result = {**out, "verified": False, "match": None}
@@ -258,12 +287,7 @@ def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> d
         return result
     assert match is not None  # match is set together with candidate on every accept path
 
-    # CrossRef rarely carries an abstract -- one S2-by-DOI follow-up just for that field
-    if match == "crossref" and not candidate.get("abstract") and candidate.get("doi"):
-        followup = normalize_s2(s2_by_doi(candidate["doi"], cfg))
-        if followup and followup.get("abstract"):
-            candidate["abstract"] = followup["abstract"]
-
+    _fill_crossref_abstract(candidate, match, cfg)
     return _merge_candidate(out, candidate, match)
 
 

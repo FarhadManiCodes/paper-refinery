@@ -256,36 +256,50 @@ def _author_year_lookup(extracted: list[dict]) -> dict[tuple[str, int], int]:
     return lookup
 
 
-def _find_author_year_markers(
-    markdown: str, extracted: list[dict], result: LinkResult
-) -> list[Marker]:
-    lookup = _author_year_lookup(extracted)
-    spans = _math_spans(markdown)
-    markers: list[Marker] = []
-    taken: list[tuple[int, int]] = []
+def _resolve_ay_group(group: str, lookup: dict[tuple[str, int], int]) -> list[int] | None:
+    """Resolve a parenthetical group's ``;``-separated author-year parts (``A et al., 2020;
+    B, 2021``) to reference indices; None if ANY part isn't a known ``(surname, year)``."""
+    indices: list[int] = []
+    for part in group.split(";"):
+        pm = _AY_PART_RE.match(part.strip())
+        if not pm:
+            return None
+        key = (fold_name(pm.group(1)), int(pm.group(2)))
+        if key not in lookup:
+            return None
+        indices.append(lookup[key])
+    return indices
 
-    # parenthetical form first: "(Smith, 2023)", "(A et al., 2020; B, 2021)"
+
+def _match_parenthetical_ay(
+    markdown: str,
+    spans: list[tuple[int, int]],
+    lookup: dict[tuple[str, int], int],
+    result: LinkResult,
+) -> list[Marker]:
+    """Parenthetical author-year form: ``(Smith, 2023)``, ``(A et al., 2020; B, 2021)``."""
+    markers: list[Marker] = []
     for m in _PAREN_AY_RE.finditer(markdown):
         if _inside_any(m.start(), m.end(), spans):
             continue
-        indices: list[int] = []
-        for part in m.group(1).split(";"):
-            pm = _AY_PART_RE.match(part.strip())
-            if not pm:
-                indices = []
-                break
-            key = (fold_name(pm.group(1)), int(pm.group(2)))
-            if key not in lookup:
-                indices = []
-                break
-            indices.append(lookup[key])
+        indices = _resolve_ay_group(m.group(1), lookup)
         if indices:
             markers.append(Marker(m.start(), m.end(), m.group(0), indices))
-            taken.append((m.start(), m.end()))
         else:
             result.ambiguous.append(m.group(0))
+    return markers
 
-    # narrative form: "Smith et al. (2023)" -- skip anything overlapping a paren match
+
+def _match_narrative_ay(
+    markdown: str,
+    spans: list[tuple[int, int]],
+    lookup: dict[tuple[str, int], int],
+    taken: list[tuple[int, int]],
+    result: LinkResult,
+) -> list[Marker]:
+    """Narrative author-year form: ``Smith et al. (2023)`` -- skipping any span that
+    overlaps an already-matched parenthetical marker (``taken``)."""
+    markers: list[Marker] = []
     for m in _NARRATIVE_AY_RE.finditer(markdown):
         if _inside_any(m.start(), m.end(), spans):
             continue
@@ -296,6 +310,19 @@ def _find_author_year_markers(
             markers.append(Marker(m.start(), m.end(), m.group(0), [lookup[key]]))
         else:
             result.ambiguous.append(m.group(0))
+    return markers
+
+
+def _find_author_year_markers(
+    markdown: str, extracted: list[dict], result: LinkResult
+) -> list[Marker]:
+    lookup = _author_year_lookup(extracted)
+    spans = _math_spans(markdown)
+    # parenthetical first; narrative then skips anything overlapping a paren match
+    paren = _match_parenthetical_ay(markdown, spans, lookup, result)
+    taken = [(mk.start, mk.end) for mk in paren]
+    narrative = _match_narrative_ay(markdown, spans, lookup, taken, result)
+    markers = paren + narrative
     markers.sort(key=lambda mk: mk.start)
     return markers
 

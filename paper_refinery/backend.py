@@ -148,7 +148,7 @@ def _dotted_overrides(cfg: ParseConfig) -> dict:
     """
     margin = (cfg.figure_crop_margin, cfg.figure_crop_margin)
     dotted = {
-        "pipeline.layout.layout_unclip_ratio": {cid: margin for cid in _FIGURE_CLASS_IDS},
+        "pipeline.layout.layout_unclip_ratio": dict.fromkeys(_FIGURE_CLASS_IDS, margin),
     }
     dotted.update(cfg.glmocr_config_overrides)
     return dotted
@@ -164,12 +164,14 @@ def ocr_backend(cfg: ParseConfig | None = None) -> Iterator[OcrBackend]:
     from glmocr import GlmOcr
 
     cfg = cfg or load_config().parse
-    with _llama_server(cfg) as proc:
-        with GlmOcr(
+    with (
+        _llama_server(cfg) as proc,
+        GlmOcr(
             mode="selfhosted",
             ocr_api_host=cfg.host,
             ocr_api_port=cfg.port,
             layout_device=cfg.layout_device,
             _dotted=_dotted_overrides(cfg),
-        ) as parser:
-            yield OcrBackend(parser=parser, server=proc)
+        ) as parser,
+    ):
+        yield OcrBackend(parser=parser, server=proc)

@@ -149,35 +149,77 @@ def _axis_gaps(a, b) -> tuple[float, float]:
 _CLUSTER_GAP_FRACTION = 0.05  # of page span: max gutter between sibling panels
 
 
+_Box = tuple[float, float, float, float]
+
+
+def _pairing_without_geometry(
+    crops: list[CropRegion], caption_bboxes: list[_Box | None]
+) -> dict[int, list[int]]:
+    """Fallback when any bbox is missing and geometry can't be trusted: a single-caption
+    page assigns ALL crops to that caption; multi-caption pages fall back to positional
+    pairing (crop i <-> caption i)."""
+    if len(caption_bboxes) == 1:
+        return {0: list(range(len(crops)))}
+    return {i: [i] for i in range(min(len(crops), len(caption_bboxes)))}
+
+
+def _nearest_caption(crop_box: _Box, cap_boxes: list[_Box]) -> int | None:
+    """Index of the nearest caption the crop overlaps on at least one axis (x-overlap for
+    captions above/below, y-overlap for a SIDE caption), edge-gap distance with center
+    distance breaking ties. None when the crop is separated from every caption on BOTH axes
+    (a diagonal neighbor of none of them)."""
+    best, best_key = None, None
+    for ki, box in enumerate(cap_boxes):
+        x_gap, y_gap = _axis_gaps(crop_box, box)
+        if x_gap > 0 and y_gap > 0:
+            continue
+        cx = (crop_box[0] + crop_box[2] - box[0] - box[2]) / 2
+        cy = (crop_box[1] + crop_box[3] - box[1] - box[3]) / 2
+        key = (max(x_gap, y_gap), cx * cx + cy * cy)
+        if best_key is None or key < best_key:
+            best, best_key = ki, key
+    return best
+
+
+def _grow_panel_cluster(
+    member: set[int], unassigned: list[int], crop_boxes: list[_Box], cap_boxes: list[_Box]
+) -> set[int]:
+    """Single-caption page: pull each still-unassigned crop that sits a gutter-sized gap
+    from a cluster member into the cluster (a diagonal panel of a large composite), while a
+    banner floating far from the cluster stays out. Grows ``member`` until nothing more joins."""
+    boxes = crop_boxes + cap_boxes
+    span = (max(b[2] for b in boxes) - min(b[0] for b in boxes)) or 1.0
+    near = _CLUSTER_GAP_FRACTION * span
+    changed = True
+    while changed:
+        changed = False
+        for ci in list(unassigned):
+            for mi in list(member):  # snapshot: member is mutated inside the loop
+                x_gap, y_gap = _axis_gaps(crop_boxes[ci], crop_boxes[mi])
+                if (x_gap == 0 or y_gap == 0) and max(x_gap, y_gap) <= near:
+                    member.add(ci)
+                    unassigned.remove(ci)
+                    changed = True
+                    break
+    return member
+
+
 def _pair_crops(
     crops: list[CropRegion],
-    caption_bboxes: list[tuple[float, float, float, float] | None],
+    caption_bboxes: list[_Box | None],
 ) -> dict[int, list[int]]:
     """Assign each crop to a caption geometrically: caption index -> [crop indices].
 
-    A crop belongs to the nearest caption it overlaps on at least one axis: x-overlap
-    for captions above/below their figure, y-overlap for a SIDE caption (live:
-    brunton's "Fig. 3." caption sits in the right column beside its panels -- an
-    x-overlap-only rule orphaned all six). Distance is the edge gap on the
-    non-overlapping axis, center distance breaking ties; a crop separated from every
-    caption on BOTH axes is a diagonal neighbor of none of them. Captions naturally
-    collect several crops -- that IS the multi-panel case.
-
-    On a single-caption page, unassigned crops then grow the panel cluster: a panel
-    always sits adjacent to a sibling panel (axis overlap + a gutter-sized gap), so
-    a diagonal panel of a large composite joins, while a banner floating far from
-    the cluster stays out -- no rename, no Gemini call.
-
-    When any bbox is missing, geometry can't be trusted at all: a single-caption
-    page assigns ALL crops to that caption; multi-caption pages fall back to
-    positional pairing (crop i <-> caption i).
+    A crop belongs to the nearest caption it overlaps on at least one axis (see
+    ``_nearest_caption``); captions naturally collect several crops -- that IS the
+    multi-panel case. On a single-caption page, still-unassigned crops then grow the panel
+    cluster (``_grow_panel_cluster``). When any bbox is missing, geometry can't be trusted
+    and pairing falls back to ``_pairing_without_geometry``.
     """
     if not crops or not caption_bboxes:
         return {}
     if any(c.bbox is None for c in crops) or any(b is None for b in caption_bboxes):
-        if len(caption_bboxes) == 1:
-            return {0: list(range(len(crops)))}
-        return {i: [i] for i in range(min(len(crops), len(caption_bboxes)))}
+        return _pairing_without_geometry(crops, caption_bboxes)
     # every bbox is well-formed past the guard; bind non-None copies (index-aligned with
     # `crops` / `caption_bboxes`) so the geometry below is typed and never subscripts None
     crop_boxes = [c.bbox for c in crops if c.bbox is not None]
@@ -186,38 +228,16 @@ def _pair_crops(
     assignment: dict[int, list[int]] = defaultdict(list)
     unassigned: list[int] = []
     for ci, crop_box in enumerate(crop_boxes):
-        best, best_key = None, None
-        for ki, box in enumerate(cap_boxes):
-            x_gap, y_gap = _axis_gaps(crop_box, box)
-            if x_gap > 0 and y_gap > 0:
-                continue  # separated on both axes: a diagonal neighbor, not this caption
-            cx = (crop_box[0] + crop_box[2] - box[0] - box[2]) / 2
-            cy = (crop_box[1] + crop_box[3] - box[1] - box[3]) / 2
-            key = (max(x_gap, y_gap), cx * cx + cy * cy)
-            if best_key is None or key < best_key:
-                best, best_key = ki, key
+        best = _nearest_caption(crop_box, cap_boxes)
         if best is not None:
             assignment[best].append(ci)
         else:
             unassigned.append(ci)
 
     if len(cap_boxes) == 1 and unassigned and assignment:
-        boxes = crop_boxes + cap_boxes
-        span = (max(b[2] for b in boxes) - min(b[0] for b in boxes)) or 1.0
-        near = _CLUSTER_GAP_FRACTION * span
-        member = set(assignment[0])
-        changed = True
-        while changed:
-            changed = False
-            for ci in list(unassigned):
-                for mi in list(member):  # snapshot: member is mutated inside the loop
-                    x_gap, y_gap = _axis_gaps(crop_boxes[ci], crop_boxes[mi])
-                    if (x_gap == 0 or y_gap == 0) and max(x_gap, y_gap) <= near:
-                        member.add(ci)
-                        unassigned.remove(ci)
-                        changed = True
-                        break
-        assignment[0] = sorted(member)
+        assignment[0] = sorted(
+            _grow_panel_cluster(set(assignment[0]), unassigned, crop_boxes, cap_boxes)
+        )
     return dict(assignment)
 
 
@@ -309,6 +329,97 @@ def _neighbor_context(md: str, caption: _Caption, n: int) -> dict:
     }
 
 
+def _rename_and_map_crops(
+    md: str, parsed: ParseResult, known: set[str] | None
+) -> tuple[str, dict[tuple[int, str], list[Path]]]:
+    """First pass: pair each page's crops to its captions, rename them to ``fig_N.png``, and
+    map every figure ``(page, number)`` to its crop paths. Renaming changes md's length, so
+    the rewritten md is returned (captions are re-grouped from scratch by the caller)."""
+    figure_crops: dict[tuple[int, str], list[Path]] = {}  # (page, number) -> figure's crops
+    for page, captions in _group_by_page(md, known).items():
+        if page is None:
+            continue
+        crops = parsed.figure_crops.get(page, [])
+        if not crops:
+            continue
+        caption_regions = parsed.figure_captions.get(page, [])
+        bboxes = [_caption_bbox(c, caption_regions) for c in captions]
+        assignment = _pair_crops(crops, bboxes)
+        md, renamed = _rename_crops(md, page, crops, assignment, captions)
+        for ki, crop_indices in assignment.items():
+            figure_crops[(page, captions[ki].number)] = [renamed[ci] for ci in sorted(crop_indices)]
+    return md, figure_crops
+
+
+def _build_describe_tasks(
+    md: str,
+    by_page: dict[int | None, list[_Caption]],
+    figure_crops: dict[tuple[int, str], list[Path]],
+    header: dict,
+    cfg: FigureConfig,
+) -> dict[tuple[int, str], tuple[list[Path], _Caption, dict]]:
+    """One describe task per figure that has crop(s): its crops, caption, and assembled
+    context (paper header + neighbouring paragraphs)."""
+    tasks: dict[tuple[int, str], tuple[list[Path], _Caption, dict]] = {}
+    for page, captions in by_page.items():
+        if page is None:  # None-page captions never got crops in the first pass
+            continue
+        for caption in captions:
+            crops = figure_crops.get((page, caption.number))
+            if crops:
+                context = {**header, **_neighbor_context(md, caption, cfg.context_paragraphs)}
+                tasks[(page, caption.number)] = (crops, caption, context)
+    return tasks
+
+
+def _run_describe_tasks(
+    tasks: dict[tuple[int, str], tuple[list[Path], _Caption, dict]],
+    describe: FigureDescriber,
+    cfg: FigureConfig,
+) -> dict[tuple[int, str], dict | None]:
+    """Run the describe calls concurrently (one per figure). A figure that raises is left
+    undescribed (``None``) with a warning -- one bad figure never fails the page."""
+    results: dict[tuple[int, str], dict | None] = {}
+    if not tasks:
+        return results
+    with ThreadPoolExecutor(max_workers=cfg.max_workers) as pool:
+        futures = {
+            pool.submit(describe, crops, caption.number, caption.text, context, cfg): key
+            for key, (crops, caption, context) in tasks.items()
+        }
+        for future, key in futures.items():
+            try:
+                results[key] = future.result()
+            except Exception as exc:  # surface it; leave this figure undescribed
+                logger.warning("figure description failed for FIGURE %s: %r", key[1], exc)
+                results[key] = None
+    return results
+
+
+def _splice_descriptions(
+    md: str,
+    tasks: dict[tuple[int, str], tuple[list[Path], _Caption, dict]],
+    results: dict[tuple[int, str], dict | None],
+) -> str:
+    """Splice each successful description as a blockquote right after its caption line,
+    applied back-to-front so earlier offsets stay valid."""
+    insertions: list[tuple[int, str]] = []
+    for key, (_, caption, _) in tasks.items():
+        desc = results.get(key)
+        if not desc or not desc.get("description"):
+            continue
+        figure_type = (desc.get("figure_type") or "").replace("_", " ").strip()
+        label = (
+            f"Figure description (auto, {figure_type})"
+            if figure_type
+            else "Figure description (auto)"
+        )
+        insertions.append((caption.line_end, f"\n\n> **{label}:** {desc['description']}"))
+    for offset, text in sorted(insertions, key=lambda it: it[0], reverse=True):
+        md = md[:offset] + text + md[offset:]
+    return md
+
+
 def enrich_markdown(
     parsed: ParseResult,
     cfg: FigureConfig | None = None,
@@ -330,66 +441,11 @@ def enrich_markdown(
         _normalize_caption(r.text) for regions in parsed.figure_captions.values() for r in regions
     } or None
 
-    # first pass: only to learn page grouping for crop-to-caption pairing below.
-    # Renaming can change md's length (placeholder text differs from the new image
-    # line), which would invalidate any caption.line_end offsets computed against the
-    # pre-rename text -- so captions are re-found from scratch afterward, once md is final.
-    figure_crops: dict[tuple[int, str], list[Path]] = {}  # (page, number) -> figure's crops
-    for page, captions in _group_by_page(md, known).items():
-        if page is None:
-            continue
-        crops = parsed.figure_crops.get(page, [])
-        if not crops:
-            continue
-        caption_regions = parsed.figure_captions.get(page, [])
-        bboxes = [_caption_bbox(c, caption_regions) for c in captions]
-        assignment = _pair_crops(crops, bboxes)
-        md, renamed = _rename_crops(md, page, crops, assignment, captions)
-        for ki, crop_indices in assignment.items():
-            figure_crops[(page, captions[ki].number)] = [renamed[ci] for ci in sorted(crop_indices)]
-
+    # first pass renames crops (which changes md's length), so captions are re-grouped from
+    # scratch against the final md before their line_end offsets are used for splicing
+    md, figure_crops = _rename_and_map_crops(md, parsed, known)
     by_page = _group_by_page(md, known)
     header = _paper_header(md)
-
-    # one describe task per figure that has crop(s)
-    tasks: dict[tuple[int, str], tuple[list[Path], _Caption, dict]] = {}
-    for page, captions in by_page.items():
-        if page is None:  # None-page captions never got crops in the first pass
-            continue
-        for caption in captions:
-            crops = figure_crops.get((page, caption.number))
-            if crops:
-                context = {**header, **_neighbor_context(md, caption, cfg.context_paragraphs)}
-                tasks[(page, caption.number)] = (crops, caption, context)
-
-    results: dict[tuple[int, str], dict | None] = {}
-    if tasks:
-        with ThreadPoolExecutor(max_workers=cfg.max_workers) as pool:
-            futures = {
-                pool.submit(describe, crops, caption.number, caption.text, context, cfg): key
-                for key, (crops, caption, context) in tasks.items()
-            }
-            for future, key in futures.items():
-                try:
-                    results[key] = future.result()
-                except Exception as exc:  # surface it; leave this figure undescribed
-                    logger.warning("figure description failed for FIGURE %s: %r", key[1], exc)
-                    results[key] = None
-
-    insertions: list[tuple[int, str]] = []
-    for key, (_, caption, _) in tasks.items():
-        desc = results.get(key)
-        if not desc or not desc.get("description"):
-            continue
-        figure_type = (desc.get("figure_type") or "").replace("_", " ").strip()
-        label = (
-            f"Figure description (auto, {figure_type})"
-            if figure_type
-            else ("Figure description (auto)")
-        )
-        insertions.append((caption.line_end, f"\n\n> **{label}:** {desc['description']}"))
-
-    # apply back-to-front so earlier offsets stay valid
-    for offset, text in sorted(insertions, key=lambda it: it[0], reverse=True):
-        md = md[:offset] + text + md[offset:]
-    return md
+    tasks = _build_describe_tasks(md, by_page, figure_crops, header, cfg)
+    results = _run_describe_tasks(tasks, describe, cfg)
+    return _splice_descriptions(md, tasks, results)

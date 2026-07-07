@@ -51,10 +51,16 @@ line-length = 100
 target-version = "py311"  # match requires-python's floor so UP targets the right syntax
 
 [tool.ruff.lint]
-# E/F (default) + I (enforce the import sort we keep by hand) + UP (modern syntax) + B
-# (flake8-bugbear likely-bug patterns). RUF/SIM/PT stay off: mostly test-style (PT018) or
-# false positives for this code (RUF001 on intentional en-dash/curly-apostrophe regexes).
-select = ["E", "F", "I", "UP", "B"]
+# E/F (default) + I (import sort) + UP (modern syntax) + B (bugbear likely-bugs), plus a
+# curated low-noise quality set: C4 (comprehensions), SIM (simplify), RET (return),
+# PERF (perflint), C901 (mccabe complexity, ceiling 10 -- every function is kept under it
+# by decomposition, never a `# noqa`). Deliberately OFF: RUF001 (fires on
+# intentional en-dash/curly-apostrophe regexes), PTH (intentional os.replace atomic ops),
+# PLC0415 (deliberate lazy imports of heavy deps: glmocr / google-genai / pymupdf).
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RET", "PERF", "C901"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
 
 # glmocr's PP-DocLayout-V3 runs on CPU here (no NVIDIA GPU on this machine -- see
 # glmocr/layout/layout_detector.py's torch.cuda.is_available() fallback). The default
