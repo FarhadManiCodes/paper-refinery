@@ -385,3 +385,89 @@ def test_resolve_references_pads_short_extraction(monkeypatch):
 
 def test_resolve_references_empty():
     assert cr.resolve_references([], [], _cfg()) == []
+
+
+# ---------------------------------------------------------------------------
+# S2 bulk-references fast-path
+# ---------------------------------------------------------------------------
+
+
+def test_source_references_none_when_disabled_or_no_source():
+    assert cr._source_references(None, _cfg()) is None
+    off = _cfg(s2_bulk_references=False)
+    assert cr._source_references(cr.SourcePaper(doi="10.1/x"), off) is None
+
+
+def test_source_references_by_doi_is_trusted(monkeypatch):
+    monkeypatch.setattr(
+        cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "Src"}) if kw.get("doi") else None
+    )
+    monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: [{"title": "Ref A"}])
+    assert cr._source_references(cr.SourcePaper(doi="10.1/x"), _cfg()) == [{"title": "Ref A"}]
+
+
+def test_source_references_title_rejected_when_wrong_paper(monkeypatch):
+    # S2's title hit is a DIFFERENT paper -> not confident -> never fetch its references
+    monkeypatch.setattr(
+        cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "A Completely Different Paper"})
+    )
+    monkeypatch.setattr(
+        cr, "s2_references", lambda pid, cfg: pytest.fail("must not fetch wrong paper's refs")
+    )
+    assert cr._source_references(cr.SourcePaper(title="My Precise Paper Title"), _cfg()) is None
+
+
+def test_source_references_title_accepted_when_confident(monkeypatch):
+    monkeypatch.setattr(
+        cr,
+        "s2_paper_id",
+        lambda cfg, **kw: ("PID", {"title": "My Precise Paper Title", "year": 2020}),
+    )
+    monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: [{"title": "X"}])
+    src = cr.SourcePaper(title="My Precise Paper Title", year=2020)
+    assert cr._source_references(src, _cfg()) == [{"title": "X"}]
+
+
+def test_match_in_bulk_by_shared_doi():
+    bulk = [
+        {"title": "Wrong", "doi": "10.9999/z", "source": "semanticscholar"},
+        {"title": "Right", "doi": "10.1234/abc", "source": "semanticscholar"},
+    ]
+    out = cr._match_in_bulk({"title": "x"}, "... see doi:10.1234/abc here", bulk, _cfg())
+    assert out is not None and out["doi"] == "10.1234/abc" and out["match"] == "s2-bulk"
+
+
+def test_resolve_references_fastpath_matches_bulk_without_per_entry_search(monkeypatch):
+    bulk = [cr.normalize_s2(dict(S2_PAPER))]  # the kalman paper, normalized
+    monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "Src"}))
+    monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: bulk)
+    monkeypatch.setattr(
+        cr, "verify_and_resolve", lambda *a, **k: pytest.fail("fast-path must not per-entry search")
+    )
+    raw = [
+        {"page": 1, "number": "1", "text": "1. Kalman RE. A new approach to linear filtering..."}
+    ]
+    out = cr.resolve_references([dict(EXTRACTED)], raw, _cfg(), source=cr.SourcePaper(doi="10.1/x"))
+    assert out[0]["verified"] is True
+    assert out[0]["match"] == "s2-bulk"
+    assert out[0]["doi"] == "10.1115/1.3662552"  # enriched from the bulk candidate
+    assert out[0]["number"] == "1"  # printed number preserved (from OCR, not S2)
+
+
+def test_resolve_references_fastpath_falls_back_for_unmatched(monkeypatch):
+    bulk = [cr.normalize_s2({"title": "Totally Unrelated Work", "year": 1900, "externalIds": {}})]
+    monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "Src"}))
+    monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: bulk)
+    seen = []
+
+    def fake_verify(ext, raw_text, cfg):
+        seen.append(raw_text)
+        return {**ext, "verified": False, "match": None}
+
+    monkeypatch.setattr(cr, "verify_and_resolve", fake_verify)
+    raw = [
+        {"page": 1, "number": "1", "text": "1. Kalman RE. A new approach to linear filtering..."}
+    ]
+    out = cr.resolve_references([dict(EXTRACTED)], raw, _cfg(), source=cr.SourcePaper(doi="10.1/x"))
+    assert seen  # no bulk match -> fell back to the per-entry path
+    assert out[0]["verified"] is False

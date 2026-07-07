@@ -184,7 +184,7 @@ def test_main_runs_citation_stack_and_writes_citations_json(tmp_path, monkeypatc
         {**extracted[0], "year": 2020, "verified": True, "match": "crossref", "doi": "10.1/x"}
     ]
     monkeypatch.setattr(cli, "extract_references", lambda texts, cfg: extracted)
-    monkeypatch.setattr(cli, "resolve_references", lambda ext, refs, cfg: resolved)
+    monkeypatch.setattr(cli, "resolve_references", lambda ext, refs, cfg, source=None: resolved)
     monkeypatch.setattr(cli, "format_resolution_report", lambda ext, res: "REPORT")
 
     result = CliRunner().invoke(cli.main, [str(pdf)])
@@ -233,7 +233,7 @@ def test_main_rewrites_markers_to_verified_citekeys_before_chunking(tmp_path, mo
         {**extracted[0], "year": 2020, "verified": True, "match": "crossref", "doi": "10.1/x"}
     ]
     monkeypatch.setattr(cli, "extract_references", lambda texts, cfg: extracted)
-    monkeypatch.setattr(cli, "resolve_references", lambda ext, refs, cfg: resolved)
+    monkeypatch.setattr(cli, "resolve_references", lambda ext, refs, cfg, source=None: resolved)
     monkeypatch.setattr(cli, "format_resolution_report", lambda ext, res: "REPORT")
 
     result = CliRunner().invoke(cli.main, [str(pdf)])
@@ -264,7 +264,7 @@ def test_main_leaves_marker_unrewritten_when_citekey_is_missing(tmp_path, monkey
     extracted = [{"title": "A title", "year": 2019, "authors": [{"family": "Smith"}]}]
     resolved = [{**extracted[0], "year": None, "verified": False}]
     monkeypatch.setattr(cli, "extract_references", lambda texts, cfg: extracted)
-    monkeypatch.setattr(cli, "resolve_references", lambda ext, refs, cfg: resolved)
+    monkeypatch.setattr(cli, "resolve_references", lambda ext, refs, cfg, source=None: resolved)
     monkeypatch.setattr(cli, "format_resolution_report", lambda ext, res: "REPORT")
 
     result = CliRunner().invoke(cli.main, [str(pdf)])

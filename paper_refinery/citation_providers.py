@@ -141,6 +141,79 @@ def s2_search(title: str, cfg: CitationConfig) -> dict | None:
     return hits[0] if hits else None
 
 
+_SOURCE_FIELDS = "title,year,authors,externalIds,publicationTypes"
+
+
+def s2_paper_id(
+    cfg: CitationConfig,
+    *,
+    doi: str | None = None,
+    arxiv: str | None = None,
+    title: str | None = None,
+) -> tuple[str, dict] | None:
+    """Resolve a SOURCE paper to ``(paper_id, candidate)``.
+
+    An external id (``doi`` or ``arxiv``) uses S2's exact graph lookup -- no search endpoint,
+    so it dodges the keyless-search 429s -- and is trusted by construction. Otherwise a
+    one-hit ``title`` search: ``candidate`` (``normalize_s2`` of the hit -- title/year/authors/
+    doi) lets the caller CORROBORATE a title match on the same acceptance bar it uses for
+    references, since a title alone can hit the wrong paper. ``None`` on a miss/fetch failure.
+    """
+    if doi:
+        ref = f"DOI:{urllib.parse.quote(doi)}"
+    elif arxiv:
+        ref = f"ARXIV:{urllib.parse.quote(arxiv)}"
+    else:
+        ref = None
+    if ref:
+        data = _get_json(
+            f"{cfg.s2_api_base}/paper/{ref}?fields={_SOURCE_FIELDS}",
+            cfg,
+            headers=_s2_headers(cfg),
+            before_fetch=lambda: _s2_throttle(cfg),
+        )
+        cand = normalize_s2(data)
+        return (data["paperId"], cand) if (data and data.get("paperId") and cand) else None
+    if title:
+        data = _get_json(
+            f"{cfg.s2_api_base}/paper/search"
+            f"?query={urllib.parse.quote(title)}&fields={_SOURCE_FIELDS}&limit=1",
+            cfg,
+            headers=_s2_headers(cfg),
+            before_fetch=lambda: _s2_throttle(cfg),
+        )
+        hits = (data or {}).get("data") or []
+        if hits and hits[0].get("paperId"):
+            cand = normalize_s2(hits[0])
+            if cand:
+                return hits[0]["paperId"], cand
+    return None
+
+
+def s2_references(paper_id: str, cfg: CitationConfig) -> list[dict] | None:
+    """The source paper's cited references as normalized candidates, in ONE bulk call.
+
+    Each entry is ``normalize_s2``'d (title/year/doi/abstract/authors/type), confirmed live
+    to include the abstract, so no per-entry follow-up is needed. ``None`` on fetch failure.
+    The list is S2's reference set for the paper -- **not** in printed-bibliography order
+    (confirmed live), so callers match by content, never by position. Capped at 1000 refs
+    (papers beyond that are vanishingly rare; the overflow just falls back per-entry).
+    """
+    url = (
+        f"{cfg.s2_api_base}/paper/{urllib.parse.quote(paper_id)}/references"
+        f"?fields={_S2_FIELDS}&limit=1000"
+    )
+    data = _get_json(url, cfg, headers=_s2_headers(cfg), before_fetch=lambda: _s2_throttle(cfg))
+    if data is None:
+        return None
+    candidates: list[dict] = []
+    for item in data.get("data") or []:
+        cand = normalize_s2((item or {}).get("citedPaper"))
+        if cand:
+            candidates.append(cand)
+    return candidates
+
+
 def crossref_search(title: str, cfg: CitationConfig) -> dict | None:
     url = f"{cfg.crossref_api_base}/works?query.bibliographic={urllib.parse.quote(title)}&rows=1"
     if cfg.mailto:

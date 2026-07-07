@@ -195,3 +195,85 @@ def test_get_json_does_not_cache_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(cp.urllib.request, "urlopen", fake_urlopen)
     assert cp._get_json("https://x.test/fail", cfg) is None
     assert list(tmp_path.iterdir()) == []  # a transient error must not stick
+
+
+# ---------------------------------------------------------------------------
+# source-paper lookup + bulk references (fast-path building blocks)
+# ---------------------------------------------------------------------------
+
+
+def _patch_get_json(monkeypatch, result):
+    # the HTTP/cache layer is covered above; here we only exercise URL logic + parsing
+    monkeypatch.setattr(cp, "_get_json", lambda *a, **k: result)
+
+
+def test_s2_paper_id_by_doi_returns_id_and_candidate(monkeypatch):
+    _patch_get_json(
+        monkeypatch,
+        {
+            "paperId": "P1",
+            "title": "Source Paper",
+            "year": 2016,
+            "authors": [{"name": "Jane Roe"}],
+            "externalIds": {"DOI": "10.1/x"},
+            "publicationTypes": ["JournalArticle"],
+        },
+    )
+    result = cp.s2_paper_id(_cfg(), doi="10.1/x")
+    assert result is not None
+    pid, cand = result
+    assert pid == "P1"
+    assert cand["title"] == "Source Paper" and cand["year"] == 2016 and cand["doi"] == "10.1/x"
+
+
+def test_s2_paper_id_by_arxiv(monkeypatch):
+    _patch_get_json(monkeypatch, {"paperId": "P9", "title": "Preprint", "authors": []})
+    result = cp.s2_paper_id(_cfg(), arxiv="1234.5678")
+    assert result is not None and result[0] == "P9" and result[1]["title"] == "Preprint"
+
+
+def test_s2_paper_id_by_title_returns_candidate_for_corroboration(monkeypatch):
+    _patch_get_json(monkeypatch, {"data": [{"paperId": "P2", "title": "Src", "year": 2020}]})
+    result = cp.s2_paper_id(_cfg(), title="Src")
+    assert result is not None and result[0] == "P2"
+    assert result[1]["title"] == "Src" and result[1]["year"] == 2020
+
+
+def test_s2_paper_id_miss_returns_none(monkeypatch):
+    _patch_get_json(monkeypatch, None)
+    assert cp.s2_paper_id(_cfg(), doi="10.1/x") is None
+    _patch_get_json(monkeypatch, {"data": []})
+    assert cp.s2_paper_id(_cfg(), title="Nope") is None
+
+
+def test_s2_references_normalizes_and_skips_null_cited(monkeypatch):
+    _patch_get_json(
+        monkeypatch,
+        {
+            "data": [
+                {
+                    "citedPaper": {
+                        "title": "Ref A",
+                        "year": 2020,
+                        "externalIds": {"DOI": "10.1/a"},
+                        "abstract": "abs A",
+                        "authors": [{"name": "Jane Roe"}],
+                        "publicationTypes": ["JournalArticle"],
+                    }
+                },
+                {"citedPaper": None},  # S2 sometimes carries an unresolved reference
+            ]
+        },
+    )
+    out = cp.s2_references("P1", _cfg())
+    assert out is not None and len(out) == 1
+    assert out[0]["title"] == "Ref A"
+    assert out[0]["doi"] == "10.1/a"
+    assert out[0]["abstract"] == "abs A"
+    assert out[0]["authors"] == [{"family": "Roe", "given": "Jane"}]
+    assert out[0]["source"] == "semanticscholar"
+
+
+def test_s2_references_fetch_failure_returns_none(monkeypatch):
+    _patch_get_json(monkeypatch, None)
+    assert cp.s2_references("P1", _cfg()) is None

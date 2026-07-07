@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from .citation_providers import (
@@ -30,11 +31,31 @@ from .citation_providers import (
     normalize_s2,
     openalex_search,
     s2_by_doi,
+    s2_paper_id,
+    s2_references,
     s2_search,
 )
 from .config import CitationConfig
 from .references import RawReference
 from .text_utils import fold_name, leading_number
+
+
+@dataclass
+class SourcePaper:
+    """What we know about the paper being processed, for the S2 bulk-references fast-path.
+
+    An external id (``doi``/``arxiv``) resolves the source exactly (trusted); ``title`` (+
+    ``year``/``authors`` when available -- papis fills them from info.yaml, the CLI has the
+    OCR'd title) resolves it by a corroborated search. All optional: an empty/None source
+    just disables the fast-path and everything runs the per-entry path as before.
+    """
+
+    doi: str | None = None
+    arxiv: str | None = None
+    title: str | None = None
+    year: int | None = None
+    authors: list[dict] | None = None
+
 
 # ---------------------------------------------------------------------------
 # Acceptance check
@@ -146,6 +167,27 @@ def _is_preprint(candidate: dict) -> bool:
     return (candidate.get("doi") or "").lower().startswith("10.48550/")
 
 
+def _merge_candidate(out: dict, candidate: dict, match: str) -> dict:
+    """Merge an accepted candidate's fields into the extracted guess and stamp verified
+    metadata. Provider data wins wherever it exists (authors included); the extractor's
+    guess is kept for fields the provider lacks (commonly volume/page). Shared by the
+    per-entry resolver and the S2 bulk fast-path so both merge identically.
+    """
+    for fld in ("title", "year", "doi", "abstract", "authors"):
+        if not candidate.get(fld):
+            continue
+        if fld == "year" and out.get("year") and candidate["year"] < out["year"]:
+            # never pull the year backward (user decision): a provider year *below* the
+            # printed one is the preprint's (S2 merges preprint+published and reports the
+            # earliest); keep the paper's printed (published) year. Years still gate
+            # acceptance the same way either side (`_acceptable`).
+            continue
+        out[fld] = candidate[fld]
+    out["source"] = candidate.get("source")
+    out["provider_type"] = candidate.get("provider_type")
+    return {**out, "verified": True, "match": match}
+
+
 def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> dict:
     """Resolve one reference: DOI-first exact lookup, else CrossRef -> S2 -> OpenAlex
     title search under the two-tier acceptance bar.
@@ -213,6 +255,7 @@ def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> d
         if near_miss is not None:
             result["near_miss"] = near_miss
         return result
+    assert match is not None  # match is set together with candidate on every accept path
 
     # CrossRef rarely carries an abstract -- one S2-by-DOI follow-up just for that field
     if match == "crossref" and not candidate.get("abstract") and candidate.get("doi"):
@@ -220,39 +263,90 @@ def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> d
         if followup and followup.get("abstract"):
             candidate["abstract"] = followup["abstract"]
 
-    for fld in ("title", "year", "doi", "abstract", "authors"):
-        if not candidate.get(fld):
-            continue
-        if fld == "year" and out.get("year") and candidate["year"] < out["year"]:
-            # never pull the year backward (user decision): a provider year *below*
-            # the printed one is the preprint's (S2 merges preprint+published and
-            # reports the earliest year, confirmed live) -- the paper's own printed
-            # year is the published one, keep it. Years still gate acceptance the
-            # same way either side (`_acceptable`).
-            continue
-        out[fld] = candidate[fld]
-    out["source"] = candidate.get("source")
-    out["provider_type"] = candidate.get("provider_type")
-    return {**out, "verified": True, "match": match}
+    return _merge_candidate(out, candidate, match)
+
+
+def _source_confident(source: SourcePaper, candidate: dict, cfg: CitationConfig) -> bool:
+    """Is a title-search hit really the source paper? Title similarity must clear the bar,
+    and year + first-author must agree when the source provides them (a title alone can land
+    on the wrong paper). Same leave-don't-guess stance as reference acceptance.
+    """
+    if title_similarity(source.title, candidate.get("title")) < cfg.title_similarity_threshold:
+        return False
+    year, cand_year = source.year, candidate.get("year")
+    if year and cand_year and abs(year - cand_year) > cfg.year_tolerance:
+        return False
+    if source.authors:
+        src_fam, cand_fam = _first_family({"authors": source.authors}), _first_family(candidate)
+        if src_fam and cand_fam and src_fam != cand_fam:
+            return False
+    return True
+
+
+def _source_references(source: SourcePaper | None, cfg: CitationConfig) -> list[dict] | None:
+    """The source paper's references from S2 as a bulk candidate list, or None when the
+    fast-path is off / the source can't be identified confidently. An external id is trusted;
+    a title match is gated by ``_source_confident`` so we never pull the wrong paper's refs.
+    """
+    if not cfg.s2_bulk_references or source is None:
+        return None
+    hit = None
+    if source.doi or source.arxiv:
+        hit = s2_paper_id(cfg, doi=source.doi, arxiv=source.arxiv)  # exact -> trusted
+    elif source.title:
+        found = s2_paper_id(cfg, title=source.title)
+        if found and _source_confident(source, found[1], cfg):
+            hit = found
+    return s2_references(hit[0], cfg) if hit else None
+
+
+def _match_in_bulk(
+    extracted: dict, raw_text: str, bulk: list[dict], cfg: CitationConfig
+) -> dict | None:
+    """Match one extracted reference against the source's bulk reference list -- locally, no
+    network: a shared DOI first, else the best title hit clearing ``_acceptable``. Returns the
+    merged resolved dict (``match="s2-bulk"``) or None to fall back to a per-entry search.
+    """
+    doi = extract_doi(raw_text) or extracted.get("doi")
+    if doi:
+        doi = doi.lower()
+        for cand in bulk:
+            if (cand.get("doi") or "").lower() == doi:
+                return _merge_candidate(dict(extracted), cand, "s2-bulk")
+    best, best_sim = None, 0.0
+    for cand in bulk:
+        if _acceptable(extracted, cand, cfg):
+            s = title_similarity(extracted.get("title"), cand.get("title"))
+            if s > best_sim:
+                best, best_sim = cand, s
+    return _merge_candidate(dict(extracted), best, "s2-bulk") if best is not None else None
 
 
 def resolve_references(
-    extracted: list[dict], raw_references: list[RawReference], cfg: CitationConfig
+    extracted: list[dict],
+    raw_references: list[RawReference],
+    cfg: CitationConfig,
+    source: SourcePaper | None = None,
 ) -> list[dict]:
-    """Resolve a whole bibliography: layer-1 output positionally merged with parse.py's
-    raw ``[{page, number, text}]`` list, each entry verified concurrently.
+    """Resolve a whole bibliography: layer-1 output positionally merged with parse.py's raw
+    ``[{page, number, text}]`` list, each entry verified concurrently.
 
-    The file's one public orchestrator. Deliberately does NOT call
-    ``extract_references`` itself -- cli.py owns sequencing, same as every other stage.
-    Output entries: ``{page, number, raw_text, ...resolved fields..., verified, match,
-    type}``, in input order. A missing parse-level ``number`` is recovered from the raw
+    The file's one public orchestrator. When ``source`` identifies the paper in S2, its whole
+    reference list is fetched ONCE and each entry is matched locally (the fast-path); anything
+    unmatched -- or every entry when the source isn't found -- falls back to the per-entry
+    provider search. Deliberately does NOT call ``extract_references`` itself -- cli.py owns
+    sequencing. Output entries: ``{page, number, raw_text, ...resolved fields..., verified,
+    match, type}``, in input order. A missing parse-level ``number`` is recovered from the raw
     text's leading marker when possible.
     """
     padded = (list(extracted) + [{}] * len(raw_references))[: len(raw_references)]
+    bulk = _source_references(source, cfg)  # one fetch (or None -> pure per-entry path)
 
     def resolve_one(i: int) -> dict:
         raw = raw_references[i]
-        resolved = verify_and_resolve(padded[i], raw["text"], cfg)
+        resolved = _match_in_bulk(padded[i], raw["text"], bulk, cfg) if bulk is not None else None
+        if resolved is None:
+            resolved = verify_and_resolve(padded[i], raw["text"], cfg)
         entry = {
             "page": raw.get("page"),
             "number": raw.get("number") or leading_number(raw["text"]),

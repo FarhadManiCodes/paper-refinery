@@ -25,7 +25,7 @@ import click
 from .chunker import Chunk, chunk_markdown
 from .citation_extraction import extract_references
 from .citation_linking import link_citations, make_citekey, rewrite_markers
-from .citation_resolution import format_resolution_report, resolve_references
+from .citation_resolution import SourcePaper, format_resolution_report, resolve_references
 from .config import RefineryConfig, load_config
 from .enrich import enrich_markdown
 from .figures import describe_figure, make_client
@@ -35,6 +35,14 @@ from .parse_cache import parse_pdf_cached
 logger = logging.getLogger(__name__)
 
 _IMAGE_LINK_RE = re.compile(r"(!\[[^\]]*\]\()([^)\s]+)(\))")
+_H1_RE = re.compile(r"(?m)^#\s+(.+)$")
+
+
+def _source_title(markdown: str) -> str | None:
+    """The paper's own title from the first H1 (the OCR'd doc-title) -- used to look the
+    SOURCE paper up in S2 for the reference fast-path. None when there's no H1."""
+    m = _H1_RE.search(markdown)
+    return " ".join(m.group(1).split()) if m else None
 
 
 def _relativize_image_links(md: str, base: Path) -> str:
@@ -77,7 +85,7 @@ def write_chunks(chunks: list[Chunk], docname: str, source_pdf: str, out_path: P
 
 
 def _run_citations(
-    parsed: ParseResult, cfg: RefineryConfig, work_dir: Path
+    parsed: ParseResult, cfg: RefineryConfig, work_dir: Path, source_doi: str | None = None
 ) -> tuple[list[dict], list[dict]]:
     """Citation stack on one paper's parse output: extraction (one Gemini call) ->
     resolution (verify/enrich against CrossRef/S2/OpenAlex, disk-cached).
@@ -87,9 +95,14 @@ def _run_citations(
     resolution diff report lands in the work directory. Returns ``(extracted,
     resolved)``, positionally aligned -- ``_refine`` links markers against
     ``extracted`` (below) and builds citekeys from ``resolved``.
+
+    The source paper (``source_doi`` if a caller has it, else the OCR'd title) drives the
+    S2 bulk-references fast-path in ``resolve_references``; unidentified/unmatched entries
+    fall back to the per-entry provider search.
     """
     extracted = extract_references([r["text"] for r in parsed.references], cfg.citation)
-    resolved = resolve_references(extracted, parsed.references, cfg.citation)
+    source = SourcePaper(doi=source_doi, title=_source_title(parsed.markdown))
+    resolved = resolve_references(extracted, parsed.references, cfg.citation, source=source)
     report = format_resolution_report(extracted, resolved)
     (work_dir / "resolution_report.txt").write_text(report + "\n")
     return extracted, resolved
@@ -118,6 +131,7 @@ def _refine(
     work_dir: Path,
     cfg: RefineryConfig,
     force_parse: bool = False,
+    source_doi: str | None = None,
 ) -> tuple[list[Chunk], list[str]]:
     """Run the pipeline; returns the chunks plus human-readable summary lines to echo.
 
@@ -141,7 +155,9 @@ def _refine(
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         citations_future = (
-            pool.submit(_run_citations, parsed, cfg, work_dir) if parsed.references else None
+            pool.submit(_run_citations, parsed, cfg, work_dir, source_doi)
+            if parsed.references
+            else None
         )
 
         # one Gemini client, reused across pages (the page calls run concurrently in
@@ -222,6 +238,7 @@ def refine(
     citations_out: Path | None = None,
     work_dir: Path | None = None,
     force_parse: bool = False,
+    doi: str | None = None,
 ) -> RefineResult:
     """Run the full pipeline on one PDF and return its chunks + artifact paths.
 
@@ -232,6 +249,10 @@ def refine(
     exactly like the ``refinery`` CLI. Output locations default next to the PDF; override
     any of them explicitly. ``cfg`` defaults to ``load_config()``.
 
+    Pass the source paper's ``doi`` (papis has it in info.yaml) to enable the S2
+    bulk-references fast-path -- one call fetches the paper's whole reference list instead
+    of a per-reference provider search. Without it, the OCR'd title is used opportunistically.
+
     Returns refinery's own types/paths only -- no paper-qa objects cross this boundary; the
     consumer owns converting chunks into whatever its indexer wants (it may read
     ``chunks_path`` or use the returned ``chunks`` directly).
@@ -239,7 +260,9 @@ def refine(
     pdf = Path(pdf)
     cfg = cfg or load_config()
     out, citations_out, work_dir = _default_outputs(pdf, out, citations_out, work_dir)
-    chunks, _summary = _refine(pdf, out, citations_out, work_dir, cfg, force_parse=force_parse)
+    chunks, _summary = _refine(
+        pdf, out, citations_out, work_dir, cfg, force_parse=force_parse, source_doi=doi
+    )
     return RefineResult(
         chunks=chunks, chunks_path=out, citations_path=citations_out, work_dir=work_dir
     )
@@ -303,6 +326,12 @@ def _setup_logging() -> None:
     help="Re-run OCR, bypassing the parse checkpoint (<pdf>.refinery/parse_cache/).",
 )
 @click.option(
+    "--doi",
+    default=None,
+    help="Source paper DOI -- enables the S2 bulk-references fast-path (one call instead "
+    "of a per-reference search). Without it the OCR'd title is tried opportunistically.",
+)
+@click.option(
     "--from",
     "from_stage",
     type=click.Choice(["chunk"]),
@@ -318,6 +347,7 @@ def main(
     model_path: Path | None,
     mmproj_path: Path | None,
     force_parse: bool,
+    doi: str | None,
     from_stage: str | None,
 ) -> None:
     """Parse, figure-enrich, citation-verify, and chunk PDF for papis-ask."""
@@ -332,7 +362,9 @@ def main(
     if from_stage == "chunk":
         summary = _rechunk(pdf, out, work_dir, cfg)
     else:
-        _chunks, summary = _refine(pdf, out, citations_out, work_dir, cfg, force_parse=force_parse)
+        _chunks, summary = _refine(
+            pdf, out, citations_out, work_dir, cfg, force_parse=force_parse, source_doi=doi
+        )
     click.echo("\n".join(summary))
 
 

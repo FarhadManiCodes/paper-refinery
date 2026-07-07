@@ -145,6 +145,11 @@ class CitationConfig:
     #   every successful provider response is cached here (key: sha256 of the URL) so
     #   iterating on matching logic never re-hits the keyless APIs; failures are never
     #   cached. Sibling of the models cache; safe to delete anytime.
+    s2_bulk_references: bool = True
+    #   fast-path: when the SOURCE paper is found in S2, fetch its whole reference list in
+    #   ONE call and match each extracted reference against it locally, instead of a
+    #   per-reference provider search (the slow, throttled part). Anything unmatched falls
+    #   back to the per-entry search; set False to force the per-entry path everywhere.
 
 
 @dataclass
