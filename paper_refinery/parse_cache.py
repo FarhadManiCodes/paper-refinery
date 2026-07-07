@@ -32,6 +32,7 @@ from pathlib import Path
 
 from .backend import OcrBackend
 from .config import ParseConfig
+from .disk_cache import write_json
 from .parse import (
     CaptionRegion,
     CropRegion,
@@ -141,7 +142,7 @@ def save_checkpoint(work_dir: Path, pdf: Path, cfg: ParseConfig, result: ParseRe
             if cr.path.exists():
                 shutil.copy2(cr.path, crops_dir / cr.path.name)
     payload = {"manifest": _manifest(pdf, cfg), "result": _serialize(result)}
-    (ckpt / _CHECKPOINT_FILE).write_text(json.dumps(payload, ensure_ascii=False))
+    write_json(ckpt / _CHECKPOINT_FILE, payload)  # atomic (temp + os.replace), written last
 
 
 def load_checkpoint(work_dir: Path, pdf: Path, cfg: ParseConfig) -> ParseResult | None:
