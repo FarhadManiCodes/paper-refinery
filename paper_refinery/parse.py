@@ -1,5 +1,7 @@
-"""Local GLM-OCR backend: llama-server (inference) + the official ``glmocr`` SDK
-(PP-DocLayout-V3 layout detection + per-region OCR dispatch + result formatting).
+"""Transform a PDF into a ``ParseResult``: page-marked body markdown (tables as markdown,
+formulas as LaTeX), figure/chart crops with their detected captions, and a raw references
+list. This is the pipeline's parse stage; the llama-server + ``glmocr`` SDK *lifecycle* it
+runs on lives in ``backend.py``.
 
 GLM-OCR is a region-level recognizer, not a page-to-markdown model: it OCRs a crop given
 a task prompt ("Text Recognition:", "Table Recognition:", "Formula Recognition:") and has
@@ -41,12 +43,14 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from .backend import OcrBackend, ocr_backend
 from .config import ParseConfig, load_config
 from .markers import page_marker
 from .reading_order import reading_order, region_bbox
 from .references import (
+    RawReference,
     reclaim_mislabeled_references,
     render_references_markdown,
     repair_references,
@@ -109,8 +113,8 @@ class CaptionRegion:
     """One figure_title region's text + bbox, same coordinate space as CropRegion.
 
     The bbox is what lets enrich.py pair captions with crops *geometrically* (nearest
-    caption with x-overlap) instead of by position-in-list -- positional pairing
-    mislabels the moment a multi-panel figure splits into more crops than captions.
+    caption overlapping on either axis) instead of by position-in-list -- positional
+    pairing mislabels the moment a multi-panel figure splits into more crops than captions.
     """
 
     text: str
@@ -132,7 +136,7 @@ class ParseResult:
     figure_captions: dict[int, list[CaptionRegion]] = field(default_factory=dict)
     # raw bibliography, routed out of `markdown` entirely -- structuring/linking these
     # is a separate, later concern (not this module's job)
-    references: list[dict] = field(default_factory=list)  # [{"page", "number", "text"}, ...]
+    references: list[RawReference] = field(default_factory=list)
     references_markdown: str = ""  # references.render_references_markdown; see parse_pdf
 
 
@@ -203,10 +207,9 @@ def _merge_reference_numbers(
     PP-DocLayout-V3 labels a bibliography entry's leading "[12]"/"23." marker as its own
     region (native_label "reference"), separate from "reference_content" -- the same
     kind of split it makes for formula/formula_number (which glmocr itself merges
-    upstream). An
-    unpaired reference_content still becomes an entry with no number attached (never
-    dropped over a missing number -- the entry's text is what matters most); an unpaired
-    reference_number is dropped (nothing to attach it to).
+    upstream). An unpaired reference_content still becomes an entry with no number
+    attached (never dropped over a missing number -- the entry's text is what matters
+    most); an unpaired reference_number is dropped (nothing to attach it to).
     """
     merged: list[tuple[str, str, dict]] = []
     i = 0
@@ -271,9 +274,8 @@ def _build_markdown(
     pages_regions: list[list[dict]],
     image_files: dict,
     figures_dir: Path,
-    cfg: ParseConfig,
     pdf_path: Path | None = None,
-) -> tuple[str, dict[int, list[CropRegion]], dict[int, list[CaptionRegion]], list[dict]]:
+) -> tuple[str, dict[int, list[CropRegion]], dict[int, list[CaptionRegion]], list[RawReference]]:
     """Assemble page-marked markdown, figure crops, known captions, and a raw
     references list from glmocr's per-page region lists.
 
@@ -282,7 +284,7 @@ def _build_markdown(
     parts: list[str] = []
     figure_crops: dict[int, list[CropRegion]] = {}
     figure_captions: dict[int, list[CaptionRegion]] = {}
-    references: list[dict] = []
+    references: list[RawReference] = []
     used_images: set[str] = set()
 
     for page_idx, regions in enumerate(pages_regions):
@@ -396,7 +398,12 @@ def parse_pdf(
         json_result = json.loads(json_result)
 
     markdown, figure_crops, figure_captions, references = _build_markdown(
-        json_result, result.image_files, figures_dir, cfg, pdf_path=pdf_path
+        # json_result / image_files come untyped from the glmocr result object; the shapes
+        # are the SDK contract confirmed live (see _dispatch_region / _save_figure_crop)
+        cast("list[list[dict]]", json_result),
+        result.image_files or {},
+        figures_dir,
+        pdf_path=pdf_path,
     )
     return ParseResult(
         markdown=markdown,

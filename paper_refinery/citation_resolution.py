@@ -23,16 +23,17 @@ from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 
 from .citation_providers import (
-    _normalize_crossref,
-    _normalize_openalex,
-    _normalize_s2,
     crossref_search,
     extract_doi,
+    normalize_crossref,
+    normalize_openalex,
+    normalize_s2,
     openalex_search,
     s2_by_doi,
     s2_search,
 )
 from .config import CitationConfig
+from .references import RawReference
 from .text_utils import fold_name, leading_number
 
 # ---------------------------------------------------------------------------
@@ -167,7 +168,7 @@ def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> d
     # no similarity check
     doi = extract_doi(raw_text)
     if doi:
-        candidate = _normalize_s2(s2_by_doi(doi, cfg))
+        candidate = normalize_s2(s2_by_doi(doi, cfg))
         if candidate and candidate.get("title"):
             match = "doi"
         else:
@@ -180,9 +181,9 @@ def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> d
         # live on 3 hyco refs pulled backward a year -- while CrossRef's `issued` is the
         # published record's own date. S2 keeps DOI-first lookups + abstract follow-ups.
         providers = (
-            ("crossref", crossref_search, _normalize_crossref),
-            ("semanticscholar", s2_search, _normalize_s2),
-            ("openalex", openalex_search, _normalize_openalex),
+            ("crossref", crossref_search, normalize_crossref),
+            ("semanticscholar", s2_search, normalize_s2),
+            ("openalex", openalex_search, normalize_openalex),
         )
         preprint_fallback: tuple[str, dict] | None = None
         for name, search, normalize in providers:
@@ -215,7 +216,7 @@ def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> d
 
     # CrossRef rarely carries an abstract -- one S2-by-DOI follow-up just for that field
     if match == "crossref" and not candidate.get("abstract") and candidate.get("doi"):
-        followup = _normalize_s2(s2_by_doi(candidate["doi"], cfg))
+        followup = normalize_s2(s2_by_doi(candidate["doi"], cfg))
         if followup and followup.get("abstract"):
             candidate["abstract"] = followup["abstract"]
 
@@ -236,7 +237,7 @@ def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> d
 
 
 def resolve_references(
-    extracted: list[dict], raw_references: list[dict], cfg: CitationConfig
+    extracted: list[dict], raw_references: list[RawReference], cfg: CitationConfig
 ) -> list[dict]:
     """Resolve a whole bibliography: layer-1 output positionally merged with parse.py's
     raw ``[{page, number, text}]`` list, each entry verified concurrently.

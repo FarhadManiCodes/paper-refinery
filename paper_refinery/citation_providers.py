@@ -81,7 +81,7 @@ def _get_json(
     cache = _cache_path(url, cfg)
     if cache:
         cached = read_json(cache)  # None on a cache miss or a corrupt entry alike
-        if cached is not None:
+        if isinstance(cached, dict):
             return cached
 
     base_headers = {"User-Agent": _user_agent(cfg)}
@@ -187,7 +187,7 @@ def _split_full_name(full: str | None) -> dict | None:
     return {"family": tokens[-1], "given": " ".join(tokens[:-1]) or None}
 
 
-def _normalize_s2(paper: dict | None) -> dict | None:
+def normalize_s2(paper: dict | None) -> dict | None:
     # confirmed live: `abstract` is plain text; DOI under externalIds; publicationTypes
     # is a list like ["JournalArticle"] (or null); authors carry only a full `name`
     if not paper:
@@ -207,7 +207,7 @@ def _normalize_s2(paper: dict | None) -> dict | None:
     }
 
 
-def _normalize_crossref(item: dict | None) -> dict | None:
+def normalize_crossref(item: dict | None) -> dict | None:
     # confirmed live: `title` is a LIST; year sits at issued.date-parts[0][0];
     # `abstract` (when present at all) is JATS XML -- tags stripped here. Authors are
     # the one clean family/given source of the three providers.
@@ -235,7 +235,7 @@ def _normalize_crossref(item: dict | None) -> dict | None:
     }
 
 
-def _normalize_openalex(work: dict | None) -> dict | None:
+def normalize_openalex(work: dict | None) -> dict | None:
     # confirmed live: `doi` is a full https://doi.org/ URL; abstract only as inverted
     # index; authors under authorships[].author.display_name
     if not work:

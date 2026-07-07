@@ -23,9 +23,21 @@ from __future__ import annotations
 import re
 import warnings
 from pathlib import Path
+from typing import TypedDict
 
 from .markers import page_marker
 from .text_utils import leading_number
+
+
+class RawReference(TypedDict):
+    """One raw OCR'd bibliography entry, as parse.py routes ``reference_content`` regions
+    out of the body. Consumed by the repairs here and by citation_resolution. ``number``
+    is the printed marker's digits when the layout model paired a number region (see
+    parse.py's ``_merge_reference_numbers``), else None."""
+
+    page: int
+    number: str | None
+    text: str
 
 # a bibliography-entry-looking start: "[12] " or "12. " (bracket/dot required -- a bare
 # "2 " would match too much ordinary body text to be safe as a reclaim signal)
@@ -65,7 +77,7 @@ def reclaim_mislabeled_references(
     return out
 
 
-def repair_references(references: list[dict], pdf_path: Path | None = None) -> list[dict]:
+def repair_references(references: list[RawReference], pdf_path: Path | None = None) -> list[RawReference]:
     """All list-level repairs, in their one working order.
 
     Page-break split fragments are rejoined first (so a rejoined entry counts as one),
@@ -105,7 +117,7 @@ def _join_split_entry(head: str, tail: str) -> str:
     return f"{head} {tail}"
 
 
-def _merge_split_references(references: list[dict]) -> list[dict]:
+def _merge_split_references(references: list[RawReference]) -> list[RawReference]:
     """Fold a page-break continuation fragment back into the entry it belongs to.
 
     A bibliography entry crossing a page boundary can come back as two regions --
@@ -119,7 +131,7 @@ def _merge_split_references(references: list[dict]) -> list[dict]:
     surname particle (see ``_SURNAME_PARTICLES``) -- is merged. Chained fragments
     fold into the same entry one by one.
     """
-    out: list[dict] = []
+    out: list[RawReference] = []
     for ref in references:
         prev = out[-1] if out else None
         if (
@@ -131,7 +143,8 @@ def _merge_split_references(references: list[dict]) -> list[dict]:
         ):
             prev["text"] = _join_split_entry(prev["text"], ref["text"])
             continue
-        out.append(dict(ref))
+        # copy so a later in-place `prev["text"]` edit never mutates the caller's entry
+        out.append({"page": ref["page"], "number": ref["number"], "text": ref["text"]})
     return out
 
 
@@ -153,7 +166,7 @@ def _is_reference_boilerplate(text: str) -> bool:
 _MAX_TRAILING_BOILERPLATE_CHECK = 3
 
 
-def _drop_trailing_boilerplate(references: list[dict]) -> list[dict]:
+def _drop_trailing_boilerplate(references: list[RawReference]) -> list[RawReference]:
     """Drop a trailing run of misclassified back-matter entries from the bibliography.
 
     Checks only the last few entries (up to ``_MAX_TRAILING_BOILERPLATE_CHECK``), and
@@ -176,7 +189,7 @@ def _drop_trailing_boilerplate(references: list[dict]) -> list[dict]:
     return cleaned
 
 
-def _missing_reference_numbers(references: list[dict]) -> list[int]:
+def _missing_reference_numbers(references: list[RawReference]) -> list[int]:
     """Missing printed numbers of a numbered bibliography; ``[]`` when there is nothing
     trustworthy to report -- keys unclean (author-year style, garbled markers),
     duplicated (two entries garbled to the same number make the expected-set math
@@ -185,10 +198,11 @@ def _missing_reference_numbers(references: list[dict]) -> list[int]:
     keys = [_reference_sort_key(ref) for ref in references]
     if not keys or any(key is None for key in keys) or len(set(keys)) != len(keys):
         return []
-    return sorted(set(range(1, max(keys) + 1)) - set(keys))
+    nums = [k for k in keys if k is not None]  # all clean & unique past the guard
+    return sorted(set(range(1, max(nums) + 1)) - set(nums))
 
 
-def _warn_reference_gaps(references: list[dict]) -> None:
+def _warn_reference_gaps(references: list[RawReference]) -> None:
     """Warn (never fix or drop) when a numbered bibliography has holes.
 
     A gap means the layout model produced no region at all for an entry (confirmed live:
@@ -218,8 +232,8 @@ def _normalize_layer_text(text: str) -> str:
 
 
 def _splice_missing_from_layer(
-    references: list[dict], layer_text: str, missing: list[int]
-) -> list[dict]:
+    references: list[RawReference], layer_text: str, missing: list[int]
+) -> list[RawReference]:
     """Fill numbered-bibliography gaps with entries read from the PDF's own text layer.
 
     Pure logic half of ``_recover_missing_references`` (which owns the file I/O and
@@ -239,8 +253,8 @@ def _splice_missing_from_layer(
     by_key = {_reference_sort_key(ref): ref for ref in references}
     out = list(references)
     for n in missing:
-        prev_key = max((k for k in by_key if k < n), default=None)
-        next_key = min((k for k in by_key if k > n), default=None)
+        prev_key = max((k for k in by_key if k is not None and k < n), default=None)
+        next_key = min((k for k in by_key if k is not None and k > n), default=None)
         if prev_key is None or next_key is None:
             continue
         prev_prefix = _normalize_layer_text(by_key[prev_key]["text"])[:_RECOVERY_PREFIX_CHARS]
@@ -255,14 +269,14 @@ def _splice_missing_from_layer(
         text = segment[starts[0] :].strip()
         if len(text) < _MIN_RECOVERED_CHARS:
             continue
-        recovered = {"page": by_key[prev_key]["page"], "number": None, "text": text}
+        recovered: RawReference = {"page": by_key[prev_key]["page"], "number": None, "text": text}
         out.insert(out.index(by_key[prev_key]) + 1, recovered)
         by_key[n] = recovered
         warnings.warn(f"recovered missing reference {n} from the PDF's embedded text layer")
     return out
 
 
-def _recover_missing_references(references: list[dict], pdf_path: Path | None) -> list[dict]:
+def _recover_missing_references(references: list[RawReference], pdf_path: Path | None) -> list[RawReference]:
     """Recover numbered-bibliography entries the layout model skipped, from the PDF's
     embedded text layer (confirmed live: brunton-2016's entry 2 is printed in the PDF
     and readable via PyMuPDF, but PP-DocLayout-V3 produces no region for it).
@@ -280,7 +294,7 @@ def _recover_missing_references(references: list[dict], pdf_path: Path | None) -
         import fitz  # PyMuPDF; already present transitively via glmocr
 
         with fitz.open(pdf_path) as doc:
-            layer_text = "\n".join(page.get_text() for page in doc)
+            layer_text = "\n".join(str(page.get_text()) for page in doc)
     except Exception:  # no text layer / import failure: the gap warning still fires
         return references
     if not layer_text.strip():
@@ -288,7 +302,7 @@ def _recover_missing_references(references: list[dict], pdf_path: Path | None) -
     return _splice_missing_from_layer(references, layer_text, missing)
 
 
-def _reference_sort_key(ref: dict) -> int | None:
+def _reference_sort_key(ref: RawReference) -> int | None:
     """Best-effort integer ordering key for one reference.
 
     Prefers the region-paired ``number`` field (see parse.py's
@@ -309,7 +323,7 @@ def _reference_sort_key(ref: dict) -> int | None:
     return int(n) if n is not None else None
 
 
-def _sort_references_by_number(references: list[dict]) -> list[dict]:
+def _sort_references_by_number(references: list[RawReference]) -> list[RawReference]:
     """Re-sort references by their best-effort numeric marker, when doing so is
     unambiguous.
 
@@ -331,12 +345,13 @@ def _sort_references_by_number(references: list[dict]) -> list[dict]:
     keys = [_reference_sort_key(ref) for ref in references]
     if any(key is None for key in keys):
         return references
-    if sorted(keys) != list(range(min(keys), min(keys) + len(keys))):
+    nums = [k for k in keys if k is not None]  # all clean past the guard
+    if sorted(nums) != list(range(min(nums), min(nums) + len(nums))):
         return references  # duplicates or gaps -> don't trust the keys
-    return [ref for _, ref in sorted(zip(keys, references), key=lambda pair: pair[0])]
+    return [ref for _, ref in sorted(zip(nums, references), key=lambda pair: pair[0])]
 
 
-def render_references_markdown(references: list[dict]) -> str:
+def render_references_markdown(references: list[RawReference]) -> str:
     """Plain markdown rendering of the raw bibliography: one entry per line, grouped
     under each page's own ``<page_number>`` marker, in reading order.
 
@@ -346,7 +361,7 @@ def render_references_markdown(references: list[dict]) -> str:
     """
     if not references:
         return ""
-    by_page: dict[int, list[dict]] = {}
+    by_page: dict[int, list[RawReference]] = {}
     for ref in references:
         by_page.setdefault(ref["page"], []).append(ref)
 

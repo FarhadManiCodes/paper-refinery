@@ -72,7 +72,7 @@ def test_normalize_s2():
         "externalIds": {"DOI": "10.1/x", "ArXiv": "1509.03580"},
         "publicationTypes": ["JournalArticle"],
     }
-    out = cp._normalize_s2(paper)
+    out = cp.normalize_s2(paper)
     assert out == {
         "title": "T",
         "year": 2015,
@@ -86,7 +86,7 @@ def test_normalize_s2():
 
 def test_normalize_s2_splits_author_display_names():
     paper = {"title": "T", "authors": [{"name": "Steven L. Brunton"}, {"name": "Kutz"}]}
-    out = cp._normalize_s2(paper)
+    out = cp.normalize_s2(paper)
     assert out["authors"] == [
         {"family": "Brunton", "given": "Steven L."},
         {"family": "Kutz", "given": None},
@@ -101,7 +101,7 @@ def test_normalize_crossref_authors_clean_family_given():
             {"name": "Some Consortium"},  # organization: no family -> skipped
         ],
     }
-    out = cp._normalize_crossref(item)
+    out = cp.normalize_crossref(item)
     assert out["authors"] == [{"family": "Liverani", "given": "L."}]
 
 
@@ -110,12 +110,12 @@ def test_normalize_openalex_authors_from_authorships():
         "display_name": "T",
         "authorships": [{"author": {"display_name": "Lu Lu"}}, {"author": {}}],
     }
-    out = cp._normalize_openalex(work)
+    out = cp.normalize_openalex(work)
     assert out["authors"] == [{"family": "Lu", "given": "Lu"}]
 
 
 def test_normalize_s2_tolerates_nulls():
-    out = cp._normalize_s2({"title": "T", "publicationTypes": None, "externalIds": None})
+    out = cp.normalize_s2({"title": "T", "publicationTypes": None, "externalIds": None})
     assert out["doi"] is None and out["provider_type"] is None
 
 
@@ -127,7 +127,7 @@ def test_normalize_crossref():
         "type": "journal-article",
         "abstract": "<jats:p>An abstract.</jats:p>",
     }
-    out = cp._normalize_crossref(item)
+    out = cp.normalize_crossref(item)
     assert out["title"] == "Discovering governing equations"
     assert out["year"] == 2016
     assert out["abstract"] == "An abstract."  # JATS tags stripped
@@ -142,16 +142,16 @@ def test_normalize_openalex():
         "type": "article",
         "abstract_inverted_index": {"Hello": [0], "world": [1]},
     }
-    out = cp._normalize_openalex(work)
+    out = cp.normalize_openalex(work)
     assert out["doi"] == "10.1073/pnas.1517384113"
     assert out["abstract"] == "Hello world"
     assert out["provider_type"] == "article"
 
 
 def test_normalizers_pass_none_through():
-    assert cp._normalize_s2(None) is None
-    assert cp._normalize_crossref(None) is None
-    assert cp._normalize_openalex(None) is None
+    assert cp.normalize_s2(None) is None
+    assert cp.normalize_crossref(None) is None
+    assert cp.normalize_openalex(None) is None
 
 
 # ---------------------------------------------------------------------------
