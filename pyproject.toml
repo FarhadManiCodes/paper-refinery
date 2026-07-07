@@ -1,7 +1,7 @@
 [project]
 name = "paper-refinery"
 version = "0.1.0"
-description = "Parse, figure-enrich, and chunk papers into RAG-ready chunks for papis-ask."
+description = "Parse, figure-enrich, citation-verify, and chunk papers into RAG-ready chunks for papis-ask."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-or-later" }

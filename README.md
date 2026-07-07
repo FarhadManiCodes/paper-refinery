@@ -1,38 +1,58 @@
 # paper-refinery
 
-Parse, figure-enrich, and chunk papers into RAG-ready chunks for **papis-ask**.
+Parse, figure-enrich, citation-verify, and chunk scientific papers into RAG-ready chunks for
+**papis-ask**.
 
 It is a standalone preprocessor: it turns a PDF into a set of clean, section-aware,
-overlapping text chunks (with figure descriptions, page numbers, and standardized
-`[surname_year]` in-text citekeys) that papis-ask ingests directly — bypassing pypdf's
-blind char-window chunking.
+overlapping text chunks — with figure descriptions spliced in, page numbers, a
+verified/enriched bibliography, and in-text citations standardized to `[surname_year]`
+citekeys — that papis-ask ingests directly, bypassing pypdf's blind char-window chunking. The
+chunks are plain data, so it works as a front-end for any RAG pipeline, not just papis-ask.
+
+## Requirements
+
+- **Python ≥ 3.11** (3.12 recommended and used in development).
+- **A local OCR backend** — `llama-server` (from `llama.cpp`) + the GLM-OCR GGUF weights.
+  Parsing is local; see [Local OCR backend setup](#local-ocr-backend-setup).
+- **API keys** — `GOOGLE_API_KEY` (Gemini: figure descriptions + citation extraction) and
+  `HF_TOKEN` (one-time layout-model download on first parse); see [API keys](#api-keys). The
+  citation-resolution providers (CrossRef / Semantic Scholar / OpenAlex) are keyless.
 
 ## Pipeline
 
+A PDF flows through four stages. **Figure-enrichment and citation-resolution run
+concurrently** — both are network-bound and independent — then the citekey rewrite is applied
+once both finish:
+
 ```
-PDF
- └─ parse       local GLM-OCR -> clean body markdown (LaTeX + markdown tables) + figure crops + page markers
-                (llama-server + glmocr SDK: PP-DocLayout-V3 layout, per-region OCR)
-                boilerplate (headers/footers/page numbers) dropped; bibliography routed to its own raw markdown
- └─ figures     Gemini        -> describe each figure crop, one call per figure (what's compared, trends;
-                                 never fabricated numbers)
- └─ enrich                    -> splice figure descriptions next to their captions
- └─ citations   Gemini + APIs -> extract raw references, verify/enrich against CrossRef/Semantic
-                                 Scholar/OpenAlex (cached), detect + link in-text markers, rewrite
-                                 them to `[surname_year]` citekeys -- runs concurrently with figures
- └─ chunker                   -> section-aware split + guaranteed soft-overlap + page numbers
- └─ paper.chunks.json         -> consumed by papis-ask via aadd_texts
- └─ paper.citations.json      -> verified/enriched bibliography + in-text linking map
- └─ paper.refinery/           -> everything reviewable: refinery.md (enriched markdown, citekeys
-                                 already rewritten), references.md (raw bibliography),
-                                 resolution_report.txt (per-reference verification diff), figures/
+                                ┌─ figures / enrich  (Gemini) ─┐
+PDF ── parse (local GLM-OCR) ───┤                              ├── chunk ──▶ outputs
+                                └─ citations (Gemini + web) ───┘
 ```
+
+| Stage | Tool | What it does |
+| --- | --- | --- |
+| **parse** | local GLM-OCR (`llama-server` + `glmocr`, PP-DocLayout-V3 layout + per-region OCR) | PDF → clean body markdown (LaTeX + markdown tables), figure crops, and page markers. Boilerplate (headers/footers/page numbers) is dropped; the bibliography is routed out to its own raw markdown. |
+| **figures → enrich** | Gemini | Describe each figure crop — one call per figure (what's compared, trends; never invents numbers) — then splice each description in next to its caption. |
+| **citations** | Gemini + web APIs | Extract raw references, verify/enrich them against CrossRef / Semantic Scholar / OpenAlex (disk-cached), detect in-text markers, and rewrite them to `[surname_year]` citekeys. |
+| **chunk** | — | Section-aware split with guaranteed soft-overlap and page ranges. |
+
+### Outputs
+
+Two finals land next to the PDF, plus a work directory holding everything reviewable:
+
+| Path | Contents |
+| --- | --- |
+| `<pdf>.chunks.json` | The hand-off papis-ask ingests via `aadd_texts` — chunks with page ranges. |
+| `<pdf>.citations.json` | Verified/enriched bibliography + the in-text linking map. |
+| `<pdf>.refinery/` | `refinery.md` (enriched markdown, citekeys already rewritten — the last human-readable form before chunking), `references.md` (raw bibliography), `resolution_report.txt` (per-reference verification diff), `figures/`, and `parse_cache/` (the OCR checkpoint). |
 
 ## Why
 
 pypdf mangles equations and emits glyph garbage for figures; paper-qa then
 char-chunks the result blindly. paper-refinery produces faithful, semantically
-chunked text instead. See the design notes for the validated chunking policy.
+chunked text instead. See [`CLAUDE.md`](CLAUDE.md) for the architecture and the validated
+chunking policy.
 
 Parsing runs entirely locally: a small (0.9B) OCR model served via `llama.cpp`, orchestrated
 by the official `glmocr` SDK, replaces the cloud-based LlamaParse step -- no per-paper API
@@ -115,6 +135,23 @@ model, plus the `glmocr` SDK to drive layout detection and per-region OCR agains
    Hugging Face Hub on first use -- this is a separate, automatic download the first time
    you parse a PDF, not a manual step, but it does mean the first run needs network egress
    even though every run after that is fully local.
+
+## API keys
+
+Two services need credentials. They load from **one file per service** under
+`~/.config/paper-refinery/secrets/` (its own directory — deliberately never shared with any
+other tool's env, so nothing can silently redirect glmocr's OpenAI-compatible client away
+from your local `llama-server`):
+
+```
+~/.config/paper-refinery/secrets/
+  google.env      GOOGLE_API_KEY=...     # Gemini: figure descriptions + citation extraction
+  hf.env          HF_TOKEN=...           # one-time PP-DocLayout-V3 download on first parse
+```
+
+Each file is `KEY=value` (python-dotenv format), loaded automatically by `load_config()`. The
+citation-resolution providers (CrossRef / Semantic Scholar / OpenAlex) are keyless, so no
+credentials are needed for the citation-verification stage.
 
 ## Usage
 
@@ -203,3 +240,10 @@ OCR→pool handoff and each paper streaming out.
   }
 }
 ```
+
+## License
+
+[GPL-3.0-or-later](LICENSE) — copyleft: works that build on paper-refinery must also be
+released under a GPL-compatible open-source license. (The GLM-OCR model weights and
+PP-DocLayout-V3 you download at runtime carry their own upstream licenses — check those
+before redistributing the models themselves.)
