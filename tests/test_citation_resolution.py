@@ -393,9 +393,9 @@ def test_resolve_references_empty():
 
 
 def test_source_references_none_when_disabled_or_no_source():
-    assert cr._source_references(None, _cfg()) is None
+    assert cr._source_references(None, _cfg(), 5) is None
     off = _cfg(s2_bulk_references=False)
-    assert cr._source_references(cr.SourcePaper(doi="10.1/x"), off) is None
+    assert cr._source_references(cr.SourcePaper(doi="10.1/x"), off, 5) is None
 
 
 def test_source_references_by_doi_is_trusted(monkeypatch):
@@ -403,7 +403,8 @@ def test_source_references_by_doi_is_trusted(monkeypatch):
         cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "Src"}) if kw.get("doi") else None
     )
     monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: [{"title": "Ref A"}])
-    assert cr._source_references(cr.SourcePaper(doi="10.1/x"), _cfg()) == [{"title": "Ref A"}]
+    # n_refs=1 == len(s2) -> S2 covered it, no OpenAlex fill
+    assert cr._source_references(cr.SourcePaper(doi="10.1/x"), _cfg(), 1) == [{"title": "Ref A"}]
 
 
 def test_source_references_title_rejected_when_wrong_paper(monkeypatch):
@@ -414,7 +415,7 @@ def test_source_references_title_rejected_when_wrong_paper(monkeypatch):
     monkeypatch.setattr(
         cr, "s2_references", lambda pid, cfg: pytest.fail("must not fetch wrong paper's refs")
     )
-    assert cr._source_references(cr.SourcePaper(title="My Precise Paper Title"), _cfg()) is None
+    assert cr._source_references(cr.SourcePaper(title="My Precise Paper Title"), _cfg(), 5) is None
 
 
 def test_source_references_title_accepted_when_confident(monkeypatch):
@@ -424,8 +425,39 @@ def test_source_references_title_accepted_when_confident(monkeypatch):
         lambda cfg, **kw: ("PID", {"title": "My Precise Paper Title", "year": 2020}),
     )
     monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: [{"title": "X"}])
-    src = cr.SourcePaper(title="My Precise Paper Title", year=2020)
-    assert cr._source_references(src, _cfg()) == [{"title": "X"}]
+    src = cr.SourcePaper(title="My Precise Paper Title", year=2020)  # title-only: no OpenAlex fill
+    assert cr._source_references(src, _cfg(), 1) == [{"title": "X"}]
+
+
+def test_source_references_fills_from_openalex_when_s2_short(monkeypatch):
+    # publisher-elided: S2 serves nothing; OpenAlex (by DOI) fills the pool
+    monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "Src"}))
+    monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: [])
+    oa = [{"title": "OA Ref", "doi": "10.5678/o", "source": "openalex"}]
+    monkeypatch.setattr(cr, "openalex_references", lambda doi, cfg: oa)
+    out = cr._source_references(cr.SourcePaper(doi="10.1/x"), _cfg(), 5)
+    assert out == oa
+
+
+def test_source_references_no_openalex_when_s2_covers(monkeypatch):
+    s2 = [{"title": f"R{i}"} for i in range(6)]  # len 6 >= n_refs 5 -> S2 covered it
+    monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "Src"}))
+    monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: s2)
+    monkeypatch.setattr(
+        cr, "openalex_references", lambda doi, cfg: pytest.fail("S2 covered it; no OpenAlex")
+    )
+    assert len(cr._source_references(cr.SourcePaper(doi="10.1/x"), _cfg(), 5)) == 6
+
+
+def test_dedup_candidates_by_doi_then_title():
+    cands = [
+        {"title": "Paper A", "doi": "10.1/a"},
+        {"title": "Paper A (dup DOI)", "doi": "10.1/A"},  # same DOI (folded) -> dropped
+        {"title": "Paper B", "doi": None},
+        {"title": "Paper B", "doi": None},  # same title, no DOI -> dropped
+    ]
+    out = cr._dedup_candidates(cands)
+    assert [c["title"] for c in out] == ["Paper A", "Paper B"]
 
 
 def test_match_in_bulk_by_shared_doi():
@@ -434,7 +466,7 @@ def test_match_in_bulk_by_shared_doi():
         {"title": "Right", "doi": "10.1234/abc", "source": "semanticscholar"},
     ]
     out = cr._match_in_bulk({"title": "x"}, "... see doi:10.1234/abc here", bulk, _cfg())
-    assert out is not None and out["doi"] == "10.1234/abc" and out["match"] == "s2-bulk"
+    assert out is not None and out["doi"] == "10.1234/abc" and out["match"] == "bulk"
 
 
 def test_resolve_references_fastpath_matches_bulk_without_per_entry_search(monkeypatch):
@@ -449,7 +481,7 @@ def test_resolve_references_fastpath_matches_bulk_without_per_entry_search(monke
     ]
     out = cr.resolve_references([dict(EXTRACTED)], raw, _cfg(), source=cr.SourcePaper(doi="10.1/x"))
     assert out[0]["verified"] is True
-    assert out[0]["match"] == "s2-bulk"
+    assert out[0]["match"] == "bulk"
     assert out[0]["doi"] == "10.1115/1.3662552"  # enriched from the bulk candidate
     assert out[0]["number"] == "1"  # printed number preserved (from OCR, not S2)
 

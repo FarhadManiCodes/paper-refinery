@@ -277,3 +277,30 @@ def test_s2_references_normalizes_and_skips_null_cited(monkeypatch):
 def test_s2_references_fetch_failure_returns_none(monkeypatch):
     _patch_get_json(monkeypatch, None)
     assert cp.s2_references("P1", _cfg()) is None
+
+
+def test_openalex_references_hydrates_referenced_works(monkeypatch):
+    def fake_get(url, cfg, **kw):
+        if "referenced_works" in url and "filter=" not in url:  # the id-list call
+            return {"referenced_works": ["https://openalex.org/W1", "https://openalex.org/W2"]}
+        return {  # the hydration call
+            "results": [
+                {
+                    "display_name": "Ref One",
+                    "publication_year": 2019,
+                    "doi": "https://doi.org/10.1234/a",
+                    "authorships": [],
+                    "type": "article",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(cp, "_get_json", fake_get)
+    out = cp.openalex_references("10.1/x", _cfg())
+    assert out is not None and out[0]["title"] == "Ref One"
+    assert out[0]["doi"] == "10.1234/a" and out[0]["source"] == "openalex"
+
+
+def test_openalex_references_none_when_no_referenced_works(monkeypatch):
+    monkeypatch.setattr(cp, "_get_json", lambda *a, **k: {"referenced_works": []})
+    assert cp.openalex_references("10.1/x", _cfg()) is None

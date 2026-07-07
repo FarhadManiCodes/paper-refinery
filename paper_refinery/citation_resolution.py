@@ -29,6 +29,7 @@ from .citation_providers import (
     normalize_crossref,
     normalize_openalex,
     normalize_s2,
+    openalex_references,
     openalex_search,
     s2_by_doi,
     s2_paper_id,
@@ -283,10 +284,36 @@ def _source_confident(source: SourcePaper, candidate: dict, cfg: CitationConfig)
     return True
 
 
-def _source_references(source: SourcePaper | None, cfg: CitationConfig) -> list[dict] | None:
-    """The source paper's references from S2 as a bulk candidate list, or None when the
-    fast-path is off / the source can't be identified confidently. An external id is trusted;
-    a title match is gated by ``_source_confident`` so we never pull the wrong paper's refs.
+def _dedup_candidates(candidates: list[dict]) -> list[dict]:
+    """Drop duplicates across bulk sources: same DOI (folded), else same normalized title.
+    First occurrence wins (S2 before OpenAlex)."""
+    seen_doi: set[str] = set()
+    seen_title: set[str] = set()
+    out: list[dict] = []
+    for c in candidates:
+        doi = (c.get("doi") or "").lower()
+        title = _normalize_title(c.get("title"))
+        if (doi and doi in seen_doi) or (not doi and title and title in seen_title):
+            continue
+        if doi:
+            seen_doi.add(doi)
+        if title:
+            seen_title.add(title)
+        out.append(c)
+    return out
+
+
+def _source_references(
+    source: SourcePaper | None, cfg: CitationConfig, n_refs: int
+) -> list[dict] | None:
+    """The source paper's references as a bulk candidate pool, or None when the fast-path is
+    off / the source can't be identified confidently.
+
+    S2 first (an external id is trusted; a title match is gated by ``_source_confident`` so we
+    never pull the wrong paper's refs). S2 returns >= the printed count when it truly has the
+    references, so a short list means the publisher elided them (ASME/IEEE...) or coverage is
+    partial -- fill from OpenAlex (a different licensing regime) when a DOI is known, and dedup
+    the combined pool.
     """
     if not cfg.s2_bulk_references or source is None:
         return None
@@ -297,7 +324,11 @@ def _source_references(source: SourcePaper | None, cfg: CitationConfig) -> list[
         found = s2_paper_id(cfg, title=source.title)
         if found and _source_confident(source, found[1], cfg):
             hit = found
-    return s2_references(hit[0], cfg) if hit else None
+    s2 = (s2_references(hit[0], cfg) or []) if hit else []
+    if len(s2) < n_refs and source.doi:
+        openalex = openalex_references(source.doi, cfg) or []
+        return _dedup_candidates([*s2, *openalex]) or None
+    return s2 or None
 
 
 def _match_in_bulk(
@@ -305,21 +336,21 @@ def _match_in_bulk(
 ) -> dict | None:
     """Match one extracted reference against the source's bulk reference list -- locally, no
     network: a shared DOI first, else the best title hit clearing ``_acceptable``. Returns the
-    merged resolved dict (``match="s2-bulk"``) or None to fall back to a per-entry search.
+    merged resolved dict (``match="bulk"``) or None to fall back to a per-entry search.
     """
     doi = extract_doi(raw_text) or extracted.get("doi")
     if doi:
         doi = doi.lower()
         for cand in bulk:
             if (cand.get("doi") or "").lower() == doi:
-                return _merge_candidate(dict(extracted), cand, "s2-bulk")
+                return _merge_candidate(dict(extracted), cand, "bulk")
     best, best_sim = None, 0.0
     for cand in bulk:
         if _acceptable(extracted, cand, cfg):
             s = title_similarity(extracted.get("title"), cand.get("title"))
             if s > best_sim:
                 best, best_sim = cand, s
-    return _merge_candidate(dict(extracted), best, "s2-bulk") if best is not None else None
+    return _merge_candidate(dict(extracted), best, "bulk") if best is not None else None
 
 
 def resolve_references(
@@ -340,7 +371,8 @@ def resolve_references(
     text's leading marker when possible.
     """
     padded = (list(extracted) + [{}] * len(raw_references))[: len(raw_references)]
-    bulk = _source_references(source, cfg)  # one fetch (or None -> pure per-entry path)
+    # S2 (+ OpenAlex fill when S2 is short) fetched once; None -> pure per-entry path
+    bulk = _source_references(source, cfg, len(raw_references))
 
     def resolve_one(i: int) -> dict:
         raw = raw_references[i]

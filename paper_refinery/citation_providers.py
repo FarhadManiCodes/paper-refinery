@@ -232,6 +232,39 @@ def openalex_search(title: str, cfg: CitationConfig) -> dict | None:
     return results[0] if results else None
 
 
+_OPENALEX_FIELDS = "id,display_name,publication_year,authorships,doi,abstract_inverted_index,type"
+
+
+def openalex_references(doi: str, cfg: CitationConfig) -> list[dict] | None:
+    """The source paper's references from OpenAlex (``referenced_works``, hydrated) as
+    normalized candidates -- a second bulk source for when S2's list is publisher-elided
+    (ASME/IEEE...) or sparse. One call for the id list, then batched hydration
+    (<=100 ids/call), each ``normalize_openalex``'d (incl. reconstructed abstract). ``None``
+    when the work isn't found or lists no references.
+    """
+    src = _get_json(
+        f"{cfg.openalex_api_base}/works/doi:{urllib.parse.quote(doi)}?select=referenced_works", cfg
+    )
+    ids = [w.rsplit("/", 1)[-1] for w in (src or {}).get("referenced_works") or []]
+    if not ids:
+        return None
+    candidates: list[dict] = []
+    for start in range(0, len(ids), 100):
+        batch = "|".join(ids[start : start + 100])
+        url = (
+            f"{cfg.openalex_api_base}/works?filter=openalex_id:{batch}"
+            f"&per-page=100&select={_OPENALEX_FIELDS}"
+        )
+        if cfg.mailto:
+            url += f"&mailto={urllib.parse.quote(cfg.mailto)}"
+        data = _get_json(url, cfg)
+        for work in (data or {}).get("results") or []:
+            cand = normalize_openalex(work)
+            if cand:
+                candidates.append(cand)
+    return candidates or None
+
+
 # ---------------------------------------------------------------------------
 # Normalizers: each provider's shape -> one common candidate shape
 # ---------------------------------------------------------------------------
