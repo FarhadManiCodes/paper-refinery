@@ -51,7 +51,11 @@ def test_overlap_present_on_every_non_first_chunk():
     cfg = ChunkConfig(
         max_chars=100_000, min_chars=300, overlap_lo=200, overlap_hi=400, overlap_ideal=300
     )
-    md = f"## A\n\n{_prose('alpha', 60)}\n\n## B\n\n{_prose('beta', 60)}\n\n## C\n\n{_prose('c', 60)}"
+    md = (
+        f"## A\n\n{_prose('alpha', 60)}\n\n"
+        f"## B\n\n{_prose('beta', 60)}\n\n"
+        f"## C\n\n{_prose('c', 60)}"
+    )
     chunks = chunk_markdown(md, cfg)
     assert chunks[0].overlap_chars == 0
     assert all(c.overlap_chars >= cfg.overlap_lo for c in chunks[1:])

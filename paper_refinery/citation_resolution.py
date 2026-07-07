@@ -323,9 +323,8 @@ def format_resolution_report(extracted: list[dict], resolved: list[dict]) -> str
         lines.append(f"UNVERIFIED ({len(unverified)}) -- layer-1 guess kept untouched:")
         for i, r in unverified:
             ext = extracted[i] if i < len(extracted) else {}
-            lines.append(
-                f"[{r.get('number') or '?':>3}] {(ext.get('title') or r.get('raw_text') or '')[:80]}"
-            )
+            shown = (ext.get("title") or r.get("raw_text") or "")[:80]
+            lines.append(f"[{r.get('number') or '?':>3}] {shown}")
             miss = r.get("near_miss")
             if miss:
                 lines.append(

@@ -48,6 +48,14 @@ reportPrivateUsage = "error"
 
 [tool.ruff]
 line-length = 100
+target-version = "py311"  # match requires-python's floor so UP targets the right syntax
+
+[tool.ruff.lint]
+# E/F (default) + I (enforce the import sort we already keep by hand) + UP (keep syntax
+# modern). All three are currently clean, so this is enforcement, not a cleanup. Broader
+# families (B/RUF/SIM/PT) were evaluated and deferred: mostly test-style (PT018) or false
+# positives for this code (RUF001 on intentional en-dash/curly-apostrophe regex literals).
+select = ["E", "F", "I", "UP"]
 
 # glmocr's PP-DocLayout-V3 runs on CPU here (no NVIDIA GPU on this machine -- see
 # glmocr/layout/layout_detector.py's torch.cuda.is_available() fallback). The default

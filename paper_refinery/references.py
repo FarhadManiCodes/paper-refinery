@@ -39,6 +39,7 @@ class RawReference(TypedDict):
     number: str | None
     text: str
 
+
 # a bibliography-entry-looking start: "[12] " or "12. " (bracket/dot required -- a bare
 # "2 " would match too much ordinary body text to be safe as a reclaim signal)
 _MISLABELED_REFERENCE_RE = re.compile(r"^\s*\[?\d{1,3}[\].]\s")
@@ -77,7 +78,9 @@ def reclaim_mislabeled_references(
     return out
 
 
-def repair_references(references: list[RawReference], pdf_path: Path | None = None) -> list[RawReference]:
+def repair_references(
+    references: list[RawReference], pdf_path: Path | None = None
+) -> list[RawReference]:
     """All list-level repairs, in their one working order.
 
     Page-break split fragments are rejoined first (so a rejoined entry counts as one),
@@ -276,7 +279,9 @@ def _splice_missing_from_layer(
     return out
 
 
-def _recover_missing_references(references: list[RawReference], pdf_path: Path | None) -> list[RawReference]:
+def _recover_missing_references(
+    references: list[RawReference], pdf_path: Path | None
+) -> list[RawReference]:
     """Recover numbered-bibliography entries the layout model skipped, from the PDF's
     embedded text layer (confirmed live: brunton-2016's entry 2 is printed in the PDF
     and readable via PyMuPDF, but PP-DocLayout-V3 produces no region for it).
