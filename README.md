@@ -118,6 +118,88 @@ model, plus the `glmocr` SDK to drive layout detection and per-region OCR agains
 
 ## Usage
 
+### CLI
+
 ```bash
 refinery path/to/paper.pdf            # -> path/to/paper.chunks.json, .citations.json, .refinery/
+```
+
+Options (all optional; outputs default next to the PDF):
+
+| Flag | Effect |
+| --- | --- |
+| `--doi DOI` | Source paper DOI — enables the citation fast-path (one bulk reference fetch instead of a per-reference provider search). Without it the OCR'd title is tried. |
+| `--force-parse` | Re-run OCR, bypassing the parse checkpoint in `<pdf>.refinery/parse_cache/`. |
+| `--from chunk` | Re-chunk the saved `refinery.md` only (instant); for tuning chunk policy without re-running the expensive upstream stages. |
+| `--out` / `--citations-out` / `--work-dir` | Override the individual output locations. |
+| `--model-path` / `--mmproj-path` | Override the GLM-OCR GGUF paths from `config.toml`. |
+
+### Programmatic API (what papis-ask integrates against)
+
+This is the stable in-process surface — no paper-qa objects cross the boundary; the caller
+owns turning chunks into whatever its indexer wants.
+
+```python
+from pathlib import Path
+from paper_refinery import refine, refine_many, RefineResult
+
+# one paper
+result: RefineResult = refine(Path("paper.pdf"), doi="10.1234/abc")
+
+# many papers — OCR runs serially on one shared GPU backend while each paper's
+# network stages (figures, citations) overlap the next paper's OCR. Yields each
+# RefineResult in COMPLETION order (not input order) as soon as it is ready, so a
+# caller can index each paper the moment it finishes rather than blocking on the batch.
+for result in refine_many(pdfs, dois=dois):   # dois aligned to pdfs, entries may be None
+    index(result)
+```
+
+`refine(pdf, cfg=None, *, out=None, citations_out=None, work_dir=None, force_parse=False, doi=None) -> RefineResult`
+reuses the parse checkpoint (pass `force_parse=True` to re-OCR). `cfg` defaults to
+`load_config()`.
+
+`refine_many(pdfs, cfg=None, *, dois=None, force_parse=False, network_workers=3) -> Iterator[RefineResult]`.
+A paper whose OCR fails (corrupt PDF, or a wedged server the watchdog killed) is logged and
+skipped, not fatal to the batch. `INFO` logs on the `paper_refinery` logger show the
+OCR→pool handoff and each paper streaming out.
+
+**`RefineResult`** — refinery's own types/paths only:
+
+| field | meaning |
+| --- | --- |
+| `chunks: list[Chunk]` | the chunks in memory (also written to `chunks_path`) |
+| `chunks_path: Path` | `<pdf>.chunks.json` — the papis-ask hand-off |
+| `citations_path: Path` | `<pdf>.citations.json` (written only when the paper had references) |
+| `work_dir: Path` | `<pdf>.refinery/` — refinery.md, references.md, figures/, parse_cache/ |
+
+### Output shapes
+
+`<pdf>.chunks.json`:
+
+```jsonc
+{
+  "source_pdf": "…/paper.pdf",
+  "docname": "paper",
+  "parser": "paper-refinery",
+  "chunks": [
+    { "index": 0, "text": "…", "page_start": 1, "page_end": 2,
+      "overlap_chars": 0, "overlap_mode": "-" }
+  ]
+}
+```
+
+`<pdf>.citations.json`:
+
+```jsonc
+{
+  "source_pdf": "…/paper.pdf",
+  "docname": "paper",
+  "references": [ { "title": "…", "year": 2020, "authors": [...], "doi": "…",
+                    "verified": true, "match": "crossref", "...": "..." } ],
+  "linking": {
+    "style": "numbered-bracket|numbered-paren|author-year",
+    "markers": [ { "text": "[1]", "refs": [0] } ],
+    "uncited": [ ], "ambiguous": [ ]
+  }
+}
 ```
