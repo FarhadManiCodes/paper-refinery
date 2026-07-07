@@ -11,26 +11,31 @@ so two PDFs in one folder no longer share -- and overwrite -- a common `figures/
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import logging
 import os
+import queue
 import re
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 import click
 
+from .backend import OcrBackend, ocr_backend
 from .chunker import Chunk, chunk_markdown
 from .citation_extraction import extract_references
 from .citation_linking import link_citations, make_citekey, rewrite_markers
 from .citation_resolution import SourcePaper, format_resolution_report, resolve_references
-from .config import RefineryConfig, load_config
+from .config import ParseConfig, RefineryConfig, load_config
 from .enrich import enrich_markdown
 from .figures import describe_figure, make_client
 from .parse import ParseResult
-from .parse_cache import parse_pdf_cached
+from .parse_cache import load_checkpoint, parse_pdf_cached
 
 logger = logging.getLogger(__name__)
 
@@ -135,17 +140,37 @@ def _refine(
 ) -> tuple[list[Chunk], list[str]]:
     """Run the pipeline; returns the chunks plus human-readable summary lines to echo.
 
-    The citation stack runs in a worker thread concurrently with figure describing --
-    the two sides are independent (citations need the references + body markdown,
-    figures need the crops) and both are network-bound. A citation-stage failure
-    (missing GOOGLE_API_KEY, providers down) degrades to a loud warning: the chunks
-    manifest is the primary product and must still be written.
-
     ``force_parse`` bypasses the parse checkpoint (re-runs OCR); otherwise a matching
-    checkpoint is reused (see parse_cache.parse_pdf_cached).
+    checkpoint is reused (see parse_cache.parse_pdf_cached). The OCR pass is the one
+    stage that can't overlap across papers (single GPU/llama-server); the rest lives in
+    ``_refine_parsed``, which ``refine_many`` runs concurrently across papers while the
+    next paper OCRs.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     parsed = parse_pdf_cached(pdf, work_dir, cfg.parse, force=force_parse)
+    return _refine_parsed(parsed, pdf, out, citations_out, work_dir, cfg, source_doi)
+
+
+def _refine_parsed(
+    parsed: ParseResult,
+    pdf: Path,
+    out: Path,
+    citations_out: Path,
+    work_dir: Path,
+    cfg: RefineryConfig,
+    source_doi: str | None = None,
+) -> tuple[list[Chunk], list[str]]:
+    """The post-parse pipeline for one already-parsed paper: {figures+enrich ||
+    citations} -> chunk -> write manifests. Returns the chunks plus summary lines.
+
+    Split from ``_refine`` so it can run on a network-worker pool concurrently across
+    papers (nothing here touches the OCR backend). The citation stack runs in a worker
+    thread concurrently with figure describing -- the two sides are independent
+    (citations need the references + body markdown, figures need the crops) and both are
+    network-bound. A citation-stage failure (missing GOOGLE_API_KEY, providers down)
+    degrades to a loud warning: the chunks manifest is the primary product and must
+    still be written.
+    """
     summary: list[str] = []
 
     if parsed.references_markdown:
@@ -266,6 +291,165 @@ def refine(
     return RefineResult(
         chunks=chunks, chunks_path=out, citations_path=citations_out, work_dir=work_dir
     )
+
+
+class _LazyBackend:
+    """Spawns the shared OCR backend on first request and reuses it thereafter.
+
+    A whole batch of already-parsed papers (every parse a checkpoint hit) never touches
+    OCR, so the expensive server spawn + model load must not happen just because a batch
+    was started -- only the first genuine cache miss pays for it. ``close`` tears down
+    the server if it was ever started.
+    """
+
+    def __init__(self, cfg: ParseConfig) -> None:
+        self._cfg = cfg
+        self._stack = contextlib.ExitStack()
+        self._backend: OcrBackend | None = None
+
+    def get(self) -> OcrBackend:
+        if self._backend is None:
+            self._backend = self._stack.enter_context(ocr_backend(self._cfg))
+        return self._backend
+
+    def close(self) -> None:
+        self._stack.close()
+
+
+def _parse_for_batch(
+    pdf: Path, work_dir: Path, cfg: RefineryConfig, backend: _LazyBackend, force_parse: bool
+) -> ParseResult:
+    """Parse one paper for ``refine_many``, spawning the shared server only on a miss.
+
+    Checks the checkpoint first (unless ``force_parse``) so a hit skips OCR entirely --
+    the backend stays unspawned. Only a real miss calls ``backend.get()``, keeping OCR
+    the single serial bottleneck without ever spinning up a server the batch doesn't need.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    if not force_parse:
+        cached = load_checkpoint(work_dir, pdf, cfg.parse)
+        if cached is not None:
+            logger.info("%s: parse checkpoint hit (no OCR)", pdf.name)
+            return cached
+    logger.info("%s: OCR start (serial -- the batch's one shared-GPU stage)", pdf.name)
+    return parse_pdf_cached(pdf, work_dir, cfg.parse, backend=backend.get(), force=force_parse)
+
+
+def refine_many(
+    pdfs: Sequence[Path],
+    cfg: RefineryConfig | None = None,
+    *,
+    dois: Sequence[str | None] | None = None,
+    force_parse: bool = False,
+    network_workers: int = 3,
+) -> Iterator[RefineResult]:
+    """Refine many PDFs, overlapping OCR with the network stages across papers.
+
+    OCR can't run in parallel -- one GPU, one llama-server -- so it's a serial queue on
+    one shared backend. But each paper's post-parse work (figure-enrich Gemini calls,
+    citation resolution, chunking) is network-bound and independent, so the moment a
+    paper's OCR finishes it's handed to a pool of ``network_workers`` that run those
+    stages *while the next paper OCRs* -- no cross-paper barrier: paper 1 flows through
+    enrich/citations/chunk on its own as soon as its parse is done, it never waits for
+    paper 2's OCR. On a whole library this keeps the GPU busy instead of idling through
+    every paper's network wait; a single PDF gains nothing (nothing to overlap) -- use
+    ``refine`` there.
+
+    Yields one ``RefineResult`` per successfully refined PDF **as each finishes**
+    (completion order, NOT input order), so a caller can index each paper the instant
+    it's ready rather than blocking on the whole batch (``list(refine_many(...))`` if you
+    do want them all). Outputs default next to each PDF, exactly like ``refine``. Pass
+    ``dois`` (aligned to ``pdfs``) to feed each paper's DOI into the S2 bulk-references
+    fast-path. A paper whose OCR fails (a corrupt PDF, or a wedged server the watchdog
+    killed -- which also ends the shared backend for the papers still queued) is logged
+    and skipped rather than failing the whole batch.
+    """
+    pdfs = [Path(p) for p in pdfs]
+    if dois is not None and len(dois) != len(pdfs):
+        raise ValueError(f"dois has {len(dois)} entries but there are {len(pdfs)} pdfs")
+    cfg = cfg or load_config()
+    doi_list: list[str | None] = list(dois) if dois is not None else [None] * len(pdfs)
+    # a real function (not a bare generator) so the arg validation above raises eagerly,
+    # at the call, rather than being deferred to the first ``next()``.
+    return _stream_refined(pdfs, doi_list, cfg, force_parse, network_workers)
+
+
+def _stream_refined(
+    pdfs: list[Path],
+    dois: list[str | None],
+    cfg: RefineryConfig,
+    force_parse: bool,
+    network_workers: int,
+) -> Iterator[RefineResult]:
+    """The engine behind ``refine_many``: a serial-OCR producer thread feeding a
+    network-worker pool, yielding results in completion order.
+
+    OCR runs on one background thread (the serial GPU queue); each parse is submitted to
+    ``net_pool`` the instant it completes, and a done-callback drops the finished
+    ``RefineResult`` on a queue the consumer drains. So OCR(paper N+1) overlaps
+    network(paper N), and the consumer sees each paper the moment its own pipeline ends.
+    Every paper contributes exactly one queue item (a result, or ``None`` when it was
+    skipped), so draining exactly ``len(pdfs)`` items terminates without a sentinel.
+    """
+    done: queue.Queue[RefineResult | None] = queue.Queue()
+    backend = _LazyBackend(cfg.parse)
+
+    def _on_network_done(
+        pdf: Path, out: Path, citations_out: Path, work_dir: Path
+    ) -> Callable[[Future], None]:
+        def _cb(fut: Future) -> None:
+            try:
+                chunks, _summary = fut.result()
+            except Exception as exc:
+                logger.warning("refine failed for %s (%s) -- skipping", pdf.name, exc)
+                done.put(None)
+            else:
+                logger.info(
+                    "%s: network stages done (%d chunks) -- streaming result", pdf.name, len(chunks)
+                )
+                done.put(RefineResult(chunks, out, citations_out, work_dir))
+
+        return _cb
+
+    def _produce(net_pool: ThreadPoolExecutor) -> None:
+        try:
+            for n, (pdf, doi) in enumerate(zip(pdfs, dois, strict=True), start=1):
+                out, citations_out, work_dir = _default_outputs(pdf, None, None, None)
+                try:
+                    parsed = _parse_for_batch(pdf, work_dir, cfg, backend, force_parse)
+                except Exception as exc:
+                    logger.warning("parse failed for %s (%s) -- skipping", pdf.name, exc)
+                    done.put(None)
+                    continue
+                # OCR (the serial leg) for this paper is finished; its network stages now
+                # run on the pool WHILE this thread moves straight on to the next paper's
+                # OCR. Seeing an earlier paper's "network stages done" line appear between
+                # here and the next paper's completion is the overlap, made visible.
+                logger.info(
+                    "%s: parse done (%d/%d) -> handed to network pool; OCR queue free for "
+                    "the next paper",
+                    pdf.name,
+                    n,
+                    len(pdfs),
+                )
+                fut = net_pool.submit(
+                    _refine_parsed, parsed, pdf, out, citations_out, work_dir, cfg, doi
+                )
+                fut.add_done_callback(_on_network_done(pdf, out, citations_out, work_dir))
+        finally:
+            # OCR is fully issued; free the GPU while the network jobs still drain.
+            backend.close()
+
+    with ThreadPoolExecutor(max_workers=network_workers, thread_name_prefix="refine-net") as pool:
+        producer = threading.Thread(target=_produce, args=(pool,), name="refine-ocr")
+        producer.start()
+        try:
+            for _ in range(len(pdfs)):
+                item = done.get()
+                if item is not None:
+                    yield item
+        finally:
+            producer.join()
 
 
 def _setup_logging() -> None:

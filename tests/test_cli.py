@@ -2,7 +2,9 @@
 
 import json
 import logging
+import threading
 
+import pytest
 from click.testing import CliRunner
 
 from paper_refinery import cli
@@ -400,4 +402,113 @@ def test_refine_is_exported_at_package_top_level():
     import paper_refinery
 
     assert paper_refinery.refine is cli.refine
+    assert paper_refinery.refine_many is cli.refine_many
     assert paper_refinery.RefineResult is cli.RefineResult
+
+
+def test_refine_many_streams_each_result_with_its_doi(tmp_path, monkeypatch):
+    pdfs = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
+    for p in pdfs:
+        p.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+    monkeypatch.setattr(
+        cli, "_parse_for_batch", lambda pdf, wd, cfg, backend, force: ParseResult(markdown=pdf.stem)
+    )
+
+    seen = {}
+
+    def fake_refine_parsed(parsed, pdf, out, cit, wd, cfg, doi=None):
+        seen[pdf.stem] = doi
+        return [Chunk(parsed.markdown, 0, 1, 1)], []
+
+    monkeypatch.setattr(cli, "_refine_parsed", fake_refine_parsed)
+
+    results = list(cli.refine_many(pdfs, dois=["10.1/a", None]))
+
+    assert {r.chunks_path.name for r in results} == {"a.chunks.json", "b.chunks.json"}
+    assert seen == {"a": "10.1/a", "b": None}  # each paper's DOI reaches its own pipeline
+
+
+def test_refine_many_overlaps_next_ocr_with_prior_network_stage(tmp_path, monkeypatch):
+    # the whole point of the pipeline: paper a's network stage must run WHILE paper b is
+    # still OCR-ing -- not serialized behind it. a's _refine_parsed blocks until b's parse
+    # has started; if OCR were serialized behind the network stage, b never parses, a's
+    # wait times out, and the assertion (below) fails.
+    pdfs = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
+    for p in pdfs:
+        p.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+
+    b_parse_started = threading.Event()
+
+    def fake_parse(pdf, wd, cfg, backend, force):
+        if pdf.stem == "b":
+            b_parse_started.set()
+        return ParseResult(markdown=pdf.stem)
+
+    def fake_refine_parsed(parsed, pdf, out, cit, wd, cfg, doi=None):
+        if pdf.stem == "a":
+            assert b_parse_started.wait(timeout=5), "b's OCR did not overlap a's network stage"
+        return [Chunk(parsed.markdown, 0, 1, 1)], []
+
+    monkeypatch.setattr(cli, "_parse_for_batch", fake_parse)
+    monkeypatch.setattr(cli, "_refine_parsed", fake_refine_parsed)
+
+    results = list(cli.refine_many(pdfs))
+    assert {r.chunks_path.name for r in results} == {"a.chunks.json", "b.chunks.json"}
+
+
+def test_refine_many_skips_paper_whose_parse_fails(tmp_path, monkeypatch, caplog):
+    pdfs = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
+    for p in pdfs:
+        p.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+
+    def fake_parse(pdf, wd, cfg, backend, force):
+        if pdf.stem == "a":
+            raise RuntimeError("corrupt pdf")
+        return ParseResult(markdown="MD")
+
+    monkeypatch.setattr(cli, "_parse_for_batch", fake_parse)
+    monkeypatch.setattr(
+        cli,
+        "_refine_parsed",
+        lambda parsed, pdf, out, cit, wd, cfg, doi=None: ([Chunk("MD", 0, 1, 1)], []),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        results = list(cli.refine_many(pdfs))
+
+    # a failed parse skips only that paper; the batch still yields the rest
+    assert [r.chunks_path.name for r in results] == ["b.chunks.json"]
+    assert "parse failed for a.pdf" in caplog.text
+
+
+def test_refine_many_does_not_spawn_ocr_backend_when_all_cached(tmp_path, monkeypatch):
+    # a batch where every parse is a checkpoint hit must never pay the server spawn +
+    # model load -- the lazy backend stays unspawned
+    pdf = tmp_path / "a.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+    monkeypatch.setattr(cli, "load_checkpoint", lambda wd, p, cfg: ParseResult(markdown="MD"))
+
+    def boom(cfg=None):
+        raise AssertionError("ocr_backend must not spawn for an all-cached batch")
+
+    monkeypatch.setattr(cli, "ocr_backend", boom)
+    monkeypatch.setattr(
+        cli,
+        "_refine_parsed",
+        lambda parsed, pdf, out, cit, wd, cfg, doi=None: ([Chunk("MD", 0, 1, 1)], []),
+    )
+
+    results = list(cli.refine_many([pdf]))
+    assert len(results) == 1
+
+
+def test_refine_many_rejects_mismatched_dois_eagerly(tmp_path):
+    pdf = tmp_path / "a.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    # raises at the call, before any iteration -- not deferred to the first next()
+    with pytest.raises(ValueError):
+        cli.refine_many([pdf], RefineryConfig(), dois=[])
