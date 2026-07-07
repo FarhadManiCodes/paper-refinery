@@ -30,6 +30,22 @@ refinery = "paper_refinery.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.basedpyright]
+# basedpyright defaults to its strictest ("all") preset, which floods a deliberately
+# dict-based pipeline with "annotate everything" noise. "standard" is the project gate:
+# it keeps the substantive checks (Optional subscript/operand, call issues, deprecations,
+# private-usage) and drops the annotate-every-dict firehose. Payloads are typed at the
+# boundaries that matter (ParseResult, Chunk, TypedDicts as they land), not with blanket
+# dict[str, Any].
+typeCheckingMode = "standard"
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+include = ["paper_refinery"]
+# a leading-underscore name imported across a module boundary is a mislabeled contract,
+# not an internal -- keep this as a gate (standard leaves it off)
+reportPrivateUsage = "error"
+
 [tool.ruff]
 line-length = 100
 
