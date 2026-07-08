@@ -185,10 +185,18 @@ In selfhosted mode `ZHIPU_API_KEY` isn't needed; in the default maas mode `HF_TO
 ### CLI
 
 ```bash
-refinery path/to/paper.pdf            # -> path/to/paper.chunks.json, .citations.json, .refinery/
+refinery path/to/paper.pdf            # one PDF -> paper.chunks.json, .citations.json, .refinery/
+refinery-batch a.pdf b.pdf c.pdf      # many PDFs, refined concurrently (each -> its own sidecars)
 ```
 
-Options (all optional; outputs default next to the PDF):
+`refinery-batch` runs the papers through `refine_many`: cloud OCR is gated to `--ocr-workers`
+(default 2 — z.ai rate-limits concurrent OCR) while the network stages run at `--workers`
+(default 4). Papers print in completion order; one that fails is logged and skipped.
+`--force-parse` re-OCRs all. (Per-paper DOIs aren't taken here — use the single-PDF
+`refinery <pdf> --doi` when a DOI matters.) A shell wrapper can drive a whole papis library
+with it, e.g. `refinery-batch $(papis list --file) && papis ask index`.
+
+Single-PDF options (all optional; outputs default next to the PDF):
 
 | Flag | Effect |
 | --- | --- |

@@ -28,7 +28,8 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 local = ["glmocr[selfhosted]>=0.1.5"]
 
 [project.scripts]
-refinery = "paper_refinery.cli:main"
+refinery = "paper_refinery.cli:main"                 # one PDF
+refinery-batch = "paper_refinery.cli:main_many"      # many PDFs, parallel (OCR-gated)
 
 [build-system]
 requires = ["hatchling"]

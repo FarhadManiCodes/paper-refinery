@@ -112,10 +112,13 @@ cli.py                    orchestrate the above (citations run concurrently with
                           runs each paper's whole pipeline on a flat pool of `workers`, with
                           OCR gated separately to `ocr_workers`=2 (z.ai rate-limits ~2-3
                           concurrent OCR calls; the network tails run at the higher `workers`);
-                          selfhosted keeps the serial-OCR-on-one-shared-backend path);
-                          CLI flags --force-parse / --from chunk / --doi. parse_pdf raises on a
-                          zero-region OCR result (maas SDK reports an exhausted 429 as empty)
-                          so a throttled paper is skipped, never written as a 0-chunk manifest.
+                          selfhosted keeps the serial-OCR-on-one-shared-backend path).
+                          Two console scripts: `refinery` (one PDF; main()) and
+                          `refinery-batch` (many PDFs; main_many() -> refine_many, flags
+                          --workers/--ocr-workers/--force-parse). CLI flags --force-parse /
+                          --from chunk / --doi. parse_pdf raises on a zero-region OCR result
+                          (maas SDK reports an exhausted 429 as empty) so a throttled paper is
+                          skipped, never written as a 0-chunk manifest.
 ```
 
 ### Key cross-cutting contracts

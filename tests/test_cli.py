@@ -57,6 +57,39 @@ def test_write_chunks_roundtrip(tmp_path):
     assert data["chunks"][1]["page_end"] == 2
 
 
+def test_main_many_refines_all_pdfs_and_reports(tmp_path, monkeypatch):
+    pdfs = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
+    for p in pdfs:
+        p.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+
+    seen = {}
+
+    def fake_refine_many(pdf_list, cfg, *, force_parse, workers, ocr_workers):
+        seen["call"] = ([p.name for p in pdf_list], force_parse, workers, ocr_workers)
+        for p in pdf_list:
+            yield cli.RefineResult(
+                [Chunk("x", 0, 1, 1)],
+                p.with_suffix(".chunks.json"),
+                p.with_suffix(".citations.json"),
+                p.with_suffix(".refinery"),
+            )
+
+    monkeypatch.setattr(cli, "refine_many", fake_refine_many)
+
+    result = CliRunner().invoke(cli.main_many, [str(pdfs[0]), str(pdfs[1]), "--ocr-workers", "1"])
+    assert result.exit_code == 0, result.output
+    assert "refined 2/2 papers" in result.output
+    assert "a.chunks.json: 1 chunks" in result.output
+    # CLI flags reach refine_many; DOIs are not forwarded by the batch command
+    assert seen["call"] == (["a.pdf", "b.pdf"], False, 4, 1)
+
+
+def test_main_many_requires_at_least_one_pdf():
+    result = CliRunner().invoke(cli.main_many, [])
+    assert result.exit_code != 0  # nargs=-1 required -> click usage error
+
+
 def test_main_wires_stages_and_writes_json(tmp_path, monkeypatch):
     pdf = tmp_path / "p.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")

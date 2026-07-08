@@ -646,5 +646,54 @@ def main(
     click.echo("\n".join(summary))
 
 
+@click.command()
+@click.argument(
+    "pdfs", nargs=-1, required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.option(
+    "--force-parse",
+    is_flag=True,
+    default=False,
+    help="Re-run OCR for every paper, bypassing the parse checkpoints.",
+)
+@click.option(
+    "--workers",
+    type=int,
+    default=4,
+    show_default=True,
+    help="How many papers' full pipelines run concurrently.",
+)
+@click.option(
+    "--ocr-workers",
+    type=int,
+    default=2,
+    show_default=True,
+    help="How many papers may be in the (cloud-rate-limited) OCR stage at once. Keep at or "
+    "below your z.ai tier's OCR concurrency (~2-3); higher risks 429s.",
+)
+def main_many(pdfs: tuple[Path, ...], force_parse: bool, workers: int, ocr_workers: int) -> None:
+    """Refine many PDFs concurrently, writing each <pdf>.chunks.json / .citations.json.
+
+    The batch entry point (``refinery-batch a.pdf b.pdf ...``) around ``refine_many``: cloud
+    OCR is gated to ``--ocr-workers`` (z.ai rate-limits concurrent OCR) while the network
+    stages run at ``--workers``. Papers print to stdout in completion order; one that fails
+    to refine is logged and skipped (so the final count may be less than the PDFs given).
+
+    DOIs aren't taken here -- refinery falls back to each paper's OCR'd title for the citation
+    stage; use ``refinery <pdf> --doi`` per paper when a specific DOI matters.
+    """
+    _setup_logging()
+    cfg = load_config()
+    done = 0
+    for result in refine_many(
+        list(pdfs), cfg, force_parse=force_parse, workers=workers, ocr_workers=ocr_workers
+    ):
+        done += 1
+        click.echo(
+            f"{result.chunks_path.name}: {len(result.chunks)} chunks -> {result.chunks_path}"
+        )
+    click.echo(f"refined {done}/{len(pdfs)} papers")
+
+
 if __name__ == "__main__":
     main()
