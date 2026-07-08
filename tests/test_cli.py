@@ -26,6 +26,15 @@ def test_relativize_image_links_leaves_relative_paths_alone():
     assert _relativize_image_links(md, "/anything") == md
 
 
+def test_relativize_image_links_rewrites_cwd_relative_crop_paths():
+    # the real bug: invoked with a RELATIVE pdf path (`refinery samples/x.pdf`), the work dir
+    # and crop paths are relative-to-CWD -- the old absolute-only check skipped them, leaving
+    # repo-root-relative links that break when refinery.md is opened from its own directory.
+    # The link must end up relative to the .md's OWN location (figures/ sits beside it).
+    md = "![FIGURE 1](samples/x.refinery/figures/fig_1.png)"
+    assert _relativize_image_links(md, "samples/x.refinery") == "![FIGURE 1](figures/fig_1.png)"
+
+
 def test_relativize_image_links_handles_multiple_links(tmp_path):
     md = f"![a]({tmp_path}/figures/a.png) text ![b]({tmp_path}/other/b.png)"
     out = _relativize_image_links(md, tmp_path)

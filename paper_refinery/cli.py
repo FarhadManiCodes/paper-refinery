@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 _IMAGE_LINK_RE = re.compile(r"(!\[[^\]]*\]\()([^)\s]+)(\))")
 _H1_RE = re.compile(r"(?m)^#\s+(.+)$")
+_URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")  # http:, https:, data:, file:, ...
 
 
 def _source_title(markdown: str) -> str | None:
@@ -51,18 +52,28 @@ def _source_title(markdown: str) -> str | None:
 
 
 def _relativize_image_links(md: str, base: Path) -> str:
-    """Rewrite absolute image-link paths in markdown to be relative to ``base``.
+    """Rewrite image-link paths to be relative to ``base`` (the markdown's own directory).
 
-    The .md file and its figure crops are meant to travel together (as siblings under
-    the work directory) -- an absolute path breaks the moment either is moved, renamed,
-    or shared with someone else.
+    parse.py emits each crop path as ``<work_dir>/figures/...`` and ``base`` is that work_dir,
+    so the crop and the refinery.md that references it travel together as siblings. Anchoring
+    both the link and ``base`` through ``abspath`` reduces a crop path to ``figures/...``
+    whether the pipeline was invoked with an absolute or a CWD-relative pdf path -- so the
+    link resolves from the .md file's own location, not from wherever the process happened to
+    run. (The old absolute-only check left a CWD-relative crop path untouched, so
+    ``refinery samples/x.pdf`` wrote repo-root-relative links that broke everywhere else.)
+    Anything not under ``base`` -- an external URL/data URI, or a path already relative to the
+    md -- is left exactly as written.
     """
+    base_abs = os.path.abspath(base)
 
     def _rel(m: re.Match) -> str:
-        path = Path(m.group(2))
-        if not path.is_absolute():
+        target = m.group(2)
+        if _URL_SCHEME_RE.match(target):  # external URL / data URI, not a local crop
             return m.group(0)
-        return f"{m.group(1)}{os.path.relpath(path, start=base)}{m.group(3)}"
+        rel = os.path.relpath(os.path.abspath(target), start=base_abs)
+        if rel.startswith(".."):  # not under the work dir -> not one of our crops, leave it
+            return m.group(0)
+        return f"{m.group(1)}{rel}{m.group(3)}"
 
     return _IMAGE_LINK_RE.sub(_rel, md)
 
