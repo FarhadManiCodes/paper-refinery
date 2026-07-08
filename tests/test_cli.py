@@ -91,6 +91,44 @@ def test_main_many_requires_at_least_one_pdf():
     assert result.exit_code != 0  # nargs=-1 required -> click usage error
 
 
+def test_main_many_from_chunk_rechunks_each_saved_md_without_refining(tmp_path, monkeypatch):
+    # batch --from chunk re-chunks each paper's saved refinery.md, never touching OCR/network
+    pdfs = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
+    for p in pdfs:
+        p.write_bytes(b"%PDF-1.4 fake")
+        wd = p.with_suffix(".refinery")
+        wd.mkdir()
+        (wd / "refinery.md").write_text(f"# {p.stem}\n\nbody")
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+
+    def boom(*a, **k):
+        raise AssertionError("refine_many must not run for --from chunk")
+
+    monkeypatch.setattr(cli, "refine_many", boom)
+    monkeypatch.setattr(cli, "chunk_markdown", lambda md, cfg: [Chunk(md, 0, 1, 1)])
+
+    result = CliRunner().invoke(cli.main_many, [str(pdfs[0]), str(pdfs[1]), "--from", "chunk"])
+    assert result.exit_code == 0, result.output
+    assert "re-chunked 2/2 papers" in result.output
+    assert json.loads(pdfs[0].with_suffix(".chunks.json").read_text())["parser"] == "paper-refinery"
+
+
+def test_main_many_from_chunk_skips_paper_missing_refinery_md(tmp_path, monkeypatch):
+    # a paper without a saved refinery.md is skipped (warned), not fatal to the batch
+    pdfs = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
+    for p in pdfs:
+        p.write_bytes(b"%PDF-1.4 fake")
+    wd = pdfs[0].with_suffix(".refinery")  # only a.pdf has a saved md
+    wd.mkdir()
+    (wd / "refinery.md").write_text("# a\n\nbody")
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+    monkeypatch.setattr(cli, "chunk_markdown", lambda md, cfg: [Chunk(md, 0, 1, 1)])
+
+    result = CliRunner().invoke(cli.main_many, [str(pdfs[0]), str(pdfs[1]), "--from", "chunk"])
+    assert result.exit_code == 0, result.output
+    assert "re-chunked 1/2 papers" in result.output
+
+
 def test_main_many_exits_nonzero_when_nothing_refined(tmp_path, monkeypatch):
     # every paper failed -> refine_many yields nothing -> exit non-zero, so a
     # `refinery-batch ... && papis ask index` chain stops instead of indexing an empty result

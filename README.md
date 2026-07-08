@@ -191,8 +191,10 @@ refinery-batch a.pdf b.pdf c.pdf      # many PDFs, refined concurrently (each ->
 
 `refinery-batch` runs the papers through `refine_many`: cloud OCR is gated to `--ocr-workers`
 (default 2 — z.ai rate-limits concurrent OCR) while the network stages run at `--workers`
-(default 4). Papers print in completion order; one that fails is logged and skipped.
-`--force-parse` re-OCRs all. (Per-paper DOIs aren't taken here — use the single-PDF
+(default 4). Papers print in completion order; one that fails is logged and skipped (and if *nothing*
+refines, it exits non-zero, so a `&&` chain stops). `--force-parse` re-OCRs all; `--from chunk`
+re-chunks each saved `refinery.md` only (no OCR/network — for library-wide chunk tuning).
+(Per-paper DOIs aren't taken here — use the single-PDF
 `refinery <pdf> --doi` when a DOI matters.) A shell wrapper can drive a whole papis library
 with it, e.g. `refinery-batch $(papis list --file) && papis ask index`.
 

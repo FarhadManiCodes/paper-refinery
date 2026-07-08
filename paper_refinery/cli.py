@@ -146,6 +146,23 @@ def _rechunk(pdf: Path, out: Path, work_dir: Path, cfg: RefineryConfig) -> list[
     return [f"re-chunked {len(chunks)} chunks (from {md_path.name}) -> {out}"]
 
 
+def _rechunk_many(pdfs: tuple[Path, ...], cfg: RefineryConfig) -> int:
+    """``--from chunk`` for the batch: re-chunk each paper's saved refinery.md (no OCR or
+    network), skipping any paper missing it with a warning. Returns how many were re-chunked."""
+    done = 0
+    for pdf in pdfs:
+        out, _citations_out, work_dir = _default_outputs(pdf, None, None, None)
+        try:
+            summary = _rechunk(pdf, out, work_dir, cfg)
+        except click.ClickException as exc:
+            logger.warning("re-chunk skipped for %s: %s", pdf.name, exc.message)
+            continue
+        done += 1
+        click.echo("; ".join(summary))
+    click.echo(f"re-chunked {done}/{len(pdfs)} papers")
+    return done
+
+
 def _refine(
     pdf: Path,
     out: Path,
@@ -679,7 +696,21 @@ def main(
     help="How many papers may be in the (cloud-rate-limited) OCR stage at once. Keep at or "
     "below your z.ai tier's OCR concurrency (~2-3); higher risks 429s.",
 )
-def main_many(pdfs: tuple[Path, ...], force_parse: bool, workers: int, ocr_workers: int) -> None:
+@click.option(
+    "--from",
+    "from_stage",
+    type=click.Choice(["chunk"]),
+    default=None,
+    help="Resume from a stage for every paper. 'chunk' re-chunks each saved refinery.md only "
+    "(instant, no OCR/network; for library-wide chunk-policy tuning). Ignores --workers etc.",
+)
+def main_many(
+    pdfs: tuple[Path, ...],
+    force_parse: bool,
+    workers: int,
+    ocr_workers: int,
+    from_stage: str | None,
+) -> None:
     """Refine many PDFs concurrently, writing each <pdf>.chunks.json / .citations.json.
 
     The batch entry point (``refinery-batch a.pdf b.pdf ...``) around ``refine_many``: cloud
@@ -687,20 +718,25 @@ def main_many(pdfs: tuple[Path, ...], force_parse: bool, workers: int, ocr_worke
     stages run at ``--workers``. Papers print to stdout in completion order; one that fails
     to refine is logged and skipped (so the final count may be less than the PDFs given).
 
+    ``--from chunk`` re-chunks each paper's saved refinery.md instead (no OCR/network).
+
     DOIs aren't taken here -- refinery falls back to each paper's OCR'd title for the citation
     stage; use ``refinery <pdf> --doi`` per paper when a specific DOI matters.
     """
     _setup_logging()
     cfg = load_config()
-    done = 0
-    for result in refine_many(
-        list(pdfs), cfg, force_parse=force_parse, workers=workers, ocr_workers=ocr_workers
-    ):
-        done += 1
-        click.echo(
-            f"{result.chunks_path.name}: {len(result.chunks)} chunks -> {result.chunks_path}"
-        )
-    click.echo(f"refined {done}/{len(pdfs)} papers")
+    if from_stage == "chunk":
+        done = _rechunk_many(pdfs, cfg)
+    else:
+        done = 0
+        for result in refine_many(
+            list(pdfs), cfg, force_parse=force_parse, workers=workers, ocr_workers=ocr_workers
+        ):
+            done += 1
+            click.echo(
+                f"{result.chunks_path.name}: {len(result.chunks)} chunks -> {result.chunks_path}"
+            )
+        click.echo(f"refined {done}/{len(pdfs)} papers")
     # Exit non-zero only when NOTHING was produced, so `refinery-batch ... && papis ask index`
     # stops instead of indexing an empty result; a partial batch (some papers skipped) still
     # succeeds, since the produced sidecars are worth indexing and the count above flags it.
