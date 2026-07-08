@@ -27,8 +27,22 @@ class ChunkConfig:
 
 @dataclass
 class ParseConfig:
-    """Local GLM-OCR backend: llama-server (inference) + glmocr SDK (layout + orchestration)."""
+    """GLM-OCR backend config, for either OCR mode.
 
+    ``mode="selfhosted"`` (default) runs GLM-OCR locally: our own llama-server (inference) +
+    the glmocr SDK (PP-DocLayout-V3 layout + per-region OCR). Needs ``model_path``/
+    ``mmproj_path`` + a GPU. ``mode="maas"`` runs layout+OCR on Zhipu's cloud
+    (``api.z.ai``/bigmodel) -- no GPU, no GGUF, no local torch; needs only the API key in
+    ``api_key_env``. Both return the same region shape to parse.py (maas via a small adapter
+    that restores the SDK-dropped ``native_label`` and strips its content ``<div>`` wrappers).
+    """
+
+    mode: str = "selfhosted"  # "selfhosted" (local llama-server) or "maas" (Zhipu cloud API)
+    # --- maas (cloud) mode ---
+    api_key_env: str = "ZHIPU_API_KEY"  # env var holding the z.ai / bigmodel API key
+    maas_api_url: str = "https://api.z.ai/api/paas/v4/layout_parsing"  # bigmodel.cn also works
+    maas_model: str = "glm-ocr"
+    # --- selfhosted (local) mode ---
     llama_server_bin: str = "llama-server"  # resolved via PATH unless overridden
     # GLM-OCR GGUF weights / vision projector -- not secrets, just local file paths, so
     # they're read from ~/.config/paper-refinery/config.toml (see `load_config` below)

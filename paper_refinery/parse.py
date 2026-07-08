@@ -391,11 +391,15 @@ def _parse_with_watchdog(backend: OcrBackend, pdf_path: Path, cfg: ParseConfig):
         try:
             return future.result(timeout=cfg.parse_timeout_s)
         except FuturesTimeout:
-            backend.server.kill()
+            if backend.server is not None:  # selfhosted: kill the server to break glmocr loose
+                backend.server.kill()
+            killed = (
+                "llama-server killed" if backend.server is not None else "cloud request abandoned"
+            )
             raise RuntimeError(
                 f"parsing {pdf_path.name} exceeded ParseConfig.parse_timeout_s "
-                f"({cfg.parse_timeout_s:.0f}s) -- llama-server killed; the run was "
-                "almost certainly wedged, not just slow"
+                f"({cfg.parse_timeout_s:.0f}s) -- {killed}; the run was almost certainly "
+                "wedged, not just slow"
             ) from None
     finally:
         # don't block on the worker: after a server kill it unwinds on its own error
@@ -413,6 +417,40 @@ def clear_stale_crops(figures_dir: Path) -> None:
     """
     for stale in (*figures_dir.glob("page_*_fig_*"), *figures_dir.glob("fig_*")):
         stale.unlink()
+
+
+_MAAS_DIV_RE = re.compile(r"</?div[^>]*>")
+
+
+def _normalize_maas_regions(result: object) -> list[list[dict]]:
+    """Make a cloud (``maas``) glmocr result match the region shape the selfhosted path
+    feeds ``_build_markdown``. Two fixes, both maas-only:
+
+    1. **Restore ``native_label``.** The SDK's maas->PipelineResult conversion rebuilds each
+       region as only ``{index, label, content, bbox_2d}`` -- dropping the fine
+       PP-DocLayout class ``_dispatch_region`` routes on (``reference_content`` / ``doc_title``
+       / ``figure_title`` / ...). It's recovered positionally from the raw response the SDK
+       stashes on ``result._maas_response`` (``resolve_image_regions`` preserves region order
+       and count, so json_result and layout_details stay 1:1).
+    2. **Strip the ``<div align="center">`` wrappers** the cloud bakes around titles and
+       figure/table captions, which would otherwise leak into headings/captions (table HTML,
+       which has no ``<div>``, is untouched and still converted by ``html_table_to_markdown``).
+
+    ``bbox_2d`` is already normalised 0-1000 and image regions already carry ``image_path``
+    (both done by the SDK), so nothing else needs changing.
+    """
+    json_result = getattr(result, "json_result", None) or []
+    raw = getattr(result, "_maas_response", None) or {}
+    raw_pages = raw.get("layout_details", []) if isinstance(raw, dict) else []
+    # strict=False on purpose: if _maas_response is absent/partial, inject what aligns and
+    # leave the rest with native_label unset (degrades to coarse `label`, never crashes)
+    for page_regions, raw_page in zip(json_result, raw_pages, strict=False):
+        for region, raw_region in zip(page_regions, raw_page, strict=False):
+            region["native_label"] = raw_region.get("native_label")
+            content = region.get("content")
+            if content:
+                region["content"] = _MAAS_DIV_RE.sub("", content).strip()
+    return cast("list[list[dict]]", json_result)
 
 
 def parse_pdf(
@@ -440,9 +478,12 @@ def parse_pdf(
     else:
         result = _parse_with_watchdog(backend, pdf_path, cfg)
 
-    json_result = result.json_result
-    if isinstance(json_result, str):
-        json_result = json.loads(json_result)
+    if cfg.mode == "maas":
+        json_result = _normalize_maas_regions(result)
+    else:
+        json_result = result.json_result
+        if isinstance(json_result, str):
+            json_result = json.loads(json_result)
 
     markdown, figure_crops, figure_captions, references = _build_markdown(
         # json_result / image_files come untyped from the glmocr result object; the shapes

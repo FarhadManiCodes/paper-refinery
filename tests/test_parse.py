@@ -401,3 +401,62 @@ def test_parse_pdf_builds_markers_figures_and_references():
     """When run against a real backend: assert one <page_number> per page, figure crops
     saved under image_dir/figures, references routed to ParseResult.references and never
     appearing in .markdown, and boilerplate (headers/footers/page numbers) absent."""
+
+
+# --- maas (cloud) adapter -------------------------------------------------------------
+
+
+class _FakeMaasResult:
+    """Stand-in for glmocr's PipelineResult in maas mode: json_result lacks native_label
+    (the SDK drops it), and _maas_response carries the raw layout_details that has it."""
+
+    def __init__(self, json_result, maas_response):
+        self.json_result = json_result
+        self._maas_response = maas_response
+
+
+def test_normalize_maas_regions_injects_native_label_and_strips_divs():
+    from paper_refinery.parse import _normalize_maas_regions
+
+    result = _FakeMaasResult(
+        json_result=[
+            [
+                {
+                    "index": 0,
+                    "label": "text",
+                    "content": '<div align="center">\n\n# TITLE\n\n</div>',
+                },
+                {"index": 1, "label": "text", "content": "[1] Smith, J. A paper."},
+                {"index": 2, "label": "table", "content": "<table><tr><td>a</td></tr></table>"},
+            ]
+        ],
+        maas_response={
+            "layout_details": [
+                [
+                    {"native_label": "doc_title"},
+                    {"native_label": "reference_content"},
+                    {"native_label": "table"},
+                ]
+            ]
+        },
+    )
+    out = _normalize_maas_regions(result)
+    # fine labels restored from the raw response, positionally
+    assert [r["native_label"] for r in out[0]] == ["doc_title", "reference_content", "table"]
+    # <div align="center"> wrappers stripped, inner markdown kept (heading survives)
+    assert out[0][0]["content"] == "# TITLE"
+    # table HTML has no <div> -> untouched (still converted downstream by html_table_to_markdown)
+    assert out[0][2]["content"] == "<table><tr><td>a</td></tr></table>"
+
+
+def test_normalize_maas_regions_tolerates_missing_raw_response():
+    from paper_refinery.parse import _normalize_maas_regions
+
+    # a degenerate result with no _maas_response must not crash: native_label just stays unset
+    result = _FakeMaasResult(
+        json_result=[[{"index": 0, "label": "text", "content": "hi"}]],
+        maas_response=None,
+    )
+    out = _normalize_maas_regions(result)
+    assert out[0][0].get("native_label") is None
+    assert out[0][0]["content"] == "hi"

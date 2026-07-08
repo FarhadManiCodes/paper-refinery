@@ -15,6 +15,7 @@ parse.py; this module only owns process/connection lifetime.
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import tempfile
@@ -39,15 +40,16 @@ _FIGURE_CLASS_IDS = (3, 14)
 
 @dataclass
 class OcrBackend:
-    """A live backend: a glmocr parser bound to our own running llama-server.
+    """A live backend: a glmocr parser, plus (selfhosted only) our running llama-server.
 
-    ``server`` is exposed (not just the parser) so the parse watchdog can kill the
-    process when a run wedges -- killing the server is what breaks glmocr's in-flight
-    HTTP calls loose.
+    ``server`` is exposed (not just the parser) so the parse watchdog can kill the process
+    when a local run wedges -- killing the server is what breaks glmocr's in-flight HTTP
+    calls loose. In ``maas`` (cloud) mode there is no local server, so ``server`` is None
+    and the watchdog just abandons the request (the cloud call has its own timeout).
     """
 
     parser: GlmOcr  # the entered glmocr.GlmOcr (imported lazily; typed via TYPE_CHECKING)
-    server: subprocess.Popen
+    server: subprocess.Popen | None  # None in maas mode (no local llama-server)
 
 
 def _ensure_port_free(cfg: ParseConfig) -> None:
@@ -156,14 +158,30 @@ def _dotted_overrides(cfg: ParseConfig) -> dict:
 
 @contextmanager
 def ocr_backend(cfg: ParseConfig | None = None) -> Iterator[OcrBackend]:
-    """Spawn llama-server + GlmOcr once and yield a live ``OcrBackend``.
+    """Construct the GLM-OCR backend once and yield a live ``OcrBackend``.
 
-    The one place the glmocr SDK is imported/constructed. Reuse the yielded backend
-    across as many ``parse_pdf`` calls as needed; everything is torn down on exit.
+    The one place the glmocr SDK is imported/constructed. ``selfhosted`` spawns our own
+    llama-server + a selfhosted GlmOcr; ``maas`` binds a cloud GlmOcr to Zhipu's API (no
+    local server). Reuse the yielded backend across as many ``parse_pdf`` calls as needed;
+    everything is torn down on exit.
     """
     from glmocr import GlmOcr
 
     cfg = cfg or load_config().parse
+
+    if cfg.mode == "maas":
+        api_key = os.environ.get(cfg.api_key_env)
+        if not api_key:
+            raise RuntimeError(
+                f"ParseConfig.mode='maas' but {cfg.api_key_env} is not set -- put the "
+                "z.ai/bigmodel API key there (e.g. ~/.config/paper-refinery/secrets/zai.env)"
+            )
+        with GlmOcr(
+            mode="maas", api_key=api_key, api_url=cfg.maas_api_url, model=cfg.maas_model
+        ) as parser:
+            yield OcrBackend(parser=parser, server=None)
+        return
+
     with (
         _llama_server(cfg) as proc,
         GlmOcr(

@@ -56,8 +56,15 @@ def _pdf_sha256(pdf: Path) -> str:
 
 
 def _parse_signature(cfg: ParseConfig) -> dict:
-    """The ParseConfig subset that changes OCR OUTPUT (not just performance/transport)."""
+    """The ParseConfig subset that changes OCR OUTPUT (not just performance/transport).
+
+    Includes ``mode`` and the maas endpoint/model so a selfhosted checkpoint is never
+    reused for a cloud run (or across cloud models/endpoints) -- they produce different OCR.
+    """
     return {
+        "mode": cfg.mode,
+        "maas_api_url": cfg.maas_api_url,
+        "maas_model": cfg.maas_model,
         "model_path": cfg.model_path,
         "mmproj_path": cfg.mmproj_path,
         "figure_crop_margin": cfg.figure_crop_margin,
