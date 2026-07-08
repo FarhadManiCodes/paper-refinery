@@ -23,6 +23,7 @@ to figures.py, which constrains its use to dictionary-only lookups -- see the pr
 from __future__ import annotations
 
 import logging
+import operator
 import re
 from collections import defaultdict
 from collections.abc import Callable
@@ -42,10 +43,12 @@ _CAPTION_LINE = re.compile(
 )
 
 # (figure's crops, figure number, caption text, context, cfg) -> description dict or None
-FigureDescriber = Callable[[list[Path], str, str, dict, FigureConfig], "dict | None"]
+type FigureDescriber = Callable[[list[Path], str, str, dict, FigureConfig], "dict | None"]
+
+type _Box = tuple[float, float, float, float]  # (x1, y1, x2, y2), page pixels; geometry below
 
 
-@dataclass
+@dataclass(slots=True)
 class _Caption:
     number: str
     text: str  # caption text after the number
@@ -138,7 +141,7 @@ def _caption_bbox(
     return None
 
 
-def _axis_gaps(a, b) -> tuple[float, float]:
+def _axis_gaps(a: _Box, b: _Box) -> tuple[float, float]:
     """(x_gap, y_gap) between two boxes; a gap of 0 means the boxes overlap (or
     touch) on that axis."""
     x_gap = max(b[0] - a[2], a[0] - b[2], 0.0)
@@ -147,9 +150,6 @@ def _axis_gaps(a, b) -> tuple[float, float]:
 
 
 _CLUSTER_GAP_FRACTION = 0.05  # of page span: max gutter between sibling panels
-
-
-_Box = tuple[float, float, float, float]
 
 
 def _pairing_without_geometry(
@@ -415,7 +415,7 @@ def _splice_descriptions(
             else "Figure description (auto)"
         )
         insertions.append((caption.line_end, f"\n\n> **{label}:** {desc['description']}"))
-    for offset, text in sorted(insertions, key=lambda it: it[0], reverse=True):
+    for offset, text in sorted(insertions, key=operator.itemgetter(0), reverse=True):
         md = md[:offset] + text + md[offset:]
     return md
 

@@ -14,7 +14,7 @@ from typing import Union, get_args, get_origin, get_type_hints
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class ChunkConfig:
     """Section-aware chunking with a guaranteed soft-window overlap."""
 
@@ -25,7 +25,7 @@ class ChunkConfig:
     overlap_ideal: int = 500  # preferred overlap size within the window
 
 
-@dataclass
+@dataclass(slots=True)
 class ParseConfig:
     """GLM-OCR backend config, for either OCR mode.
 
@@ -76,7 +76,7 @@ class ParseConfig:
     #   to cut region-OCR concurrency on constrained hardware); forwarded as GlmOcr(_dotted=...)
 
 
-@dataclass
+@dataclass(slots=True)
 class FigureConfig:
     """Gemini figure-description options."""
 
@@ -116,7 +116,7 @@ class FigureConfig:
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class CitationConfig:
     """Citation pipeline: extraction (one Gemini call turns each raw OCR'd reference
     string into rough structured fields) and resolution (verifying/completing those
@@ -167,7 +167,7 @@ class CitationConfig:
     #   back to the per-entry search; set False to force the per-entry path everywhere.
 
 
-@dataclass
+@dataclass(slots=True)
 class RefineryConfig:
     """Top-level config bundling each stage."""
 

@@ -59,7 +59,7 @@ def infer_marker_style(extracted: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class Marker:
     """One in-text citation occurrence, linked to bibliography entries."""
 
@@ -69,7 +69,7 @@ class Marker:
     ref_indices: list[int]  # 0-based indices into the extracted/references list
 
 
-@dataclass
+@dataclass(slots=True)
 class LinkResult:
     style: str
     markers: list[Marker]

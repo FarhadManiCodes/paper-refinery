@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 _FIGURE_CLASS_IDS = (3, 14)
 
 
-@dataclass
+@dataclass(slots=True)
 class OcrBackend:
     """A live backend: a glmocr parser, plus (selfhosted only) our running llama-server.
 

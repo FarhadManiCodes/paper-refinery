@@ -245,7 +245,7 @@ def _refine_parsed(
     return chunks, summary
 
 
-@dataclass
+@dataclass(slots=True)
 class RefineResult:
     """What ``refine()`` produced: the chunks in memory plus the on-disk artifacts."""
 

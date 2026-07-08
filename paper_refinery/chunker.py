@@ -27,7 +27,7 @@ _BOUNDARIES = ((3, r"\n\n+"), (2, r"(?<=[.!?])\s+"), (1, r"\n"), (0, r" "))
 _MODE = {3: "PARA", 2: "SENT", 1: "NL", 0: "WORD"}
 
 
-@dataclass
+@dataclass(slots=True)
 class Chunk:
     """A single chunk emitted by the refinery and ingested by papis-ask."""
 

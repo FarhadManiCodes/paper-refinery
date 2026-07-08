@@ -399,6 +399,5 @@ def render_references_markdown(references: list[RawReference]) -> str:
             f"[{ref['number']}] {ref['text']}" if ref["number"] else ref["text"]
             for ref in by_page[page]
         ]
-        parts.append(page_marker(page))
-        parts.append("\n\n".join(lines))
+        parts.extend((page_marker(page), "\n\n".join(lines)))
     return "\n\n".join(parts)

@@ -102,7 +102,7 @@ def _strip_heading_prefix(content: str) -> str:
     return _HEADING_PREFIX_RE.sub("", content)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CropRegion:
     """One saved figure/chart crop with its layout-detected bbox ([x1, y1, x2, y2] in
     page pixels; None when the layout model gave no well-formed box)."""
@@ -111,7 +111,7 @@ class CropRegion:
     bbox: tuple[float, float, float, float] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CaptionRegion:
     """One figure_title region's text + bbox, same coordinate space as CropRegion.
 
@@ -124,7 +124,7 @@ class CaptionRegion:
     bbox: tuple[float, float, float, float] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class ParseResult:
     # markdown with one authoritative <page_number>N</page_number> per page boundary,
     # boilerplate/reference regions removed, tables as markdown, formulas as LaTeX

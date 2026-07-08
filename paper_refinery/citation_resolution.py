@@ -41,7 +41,7 @@ from .references import RawReference
 from .text_utils import fold_name, leading_number
 
 
-@dataclass
+@dataclass(slots=True)
 class SourcePaper:
     """What we know about the paper being processed, for the S2 bulk-references fast-path.
 
@@ -446,8 +446,7 @@ def format_resolution_report(extracted: list[dict], resolved: list[dict]) -> str
     for r in verified:
         by_match[r.get("match") or "?"] = by_match.get(r.get("match") or "?", 0) + 1
     route = ", ".join(f"{k}: {v}" for k, v in sorted(by_match.items()))
-    lines.append(f"resolved {len(verified)}/{len(resolved)} references ({route})")
-    lines.append("")
+    lines.extend((f"resolved {len(verified)}/{len(resolved)} references ({route})", ""))
 
     for i, r in enumerate(resolved):
         ext = extracted[i] if i < len(extracted) else {}
@@ -469,8 +468,7 @@ def format_resolution_report(extracted: list[dict], resolved: list[dict]) -> str
 
     unverified = [(i, r) for i, r in enumerate(resolved) if not r.get("verified")]
     if unverified:
-        lines.append("")
-        lines.append(f"UNVERIFIED ({len(unverified)}) -- layer-1 guess kept untouched:")
+        lines.extend(("", f"UNVERIFIED ({len(unverified)}) -- layer-1 guess kept untouched:"))
         for i, r in unverified:
             ext = extracted[i] if i < len(extracted) else {}
             shown = (ext.get("title") or r.get("raw_text") or "")[:80]

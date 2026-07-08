@@ -17,7 +17,7 @@ _COLUMN_OVERLAP = 0.5  # of the narrower region's width: x-overlap needed to sha
 _Y_TOL_FRACTION = 0.01  # of page width: y-difference treated as "same line" (~half a line)
 
 
-_Box = tuple[float, float, float, float]  # (x1, y1, x2, y2) in page pixels
+type _Box = tuple[float, float, float, float]  # (x1, y1, x2, y2) in page pixels
 
 
 def region_bbox(region: dict) -> _Box | None:
