@@ -3,7 +3,7 @@ name = "paper-refinery"
 version = "0.1.0"
 description = "Parse, figure-enrich, citation-verify, and chunk papers into RAG-ready chunks for papis-ask."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "GPL-3.0-or-later" }
 dependencies = [
   "glmocr>=0.1.5",                # GLM-OCR SDK (base = cloud/maas OCR; torch-free). Local
@@ -52,7 +52,7 @@ reportPrivateUsage = "error"
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"  # match requires-python's floor so UP targets the right syntax
+target-version = "py312"  # match requires-python's floor so UP targets the right syntax
 
 [tool.ruff.lint]
 # E/F (default) + I (import sort) + UP (modern syntax) + B (bugbear likely-bugs), plus a

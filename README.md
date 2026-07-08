@@ -11,7 +11,7 @@ chunks are plain data, so it works as a front-end for any RAG pipeline, not just
 
 ## Requirements
 
-- **Python ≥ 3.11** (3.14 used in development).
+- **Python ≥ 3.12** (3.14 used in development).
 - **A Zhipu / z.ai API key** — OCR runs on the cloud GLM-OCR API by default (`mode="maas"`):
   no GPU, no model download, no `llama-server`, no local torch. Get a key at
   [z.ai](https://docs.z.ai/guides/vlm/glm-ocr) (~$0.03/M tokens ≈ pennies per paper); see

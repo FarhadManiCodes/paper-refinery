@@ -10,9 +10,6 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import TypeVar
-
-T = TypeVar("T")
 
 
 def is_retryable(exc: Exception) -> bool:
@@ -30,7 +27,7 @@ def is_retryable(exc: Exception) -> bool:
     return isinstance(exc, (ConnectionError, TimeoutError, OSError))
 
 
-def call_with_backoff(fn: Callable[[], T], attempts: int, base_delay: float) -> T:
+def call_with_backoff[T](fn: Callable[[], T], attempts: int, base_delay: float) -> T:
     """Call ``fn`` with exponential backoff (base, 2x, 4x, ...) on retryable errors.
 
     Non-retryable errors and the final attempt's error propagate unchanged.

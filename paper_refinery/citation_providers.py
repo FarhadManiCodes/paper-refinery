@@ -10,6 +10,7 @@ merge semantics); this module only knows how to ask and how to read the reply.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import logging
 import os
@@ -249,8 +250,8 @@ def openalex_references(doi: str, cfg: CitationConfig) -> list[dict] | None:
     if not ids:
         return None
     candidates: list[dict] = []
-    for start in range(0, len(ids), 100):
-        batch = "|".join(ids[start : start + 100])
+    for id_batch in itertools.batched(ids, 100):  # OpenAlex caps the OR-filter at 100 ids
+        batch = "|".join(id_batch)
         url = (
             f"{cfg.openalex_api_base}/works?filter=openalex_id:{batch}"
             f"&per-page=100&select={_OPENALEX_FIELDS}"
