@@ -16,11 +16,10 @@ form before chunking), `references.md` (raw bibliography), `resolution_report.tx
 
 ## Commands
 
-Tooling lives in `.venv/` (no `uv.lock` — this is a plain venv). Prefix commands with the
-venv or activate it first. Rebuilding the venv from scratch needs a specific two-step
-install (CPU-only torch first) — see README.md's "Development setup" section; a plain
-`uv pip install -e .` alone pulls PyPI's CUDA-bundled torch (~3.4GB of unused
-`nvidia-*`/`triton` packages on a machine without an NVIDIA GPU).
+Tooling lives in `.venv/` (no `uv.lock` — this is a plain venv, Python 3.14). The default
+install is cloud-only and torch-free: `uv pip install -e ".[dev]"`. Only the optional LOCAL
+OCR backend (`.[local]` extra) pulls torch, and only there does the CPU-only-torch-first
+two-step matter — see README.md's "Development setup" / "Local (selfhosted) OCR backend".
 
 ```bash
 .venv/bin/pytest                              # full test suite
@@ -35,16 +34,24 @@ The test suite is fully offline: Gemini and the OCR backend are always mocked/in
 (`describe`/`client` params, hand-built region fixtures). No test needs network, a GPU, or
 `llama-server`.
 
-## Running the pipeline live requires a local OCR backend
+## Running the pipeline live: two OCR backends (`ParseConfig.mode`)
 
-Parsing is **local**, not cloud. `parse_pdf` spawns and tears down a `llama-server`
-(llama.cpp) serving GLM-OCR GGUF weights for the duration of each run, driven by the
-`glmocr` SDK. To run `refinery` end-to-end you need: `llama-server` on PATH, the two GGUF
-files (model + vision projector), and their paths set in `~/.config/paper-refinery/config.toml`
-under `[parse]` (`model_path`, `mmproj_path`). See README.md for full backend setup. `glmocr`
-also downloads PP-DocLayout-V3 from HF Hub on first use (needs `HF_TOKEN` and one-time
-network egress). **Always test pipeline changes live against real PDFs** — unit tests alone
-have missed real OCR-ordering bugs.
+**`mode="maas"` (default): cloud.** Layout+OCR run on Zhipu's GLM-OCR API
+(`api.z.ai/api/paas/v4/layout_parsing`, model `glm-ocr`) via the glmocr SDK's maas client —
+no GPU, no GGUF, no llama-server. Needs `ZHIPU_API_KEY` (secrets `zai.env`). The SDK's maas
+`json_result` DROPS `native_label`; `parse._normalize_maas_regions` restores it from the raw
+`result._maas_response` and strips the cloud's `<div>` content wrappers (see
+[[feature_maas_cloud_ocr]]).
+
+**`mode="selfhosted"`: local.** `parse_pdf` spawns/tears down a `llama-server` (llama.cpp)
+serving GLM-OCR GGUF weights, driven by the glmocr SDK. Needs the `.[local]` install extra
+(torch + PP-DocLayout-V3, downloaded from HF Hub on first use with `HF_TOKEN`), `llama-server`
+on PATH, the two GGUF files, and their paths in `config.toml` `[parse]`
+(`model_path`/`mmproj_path`). `OcrBackend.server` is None in maas mode; the watchdog guards
+the kill.
+
+**Always test pipeline changes live against real PDFs** — unit tests alone have missed real
+OCR-ordering bugs. See [[feedback_test_live_ocr]].
 
 ## Architecture
 

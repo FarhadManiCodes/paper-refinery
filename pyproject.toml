@@ -6,7 +6,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-or-later" }
 dependencies = [
-  "glmocr[selfhosted]>=0.1.5",    # GLM-OCR SDK: PP-DocLayout-V3 layout + per-region OCR dispatch
+  "glmocr>=0.1.5",                # GLM-OCR SDK (base = cloud/maas OCR; torch-free). Local
+                                   # selfhosted OCR needs the [local] extra below (pulls torch).
   "llama-index-core>=0.14",       # MarkdownNodeParser / SentenceSplitter (chunking primitives)
   "google-genai>=1.0",            # Gemini: figure descriptions + citation extraction
   "click>=8.1",                   # CLI
@@ -22,6 +23,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
+# opt back into LOCAL (selfhosted) GLM-OCR: pulls torch/torchvision + PP-DocLayout-V3
+# (~3.4GB, needs a GPU). Default install is cloud-only (ParseConfig.mode="maas").
+local = ["glmocr[selfhosted]>=0.1.5"]
 
 [project.scripts]
 refinery = "paper_refinery.cli:main"
@@ -38,7 +42,7 @@ build-backend = "hatchling.build"
 # boundaries that matter (ParseResult, Chunk, TypedDicts as they land), not with blanket
 # dict[str, Any].
 typeCheckingMode = "standard"
-pythonVersion = "3.12"
+pythonVersion = "3.14"
 venvPath = "."
 venv = ".venv"
 include = ["paper_refinery"]

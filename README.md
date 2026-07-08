@@ -11,12 +11,17 @@ chunks are plain data, so it works as a front-end for any RAG pipeline, not just
 
 ## Requirements
 
-- **Python ≥ 3.11** (3.12 recommended and used in development).
-- **A local OCR backend** — `llama-server` (from `llama.cpp`) + the GLM-OCR GGUF weights.
-  Parsing is local; see [Local OCR backend setup](#local-ocr-backend-setup).
-- **API keys** — `GOOGLE_API_KEY` (Gemini: figure descriptions + citation extraction) and
-  `HF_TOKEN` (one-time layout-model download on first parse); see [API keys](#api-keys). The
-  citation-resolution providers (CrossRef / Semantic Scholar / OpenAlex) are keyless.
+- **Python ≥ 3.11** (3.14 used in development).
+- **A Zhipu / z.ai API key** — OCR runs on the cloud GLM-OCR API by default (`mode="maas"`):
+  no GPU, no model download, no `llama-server`, no local torch. Get a key at
+  [z.ai](https://docs.z.ai/guides/vlm/glm-ocr) (~$0.03/M tokens ≈ pennies per paper); see
+  [API keys](#api-keys).
+- **`GOOGLE_API_KEY`** — Gemini, for figure descriptions + citation extraction; see
+  [API keys](#api-keys). The citation-resolution providers (CrossRef / Semantic Scholar /
+  OpenAlex) are keyless.
+- **Optional — a local OCR backend** instead of the cloud: `llama-server` + GLM-OCR GGUF
+  weights + a GPU + the `.[local]` install extra. See
+  [Local (selfhosted) OCR backend (optional)](#local-selfhosted-ocr-backend-optional).
 
 ## Pipeline
 
@@ -25,14 +30,14 @@ concurrently** — both are network-bound and independent — then the citekey r
 once both finish:
 
 ```
-                                ┌─ figures / enrich  (Gemini) ─┐
-PDF ── parse (local GLM-OCR) ───┤                              ├── chunk ──▶ outputs
-                                └─ citations (Gemini + web) ───┘
+                                  ┌─ figures / enrich  (Gemini) ─┐
+PDF ── parse (GLM-OCR: cloud/local) ┤                            ├── chunk ──▶ outputs
+                                  └─ citations (Gemini + web) ───┘
 ```
 
 | Stage | Tool | What it does |
 | --- | --- | --- |
-| **parse** | local GLM-OCR (`llama-server` + `glmocr`, PP-DocLayout-V3 layout + per-region OCR) | PDF → clean body markdown (LaTeX + markdown tables), figure crops, and page markers. Boilerplate (headers/footers/page numbers) is dropped; the bibliography is routed out to its own raw markdown. |
+| **parse** | GLM-OCR — Zhipu cloud API by default, or local `llama-server` + `glmocr` (PP-DocLayout-V3 layout + per-region OCR) | PDF → clean body markdown (LaTeX + markdown tables), figure crops, and page markers. Boilerplate (headers/footers/page numbers) is dropped; the bibliography is routed out to its own raw markdown. |
 | **figures → enrich** | Gemini | Describe each figure crop — one call per figure (what's compared, trends; never invents numbers) — then splice each description in next to its caption. |
 | **citations** | Gemini + web APIs | Extract raw references, verify/enrich them against CrossRef / Semantic Scholar / OpenAlex (disk-cached), detect in-text markers, and rewrite them to `[surname_year]` citekeys. |
 | **chunk** | — | Section-aware split with guaranteed soft-overlap and page ranges. |
@@ -47,6 +52,23 @@ Two finals land next to the PDF, plus a work directory holding everything review
 | `<pdf>.citations.json` | Verified/enriched bibliography + the in-text linking map. |
 | `<pdf>.refinery/` | `refinery.md` (enriched markdown, citekeys already rewritten — the last human-readable form before chunking), `references.md` (raw bibliography), `resolution_report.txt` (per-reference verification diff), `figures/`, and `parse_cache/` (the OCR checkpoint). |
 
+## OCR backend: cloud (default) or local
+
+`parse.mode`, set in `~/.config/paper-refinery/config.toml`, selects the OCR backend:
+
+```toml
+[parse]
+mode = "maas"          # Zhipu cloud GLM-OCR (default) -- needs ZHIPU_API_KEY, no GPU
+# mode = "selfhosted"  # local llama-server + GLM-OCR GGUF -- needs a GPU + the .[local] extra
+```
+
+- **`maas` (default):** layout + OCR on Zhipu's cloud (`api.z.ai`). ~$0.03/M tokens
+  (≈ 4k tokens/page ≈ $0.06 per 500 pages); no GPU, no model download, no local torch. Same
+  GLM-OCR model as local.
+- **`selfhosted`:** everything runs on your machine (no per-paper cost, no network for OCR),
+  but needs a GPU, the GGUF weights, and `pip install -e .[local]` — see
+  [Local (selfhosted) OCR backend (optional)](#local-selfhosted-ocr-backend-optional).
+
 ## Why
 
 pypdf mangles equations and emits glyph garbage for figures; paper-qa then
@@ -54,37 +76,43 @@ char-chunks the result blindly. paper-refinery produces faithful, semantically
 chunked text instead. See [`CLAUDE.md`](CLAUDE.md) for the architecture and the validated
 chunking policy.
 
-Parsing runs entirely locally: a small (0.9B) OCR model served via `llama.cpp`, orchestrated
-by the official `glmocr` SDK, replaces the cloud-based LlamaParse step -- no per-paper API
-cost, no network dependency for parsing itself (figure description calls Gemini; citation
-resolution calls CrossRef/Semantic Scholar/OpenAlex, all keyless and disk-cached).
+Parsing uses GLM-OCR — a small (0.9B) but top-ranked document OCR model — on Zhipu's cloud API
+by default, or fully locally via `llama.cpp` + the `glmocr` SDK if you prefer no per-paper cost
+and no network for OCR. Either way it replaces the cloud LlamaParse step this project began
+with. Figure descriptions call Gemini; citation resolution calls CrossRef / Semantic Scholar /
+OpenAlex (keyless, disk-cached).
 
 ## Development setup
 
-Tooling lives in `.venv/` (no `uv.lock` -- this is a plain venv managed with `uv pip`,
-not `uv sync`). `glmocr[selfhosted]` depends on `torch`/`torchvision`; on a machine
-without an NVIDIA GPU, PyPI's default wheel still bundles the full CUDA toolkit
-(~3.4GB of unused `nvidia-*`/`triton` packages) because pip has no hardware detection.
-Install the CPU-only build first, then the project, so it never gets swapped back in:
+Tooling lives in `.venv/` (no `uv.lock` -- a plain venv managed with `uv pip`, not
+`uv sync`). The default install is **cloud-only and torch-free** -- one step:
 
 ```bash
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python --no-config \
-  --default-index https://download.pytorch.org/whl/cpu \
-  torch torchvision
+uv venv --python 3.14 .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
 ```
 
-A `[tool.uv.pip]` index pin in `pyproject.toml` does NOT reliably take effect for
-`uv pip install` (confirmed live: it silently let PyPI's CUDA build win over the
-pinned index) -- the two-step CLI install above is the only version that has been
-verified to stick. This only matters for hosts without a CUDA GPU; skip it if you
-have one and want GPU-accelerated layout detection.
+Run the suite with `.venv/bin/pytest` (fully offline -- cloud OCR and Gemini are mocked, so
+no key, GPU, or network is needed to test). Lint/format with `.venv/bin/ruff check .` /
+`ruff format .`. The optional local OCR backend is a separate, heavier install
+([below](#local-selfhosted-ocr-backend-optional)).
 
-## Local OCR backend setup
+## Local (selfhosted) OCR backend (optional)
 
-Parsing requires a locally running `llama-server` (from `llama.cpp`) serving the GLM-OCR
-model, plus the `glmocr` SDK to drive layout detection and per-region OCR against it.
+Only needed for `mode = "selfhosted"`; the default cloud (`maas`) mode needs none of this.
+It requires a locally running `llama-server` (from `llama.cpp`) serving the GLM-OCR model,
+plus the `glmocr` SDK's layout detection (`.[local]` extra -> `torch`/`torchvision` +
+PP-DocLayout-V3). On a machine without an NVIDIA GPU, PyPI's default torch wheel still bundles
+the full CUDA toolkit (~3.4GB of unused `nvidia-*`/`triton`), so install the CPU-only build
+first:
+
+```bash
+uv pip install --python .venv/bin/python --no-config \
+  --default-index https://download.pytorch.org/whl/cpu torch torchvision
+uv pip install --python .venv/bin/python -e ".[dev,local]"
+```
+
+Then set up the server and weights:
 
 1. **Install `llama-server`** with GPU support for your hardware (CUDA, Vulkan, or ROCm --
    any llama.cpp backend works, since it's just an OpenAI-compatible HTTP server to
@@ -130,28 +158,27 @@ model, plus the `glmocr` SDK to drive layout detection and per-region OCR agains
    `ParseConfig.extra_server_args` defaults to that already -- re-check on a llama.cpp
    upgrade in case the constraint has been lifted.
 
-4. **`glmocr[selfhosted]`** (already a project dependency) pulls PP-DocLayout-V3
-   (torch/transformers, not PaddlePaddle despite the HF org name) automatically from
-   Hugging Face Hub on first use -- this is a separate, automatic download the first time
-   you parse a PDF, not a manual step, but it does mean the first run needs network egress
-   even though every run after that is fully local.
+4. **The `.[local]` extra** (`glmocr[selfhosted]`) pulls PP-DocLayout-V3 (torch/transformers,
+   not PaddlePaddle despite the HF org name) automatically from Hugging Face Hub on first use
+   -- a separate, automatic download the first time you parse a PDF (needs `HF_TOKEN` +
+   network egress once), after which every selfhosted run is fully local.
 
 ## API keys
 
-Two services need credentials. They load from **one file per service** under
-`~/.config/paper-refinery/secrets/` (its own directory — deliberately never shared with any
-other tool's env, so nothing can silently redirect glmocr's OpenAI-compatible client away
-from your local `llama-server`):
+Credentials load from **one file per service** under `~/.config/paper-refinery/secrets/` (its
+own directory, deliberately isolated from other tools' env so nothing can silently redirect a
+client elsewhere), each `KEY=value` (python-dotenv), loaded automatically by `load_config()`:
 
 ```
 ~/.config/paper-refinery/secrets/
+  zai.env         ZHIPU_API_KEY=...      # Zhipu / z.ai cloud GLM-OCR (maas mode -- the default)
   google.env      GOOGLE_API_KEY=...     # Gemini: figure descriptions + citation extraction
-  hf.env          HF_TOKEN=...           # one-time PP-DocLayout-V3 download on first parse
+  hf.env          HF_TOKEN=...           # ONLY for selfhosted mode: PP-DocLayout-V3 download
 ```
 
-Each file is `KEY=value` (python-dotenv format), loaded automatically by `load_config()`. The
-citation-resolution providers (CrossRef / Semantic Scholar / OpenAlex) are keyless, so no
-credentials are needed for the citation-verification stage.
+`ZHIPU_API_KEY` is the SDK's env-var name (z.ai and Zhipu/BigModel are the same provider, same
+key). The citation-resolution providers (CrossRef / Semantic Scholar / OpenAlex) are keyless.
+In selfhosted mode `ZHIPU_API_KEY` isn't needed; in the default maas mode `HF_TOKEN` isn't.
 
 ## Usage
 
@@ -183,7 +210,7 @@ from paper_refinery import refine, refine_many, RefineResult
 # one paper
 result: RefineResult = refine(Path("paper.pdf"), doi="10.1234/abc")
 
-# many papers — OCR runs serially on one shared GPU backend while each paper's
+# many papers — OCR runs serially on one shared OCR backend while each paper's
 # network stages (figures, citations) overlap the next paper's OCR. Yields each
 # RefineResult in COMPLETION order (not input order) as soon as it is ready, so a
 # caller can index each paper the moment it finishes rather than blocking on the batch.

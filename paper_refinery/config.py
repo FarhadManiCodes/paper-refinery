@@ -29,15 +29,16 @@ class ChunkConfig:
 class ParseConfig:
     """GLM-OCR backend config, for either OCR mode.
 
-    ``mode="selfhosted"`` (default) runs GLM-OCR locally: our own llama-server (inference) +
-    the glmocr SDK (PP-DocLayout-V3 layout + per-region OCR). Needs ``model_path``/
-    ``mmproj_path`` + a GPU. ``mode="maas"`` runs layout+OCR on Zhipu's cloud
-    (``api.z.ai``/bigmodel) -- no GPU, no GGUF, no local torch; needs only the API key in
-    ``api_key_env``. Both return the same region shape to parse.py (maas via a small adapter
-    that restores the SDK-dropped ``native_label`` and strips its content ``<div>`` wrappers).
+    ``mode="maas"`` (default) runs layout+OCR on Zhipu's cloud (``api.z.ai``/bigmodel) -- no
+    GPU, no GGUF, no local torch; needs only the API key in ``api_key_env``. ``mode="selfhosted"``
+    runs GLM-OCR locally instead: our own llama-server (inference) + the glmocr SDK
+    (PP-DocLayout-V3 layout + per-region OCR), needing ``model_path``/``mmproj_path`` + a GPU
+    and the ``[local]`` install extra (torch). Both return the same region shape to parse.py
+    (maas via a small adapter that restores the SDK-dropped ``native_label`` and strips its
+    content ``<div>`` wrappers).
     """
 
-    mode: str = "selfhosted"  # "selfhosted" (local llama-server) or "maas" (Zhipu cloud API)
+    mode: str = "maas"  # "maas" (Zhipu cloud API, default) or "selfhosted" (local llama-server)
     # --- maas (cloud) mode ---
     api_key_env: str = "ZHIPU_API_KEY"  # env var holding the z.ai / bigmodel API key
     maas_api_url: str = "https://api.z.ai/api/paas/v4/layout_parsing"  # bigmodel.cn also works

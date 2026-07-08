@@ -35,10 +35,10 @@ def test_citation_config_defaults():
     assert c.retry_base_delay == 4.0
 
 
-def test_parse_config_defaults_to_selfhosted_with_maas_option():
-    # dual backend: local llama-server + glmocr (default), or Zhipu cloud OCR (maas)
+def test_parse_config_defaults_to_maas_with_selfhosted_option():
+    # dual backend: Zhipu cloud OCR (maas) is the default; local llama-server is opt-in
     c = ParseConfig()
-    assert c.mode == "selfhosted"  # local is the default; maas is opt-in
+    assert c.mode == "maas"  # cloud is the default (no GPU/torch); selfhosted is opt-in
     assert c.api_key_env == "ZHIPU_API_KEY"
     assert c.maas_api_url.endswith("/layout_parsing")
     assert c.maas_model == "glm-ocr"
