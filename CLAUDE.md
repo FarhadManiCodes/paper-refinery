@@ -107,10 +107,15 @@ parse_cache.py           parse checkpoint: persist ParseResult + its raw crops t
                           wraps parse_pdf, restoring crops on a hit
 cli.py                    orchestrate the above (citations run concurrently with figure
                           enrich); write .chunks.json / .citations.json / paper.refinery/.
-                          Public API: refine() (one PDF) and refine_many() (streaming batch --
-                          serial OCR on one shared backend, network stages overlapped across
-                          papers, yields in completion order); CLI flags --force-parse /
-                          --from chunk / --doi
+                          Public API: refine() (one PDF) and refine_many() (streaming batch,
+                          yields in completion order -- branches on ParseConfig.mode: maas
+                          runs each paper's whole pipeline on a flat pool of `workers`, with
+                          OCR gated separately to `ocr_workers`=2 (z.ai rate-limits ~2-3
+                          concurrent OCR calls; the network tails run at the higher `workers`);
+                          selfhosted keeps the serial-OCR-on-one-shared-backend path);
+                          CLI flags --force-parse / --from chunk / --doi. parse_pdf raises on a
+                          zero-region OCR result (maas SDK reports an exhausted 429 as empty)
+                          so a throttled paper is skipped, never written as a 0-chunk manifest.
 ```
 
 ### Key cross-cutting contracts

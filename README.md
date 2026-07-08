@@ -222,10 +222,20 @@ for result in refine_many(pdfs, dois=dois):   # dois aligned to pdfs, entries ma
 reuses the parse checkpoint (pass `force_parse=True` to re-OCR). `cfg` defaults to
 `load_config()`.
 
-`refine_many(pdfs, cfg=None, *, dois=None, force_parse=False, network_workers=3) -> Iterator[RefineResult]`.
-A paper whose OCR fails (corrupt PDF, or a wedged server the watchdog killed) is logged and
-skipped, not fatal to the batch. `INFO` logs on the `paper_refinery` logger show the
-OCR→pool handoff and each paper streaming out.
+`refine_many(pdfs, cfg=None, *, dois=None, force_parse=False, workers=4, ocr_workers=2) -> Iterator[RefineResult]`.
+In the default cloud (`maas`) mode each paper runs its whole pipeline concurrently on a pool
+of `workers`, and results stream out in completion order. **OCR is gated separately** by
+`ocr_workers` (default 2): the cloud OCR endpoint rate-limits concurrent requests (z.ai
+returns 429 above ~2–3 at once), so only `ocr_workers` papers may be OCR-ing at any moment
+while up to `workers` run the other network stages (Gemini figures, citation providers, which
+hit different hosts). The moment a paper's OCR finishes it frees its slot and flows straight
+into its figure/citation stages while the next paper OCRs. Keep `ocr_workers` at/below your
+z.ai tier's concurrency (`z.ai/manage-apikey/rate-limits`); raise `workers` to overlap more
+network tails. In `selfhosted` mode OCR is bound to one local llama-server, so it falls back
+to a serial-OCR path (`ocr_workers` unused) that overlaps each paper's network stages with the
+next paper's OCR. A paper that fails — corrupt PDF, provider outage, or an OCR call the cloud
+never fulfilled (an empty parse is caught and treated as a failure, never written as a
+0-chunk result) — is logged and skipped, not fatal to the batch.
 
 **`RefineResult`** — refinery's own types/paths only:
 

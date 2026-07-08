@@ -406,14 +406,19 @@ def test_refine_is_exported_at_package_top_level():
     assert paper_refinery.RefineResult is cli.RefineResult
 
 
-def test_refine_many_streams_each_result_with_its_doi(tmp_path, monkeypatch):
+def _maas_parse(pdf, wd, pc, force=False):
+    """Default-mode (maas) mock for the parse leg: ``_refine`` calls ``parse_pdf_cached``."""
+    return ParseResult(markdown=pdf.stem)
+
+
+def test_refine_many_maas_streams_each_result_with_its_doi(tmp_path, monkeypatch):
+    # default mode is maas: each paper runs its whole pipeline on the pool; the parse leg
+    # is parse_pdf_cached (which spawns its own cloud backend on a miss), not _parse_for_batch
     pdfs = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
     for p in pdfs:
         p.write_bytes(b"%PDF-1.4 fake")
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-    monkeypatch.setattr(
-        cli, "_parse_for_batch", lambda pdf, wd, cfg, backend, force: ParseResult(markdown=pdf.stem)
-    )
+    monkeypatch.setattr(cli, "parse_pdf_cached", _maas_parse)
 
     seen = {}
 
@@ -429,15 +434,106 @@ def test_refine_many_streams_each_result_with_its_doi(tmp_path, monkeypatch):
     assert seen == {"a": "10.1/a", "b": None}  # each paper's DOI reaches its own pipeline
 
 
-def test_refine_many_overlaps_next_ocr_with_prior_network_stage(tmp_path, monkeypatch):
-    # the whole point of the pipeline: paper a's network stage must run WHILE paper b is
-    # still OCR-ing -- not serialized behind it. a's _refine_parsed blocks until b's parse
-    # has started; if OCR were serialized behind the network stage, b never parses, a's
-    # wait times out, and the assertion (below) fails.
+def test_refine_many_maas_parses_papers_concurrently(tmp_path, monkeypatch):
+    # the point of the cloud refactor: OCR has no shared server, so papers parse in
+    # PARALLEL, not one-at-a-time. Both parse calls must be in flight at once -- the
+    # barrier only trips when the second thread arrives, so if OCR were serialized the
+    # first thread waits forever, the barrier times out, and the batch yields nothing.
     pdfs = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
     for p in pdfs:
         p.write_bytes(b"%PDF-1.4 fake")
     monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+
+    both_parsing = threading.Barrier(2, timeout=5)
+
+    def fake_parse(pdf, wd, pc, force=False):
+        both_parsing.wait()  # requires the other paper's OCR to be concurrent
+        return ParseResult(markdown=pdf.stem)
+
+    monkeypatch.setattr(cli, "parse_pdf_cached", fake_parse)
+    monkeypatch.setattr(
+        cli,
+        "_refine_parsed",
+        lambda parsed, pdf, out, cit, wd, cfg, doi=None: ([Chunk(parsed.markdown, 0, 1, 1)], []),
+    )
+
+    results = list(cli.refine_many(pdfs, workers=2))
+    assert {r.chunks_path.name for r in results} == {"a.chunks.json", "b.chunks.json"}
+
+
+def test_refine_many_maas_caps_ocr_concurrency(tmp_path, monkeypatch):
+    # ocr_workers gates only the OCR stage: with ocr_workers=1, at most ONE paper is inside
+    # parse at a time even though workers=3 lets all three run their network tails at once.
+    import time
+
+    pdfs = [tmp_path / f"{c}.pdf" for c in "abc"]
+    for p in pdfs:
+        p.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+
+    lock = threading.Lock()
+    state = {"cur": 0, "peak": 0}
+
+    def fake_parse(pdf, wd, pc, force=False):
+        with lock:
+            state["cur"] += 1
+            state["peak"] = max(state["peak"], state["cur"])
+        time.sleep(0.05)  # hold the OCR slot so a concurrency violation would be observed
+        with lock:
+            state["cur"] -= 1
+        return ParseResult(markdown=pdf.stem)
+
+    monkeypatch.setattr(cli, "parse_pdf_cached", fake_parse)
+    monkeypatch.setattr(
+        cli, "_refine_parsed", lambda *a, **k: ([Chunk("MD", 0, 1, 1)], [])
+    )
+
+    results = list(cli.refine_many(pdfs, workers=3, ocr_workers=1))
+    assert len(results) == 3
+    assert state["peak"] == 1  # the OCR gate never let two parses overlap
+
+
+def test_refine_many_maas_skips_paper_whose_pipeline_fails(tmp_path, monkeypatch, caplog):
+    pdfs = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
+    for p in pdfs:
+        p.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+
+    def fake_parse(pdf, wd, pc, force=False):
+        if pdf.stem == "a":
+            raise RuntimeError("corrupt pdf")
+        return ParseResult(markdown="MD")
+
+    monkeypatch.setattr(cli, "parse_pdf_cached", fake_parse)
+    monkeypatch.setattr(
+        cli,
+        "_refine_parsed",
+        lambda parsed, pdf, out, cit, wd, cfg, doi=None: ([Chunk("MD", 0, 1, 1)], []),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        results = list(cli.refine_many(pdfs))
+
+    # a failed paper is skipped; the batch still yields the rest
+    assert [r.chunks_path.name for r in results] == ["b.chunks.json"]
+    assert "refine failed for a.pdf" in caplog.text
+
+
+def _selfhosted_config():
+    cfg = RefineryConfig()
+    cfg.parse.mode = "selfhosted"  # opt into the serial-OCR path (one local llama-server)
+    return cfg
+
+
+def test_refine_many_selfhosted_overlaps_next_ocr_with_prior_network_stage(tmp_path, monkeypatch):
+    # selfhosted keeps the serial-OCR design: paper a's network stage must run WHILE paper
+    # b is still OCR-ing -- not serialized behind it. a's _refine_parsed blocks until b's
+    # parse has started; if OCR were serialized behind the network stage, b never parses,
+    # a's wait times out, and the assertion below fails.
+    pdfs = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
+    for p in pdfs:
+        p.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(cli, "load_config", _selfhosted_config)
 
     b_parse_started = threading.Event()
 
@@ -458,38 +554,12 @@ def test_refine_many_overlaps_next_ocr_with_prior_network_stage(tmp_path, monkey
     assert {r.chunks_path.name for r in results} == {"a.chunks.json", "b.chunks.json"}
 
 
-def test_refine_many_skips_paper_whose_parse_fails(tmp_path, monkeypatch, caplog):
-    pdfs = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
-    for p in pdfs:
-        p.write_bytes(b"%PDF-1.4 fake")
-    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
-
-    def fake_parse(pdf, wd, cfg, backend, force):
-        if pdf.stem == "a":
-            raise RuntimeError("corrupt pdf")
-        return ParseResult(markdown="MD")
-
-    monkeypatch.setattr(cli, "_parse_for_batch", fake_parse)
-    monkeypatch.setattr(
-        cli,
-        "_refine_parsed",
-        lambda parsed, pdf, out, cit, wd, cfg, doi=None: ([Chunk("MD", 0, 1, 1)], []),
-    )
-
-    with caplog.at_level(logging.WARNING):
-        results = list(cli.refine_many(pdfs))
-
-    # a failed parse skips only that paper; the batch still yields the rest
-    assert [r.chunks_path.name for r in results] == ["b.chunks.json"]
-    assert "parse failed for a.pdf" in caplog.text
-
-
-def test_refine_many_does_not_spawn_ocr_backend_when_all_cached(tmp_path, monkeypatch):
-    # a batch where every parse is a checkpoint hit must never pay the server spawn +
-    # model load -- the lazy backend stays unspawned
+def test_refine_many_selfhosted_does_not_spawn_ocr_backend_when_all_cached(tmp_path, monkeypatch):
+    # a selfhosted batch where every parse is a checkpoint hit must never pay the server
+    # spawn + model load -- the lazy backend stays unspawned
     pdf = tmp_path / "a.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")
-    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+    monkeypatch.setattr(cli, "load_config", _selfhosted_config)
     monkeypatch.setattr(cli, "load_checkpoint", lambda wd, p, cfg: ParseResult(markdown="MD"))
 
     def boom(cfg=None):

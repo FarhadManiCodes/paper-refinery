@@ -366,12 +366,23 @@ def test_parse_pdf_clears_stale_crops_but_not_foreign_files(tmp_path):
     (figures_dir / "fig_4.1.png").write_bytes(b"stale renamed")
     (figures_dir / "notes.txt").write_bytes(b"not ours")
 
-    backend = OcrBackend(parser=_FakeParser(_FakeResult([[]])), server=_FakeServer())
+    pages = [[_region("text", "Body.", index=0)]]  # non-empty: the empty-parse guard is separate
+    backend = OcrBackend(parser=_FakeParser(_FakeResult(pages)), server=_FakeServer())
     parse_pdf(tmp_path / "x.pdf", tmp_path, ParseConfig(), backend=backend)
 
     assert not (figures_dir / "page_2_fig_0.png").exists()
     assert not (figures_dir / "fig_4.1.png").exists()
     assert (figures_dir / "notes.txt").exists()  # only our own patterns are touched
+
+
+def test_parse_pdf_raises_on_empty_ocr_result(tmp_path):
+    # zero regions on every page is a failed OCR, not a real (if sparse) PDF -- in maas mode
+    # the glmocr SDK reports an exhausted rate-limit (429) as an empty result. parse_pdf must
+    # raise so the caller skips the paper, never returning an empty ParseResult that would
+    # silently chunk to nothing (and never checkpointing it).
+    backend = OcrBackend(parser=_FakeParser(_FakeResult([[]])), server=_FakeServer())
+    with pytest.raises(RuntimeError, match="no regions"):
+        parse_pdf(tmp_path / "x.pdf", tmp_path, ParseConfig(), backend=backend)
 
 
 def test_parse_pdf_watchdog_kills_server_and_raises(tmp_path):

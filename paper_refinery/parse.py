@@ -485,6 +485,18 @@ def parse_pdf(
         if isinstance(json_result, str):
             json_result = json.loads(json_result)
 
+    # A parse with zero regions on every page is never a real PDF -- it's a failed OCR.
+    # In maas mode the glmocr SDK SWALLOWS an exhausted rate-limit (429) into an empty
+    # result rather than raising (confirmed live), which would otherwise flow silently
+    # through the pipeline and write a 0-chunk manifest. Raise so the caller skips the
+    # paper loudly and never checkpoints an empty parse.
+    if not any(json_result):
+        raise RuntimeError(
+            f"OCR returned no regions for {pdf_path.name} -- treating as a failed parse "
+            "(most often a cloud rate-limit/API error the SDK reported as empty); the "
+            "paper is skipped rather than written as an empty result"
+        )
+
     markdown, figure_crops, figure_captions, references = _build_markdown(
         # json_result / image_files come untyped from the glmocr result object; the shapes
         # are the SDK contract confirmed live (see _dispatch_region / _save_figure_crop)

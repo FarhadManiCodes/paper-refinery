@@ -20,7 +20,7 @@ import queue
 import re
 import threading
 from collections.abc import Callable, Iterator, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -293,6 +293,128 @@ def refine(
     )
 
 
+def refine_many(
+    pdfs: Sequence[Path],
+    cfg: RefineryConfig | None = None,
+    *,
+    dois: Sequence[str | None] | None = None,
+    force_parse: bool = False,
+    workers: int = 4,
+    ocr_workers: int = 2,
+) -> Iterator[RefineResult]:
+    """Refine many PDFs concurrently, yielding each ``RefineResult`` as it finishes.
+
+    In the default ``maas`` (cloud) mode every paper runs its *whole* pipeline
+    (parse -> {figures || citations} -> chunk) on a pool of ``workers``, and results stream
+    out in completion order (NOT input order), the instant each paper is ready. A caller
+    can index each paper as it lands rather than blocking on the batch
+    (``list(refine_many(...))`` if you do want them all). A single PDF gains nothing from
+    the pool -- use ``refine`` there.
+
+    OCR is gated separately from the rest by ``ocr_workers`` (default 2): the cloud OCR
+    endpoint rate-limits concurrent requests (z.ai returns 429 above ~2-3 at once, and the
+    glmocr SDK reports an exhausted 429 as an *empty* parse -- guarded in ``parse_pdf``), so
+    only ``ocr_workers`` papers may be OCR-ing at any moment. The other network stages
+    (Gemini figure calls, citation providers) hit different hosts with their own limits, so
+    up to ``workers`` papers run those concurrently -- a paper does its figures/citations
+    while the OCR slot it freed is taken by the next. Keep ``ocr_workers`` at/below your
+    z.ai tier's concurrency (see ``z.ai/manage-apikey/rate-limits``); raise ``workers`` to
+    overlap more network tails.
+
+    In ``selfhosted`` mode OCR is bound to one local llama-server (one GPU), so it can't
+    parallelize; ``refine_many`` falls back to a serial-OCR path where OCR runs one paper
+    at a time on a shared backend while each finished parse's network stages overlap the
+    next paper's OCR (``ocr_workers`` is not used there -- see ``_stream_serial_ocr``).
+
+    Outputs default next to each PDF, exactly like ``refine``. Pass ``dois`` (aligned to
+    ``pdfs``) to feed each paper's DOI into the S2 bulk-references fast-path. A paper that
+    fails (corrupt PDF, provider outage, an OCR call the cloud never fulfilled) is logged
+    and skipped rather than failing the batch.
+    """
+    pdfs = [Path(p) for p in pdfs]
+    if dois is not None and len(dois) != len(pdfs):
+        raise ValueError(f"dois has {len(dois)} entries but there are {len(pdfs)} pdfs")
+    cfg = cfg or load_config()
+    doi_list: list[str | None] = list(dois) if dois is not None else [None] * len(pdfs)
+    # a real function (not a bare generator) so the arg validation above raises eagerly,
+    # at the call, rather than being deferred to the first ``next()``.
+    if cfg.parse.mode == "maas":
+        return _stream_parallel(pdfs, doi_list, cfg, force_parse, workers, ocr_workers)
+    return _stream_serial_ocr(pdfs, doi_list, cfg, force_parse, workers)
+
+
+def _refine_one(
+    pdf: Path,
+    doi: str | None,
+    cfg: RefineryConfig,
+    force_parse: bool,
+    ocr_gate: threading.Semaphore,
+) -> RefineResult:
+    """Run the full pipeline on one PDF (default output locations) -> ``RefineResult``.
+
+    The unit of work the ``maas`` pool runs concurrently. Only the parse (OCR) is held
+    under ``ocr_gate`` -- its own cloud backend is spawned inside ``parse_pdf`` on a
+    checkpoint miss -- so at most ``ocr_workers`` papers hit the rate-limited OCR endpoint
+    at once; the network-bound {figures || citations} -> chunk tail runs outside the gate,
+    freeing the OCR slot for the next paper immediately. Nothing is shared between papers.
+    """
+    out, citations_out, work_dir = _default_outputs(pdf, None, None, None)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("%s: refine start", pdf.name)
+    with ocr_gate:
+        parsed = parse_pdf_cached(pdf, work_dir, cfg.parse, force=force_parse)
+    chunks, _summary = _refine_parsed(parsed, pdf, out, citations_out, work_dir, cfg, doi)
+    logger.info("%s: done (%d chunks) -- streaming result", pdf.name, len(chunks))
+    return RefineResult(chunks, out, citations_out, work_dir)
+
+
+def _stream_parallel(
+    pdfs: list[Path],
+    dois: list[str | None],
+    cfg: RefineryConfig,
+    force_parse: bool,
+    workers: int,
+    ocr_workers: int,
+) -> Iterator[RefineResult]:
+    """maas engine: the full pipeline per paper on a flat pool, yielded as each completes.
+
+    ``workers`` papers run end to end via ``_refine_one``, streamed via ``as_completed``;
+    an ``ocr_workers``-permit semaphore caps how many are inside the rate-limited OCR call
+    at once (the rest overlap on their network stages). A paper that raises anywhere in its
+    pipeline -- including the empty-parse guard when the cloud never fulfilled its OCR -- is
+    logged and skipped; the rest keep flowing.
+
+    Not a ``with`` block on purpose: the plain context manager shuts the pool down with
+    ``wait=True`` and no cancellation, so a caller that ``break``\\ s out of the stream (or
+    a downstream error closing the generator) would kick off *every* still-queued paper
+    just to throw the results away. The explicit ``cancel_futures=True`` teardown instead
+    drops papers that haven't started; only the <=``workers`` already in flight finish
+    (a running parse can't be interrupted), which we still wait for so no thread keeps
+    writing to disk after the caller has moved on.
+    """
+    ocr_gate = threading.Semaphore(ocr_workers)
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="refine")
+    try:
+        futures = {
+            pool.submit(_refine_one, pdf, doi, cfg, force_parse, ocr_gate): pdf
+            for pdf, doi in zip(pdfs, dois, strict=True)
+        }
+        for fut in as_completed(futures):
+            pdf = futures[fut]
+            try:
+                yield fut.result()
+            except Exception as exc:
+                logger.warning("refine failed for %s (%s) -- skipping", pdf.name, exc)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
+# --- selfhosted (local single-GPU) serial-OCR path -------------------------------------
+# Kept intact for ParseConfig.mode="selfhosted": one llama-server means OCR must run one
+# paper at a time. The maas path above is the default; this is the fallback for .[local],
+# and is what a cherry-pick back to a local-first setup would build on.
+
+
 class _LazyBackend:
     """Spawns the shared OCR backend on first request and reuses it thereafter.
 
@@ -319,7 +441,7 @@ class _LazyBackend:
 def _parse_for_batch(
     pdf: Path, work_dir: Path, cfg: RefineryConfig, backend: _LazyBackend, force_parse: bool
 ) -> ParseResult:
-    """Parse one paper for ``refine_many``, spawning the shared server only on a miss.
+    """Parse one paper for the selfhosted batch, spawning the shared server only on a miss.
 
     Checks the checkpoint first (unless ``force_parse``) so a hit skips OCR entirely --
     the backend stays unspawned. Only a real miss calls ``backend.get()``, keeping OCR
@@ -335,54 +457,15 @@ def _parse_for_batch(
     return parse_pdf_cached(pdf, work_dir, cfg.parse, backend=backend.get(), force=force_parse)
 
 
-def refine_many(
-    pdfs: Sequence[Path],
-    cfg: RefineryConfig | None = None,
-    *,
-    dois: Sequence[str | None] | None = None,
-    force_parse: bool = False,
-    network_workers: int = 3,
-) -> Iterator[RefineResult]:
-    """Refine many PDFs, overlapping OCR with the network stages across papers.
-
-    OCR can't run in parallel -- one GPU, one llama-server -- so it's a serial queue on
-    one shared backend. But each paper's post-parse work (figure-enrich Gemini calls,
-    citation resolution, chunking) is network-bound and independent, so the moment a
-    paper's OCR finishes it's handed to a pool of ``network_workers`` that run those
-    stages *while the next paper OCRs* -- no cross-paper barrier: paper 1 flows through
-    enrich/citations/chunk on its own as soon as its parse is done, it never waits for
-    paper 2's OCR. On a whole library this keeps the GPU busy instead of idling through
-    every paper's network wait; a single PDF gains nothing (nothing to overlap) -- use
-    ``refine`` there.
-
-    Yields one ``RefineResult`` per successfully refined PDF **as each finishes**
-    (completion order, NOT input order), so a caller can index each paper the instant
-    it's ready rather than blocking on the whole batch (``list(refine_many(...))`` if you
-    do want them all). Outputs default next to each PDF, exactly like ``refine``. Pass
-    ``dois`` (aligned to ``pdfs``) to feed each paper's DOI into the S2 bulk-references
-    fast-path. A paper whose OCR fails (a corrupt PDF, or a wedged server the watchdog
-    killed -- which also ends the shared backend for the papers still queued) is logged
-    and skipped rather than failing the whole batch.
-    """
-    pdfs = [Path(p) for p in pdfs]
-    if dois is not None and len(dois) != len(pdfs):
-        raise ValueError(f"dois has {len(dois)} entries but there are {len(pdfs)} pdfs")
-    cfg = cfg or load_config()
-    doi_list: list[str | None] = list(dois) if dois is not None else [None] * len(pdfs)
-    # a real function (not a bare generator) so the arg validation above raises eagerly,
-    # at the call, rather than being deferred to the first ``next()``.
-    return _stream_refined(pdfs, doi_list, cfg, force_parse, network_workers)
-
-
-def _stream_refined(
+def _stream_serial_ocr(
     pdfs: list[Path],
     dois: list[str | None],
     cfg: RefineryConfig,
     force_parse: bool,
     network_workers: int,
 ) -> Iterator[RefineResult]:
-    """The engine behind ``refine_many``: a serial-OCR producer thread feeding a
-    network-worker pool, yielding results in completion order.
+    """selfhosted engine: a serial-OCR producer thread feeding a network-worker pool,
+    yielding results in completion order.
 
     OCR runs on one background thread (the serial GPU queue); each parse is submitted to
     ``net_pool`` the instant it completes, and a done-callback drops the finished
