@@ -43,6 +43,11 @@ _IMAGE_LINK_RE = re.compile(r"(!\[[^\]]*\]\()([^)\s]+)(\))")
 _H1_RE = re.compile(r"(?m)^#\s+(.+)$")
 _URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")  # http:, https:, data:, file:, ...
 
+# Envelope version for the chunks.json / citations.json manifests -- the cross-tool contract
+# papis-ask (a separately versioned consumer) reads off disk. Bump when the on-disk shape
+# changes incompatibly so a consumer can detect it instead of silently mis-parsing.
+MANIFEST_SCHEMA_VERSION = 1
+
 
 def _source_title(markdown: str) -> str | None:
     """The paper's own title from the first H1 (the OCR'd doc-title) -- used to look the
@@ -92,9 +97,10 @@ def _default_outputs(
 def write_chunks(chunks: list[Chunk], docname: str, source_pdf: str, out_path: Path) -> None:
     """Serialize chunks to the hand-off JSON that papis-ask ingests via aadd_texts."""
     payload = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "parser": "paper-refinery",
         "source_pdf": source_pdf,
         "docname": docname,
-        "parser": "paper-refinery",
         "chunks": [c.to_dict() for c in chunks],
     }
     out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -230,6 +236,8 @@ def _refine_parsed(
                 citekeys = [make_citekey(r) for r in resolved]
                 enriched = rewrite_markers(enriched, link.markers, citekeys)
                 payload = {
+                    "schema_version": MANIFEST_SCHEMA_VERSION,
+                    "parser": "paper-refinery",
                     "source_pdf": str(pdf),
                     "docname": pdf.stem,
                     "references": resolved,
@@ -693,6 +701,11 @@ def main_many(pdfs: tuple[Path, ...], force_parse: bool, workers: int, ocr_worke
             f"{result.chunks_path.name}: {len(result.chunks)} chunks -> {result.chunks_path}"
         )
     click.echo(f"refined {done}/{len(pdfs)} papers")
+    # Exit non-zero only when NOTHING was produced, so `refinery-batch ... && papis ask index`
+    # stops instead of indexing an empty result; a partial batch (some papers skipped) still
+    # succeeds, since the produced sidecars are worth indexing and the count above flags it.
+    if done == 0:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

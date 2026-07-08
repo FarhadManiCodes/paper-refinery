@@ -51,6 +51,7 @@ def test_write_chunks_roundtrip(tmp_path):
     assert data["docname"] == "mydoc"
     assert data["source_pdf"] == "/x/p.pdf"
     assert data["parser"] == "paper-refinery"
+    assert data["schema_version"] == cli.MANIFEST_SCHEMA_VERSION  # versioned cross-tool seam
     assert len(data["chunks"]) == 2
     assert data["chunks"][0]["text"] == "hello"
     assert data["chunks"][1]["overlap_mode"] == "SENT"
@@ -88,6 +89,19 @@ def test_main_many_refines_all_pdfs_and_reports(tmp_path, monkeypatch):
 def test_main_many_requires_at_least_one_pdf():
     result = CliRunner().invoke(cli.main_many, [])
     assert result.exit_code != 0  # nargs=-1 required -> click usage error
+
+
+def test_main_many_exits_nonzero_when_nothing_refined(tmp_path, monkeypatch):
+    # every paper failed -> refine_many yields nothing -> exit non-zero, so a
+    # `refinery-batch ... && papis ask index` chain stops instead of indexing an empty result
+    pdf = tmp_path / "a.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+    monkeypatch.setattr(cli, "refine_many", lambda *a, **k: iter(()))  # nothing succeeds
+
+    result = CliRunner().invoke(cli.main_many, [str(pdf)])
+    assert result.exit_code == 1
+    assert "refined 0/1 papers" in result.output
 
 
 def test_main_wires_stages_and_writes_json(tmp_path, monkeypatch):
@@ -236,6 +250,8 @@ def test_main_runs_citation_stack_and_writes_citations_json(tmp_path, monkeypatc
 
     data = json.loads(pdf.with_suffix(".citations.json").read_text())
     assert data["docname"] == "p"
+    assert data["parser"] == "paper-refinery"  # same versioned envelope as chunks.json
+    assert data["schema_version"] == cli.MANIFEST_SCHEMA_VERSION
     assert data["references"][0]["verified"] and data["references"][0]["doi"] == "10.1/x"
     assert data["references"][0]["year"] == 2020  # JSON carries the resolved metadata...
     # ...while linking matched the printed form (would find nothing against year 2020)
