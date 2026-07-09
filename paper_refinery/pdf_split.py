@@ -85,7 +85,7 @@ def merge_parse_results(
 
     offset = 0
     for result, n_pages in zip(results, pages_per_part, strict=True):
-        markdown_parts.append(_offset_page_markers(result.markdown, offset))
+        part_markdown = _offset_page_markers(result.markdown, offset)
         if result.references_markdown:
             references_markdown_parts.append(result.references_markdown)
 
@@ -96,8 +96,20 @@ def merge_parse_results(
                 new_path = figures_dir / f"page_{global_page}_fig_{idx}.png"
                 if crop.path.exists():
                     crop.path.replace(new_path)
+                # parse.py embeds the crop path straight into a "![FIGURE_CROP
+                # page:idx](path)" placeholder -- moving the file (above) doesn't
+                # retarget that text, so enrich.py's later rename pass (which matches
+                # this exact placeholder against the CURRENT figure_crops path) would
+                # silently find no match and leave the stale pre-merge link in the
+                # final markdown. Rewrite it here, in lockstep with the move.
+                part_markdown = part_markdown.replace(
+                    f"![FIGURE_CROP {local_page}:{idx}]({crop.path})",
+                    f"![FIGURE_CROP {global_page}:{idx}]({new_path})",
+                )
                 moved.append(CropRegion(new_path, crop.bbox))
             figure_crops[global_page] = moved
+
+        markdown_parts.append(part_markdown)
 
         for local_page, captions in result.figure_captions.items():
             figure_captions[local_page + offset] = captions

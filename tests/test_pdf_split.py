@@ -79,13 +79,15 @@ def test_merge_parse_results_renames_crops_without_collision(tmp_path):
     crops_a.mkdir()
     crops_b.mkdir()
     # both parts independently restart crop numbering at their own page 1
+    crop_a = _crop(crops_a, "page_1_fig_0.png")
+    crop_b = _crop(crops_b, "page_1_fig_0.png")
     part_a = ParseResult(
-        markdown="m",
-        figure_crops={1: [CropRegion(_crop(crops_a, "page_1_fig_0.png"), (0, 0, 1, 1))]},
+        markdown=f"m\n\n![FIGURE_CROP 1:0]({crop_a})",
+        figure_crops={1: [CropRegion(crop_a, (0, 0, 1, 1))]},
     )
     part_b = ParseResult(
-        markdown="m",
-        figure_crops={1: [CropRegion(_crop(crops_b, "page_1_fig_0.png"), (0, 0, 1, 1))]},
+        markdown=f"m\n\n![FIGURE_CROP 1:0]({crop_b})",
+        figure_crops={1: [CropRegion(crop_b, (0, 0, 1, 1))]},
     )
     figures_dir = tmp_path / "figures"
     merged = merge_parse_results([part_a, part_b], [100, 50], figures_dir)
@@ -98,6 +100,15 @@ def test_merge_parse_results_renames_crops_without_collision(tmp_path):
     assert a_path.parent == figures_dir and b_path.parent == figures_dir
     assert a_path.exists() and b_path.exists()
     assert a_path != b_path  # no collision
+
+    # the invariant enrich.py's _rename_crops depends on: for every merged crop, the
+    # EXACT placeholder text it will search-and-replace against must actually be
+    # present in the merged markdown, pointing at the NEW (post-move) path and the
+    # NEW (global) page number -- not the stale pre-merge one.
+    assert f"![FIGURE_CROP 1:0]({a_path})" in merged.markdown
+    assert f"![FIGURE_CROP 101:0]({b_path})" in merged.markdown
+    assert str(crop_a) not in merged.markdown
+    assert str(crop_b) not in merged.markdown
 
 
 def test_merge_parse_results_offsets_reference_pages(tmp_path):
