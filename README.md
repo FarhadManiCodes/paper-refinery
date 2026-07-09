@@ -69,6 +69,12 @@ mode = "maas"          # Zhipu cloud GLM-OCR (default) -- needs ZHIPU_API_KEY, n
   but needs a GPU, the GGUF weights, and `pip install -e .[local]` — see
   [Local (selfhosted) OCR backend (optional)](#local-selfhosted-ocr-backend-optional).
 
+Zhipu's cloud endpoint caps a single request at 100 pages. Anything longer (a book, a
+thesis) is split into `parse.max_pages_per_part`-page parts (default 100), each parsed
+independently, then glued back into one document before figures/citations/chunking run
+— transparent either way, same output shape. Live-tested on a 297-page book: ~8 minutes,
+~$0.07 total OCR cost.
+
 ## Why
 
 pypdf mangles equations and emits glyph garbage for figures; paper-qa then
