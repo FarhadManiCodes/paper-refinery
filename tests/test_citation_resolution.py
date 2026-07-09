@@ -22,6 +22,46 @@ def _cfg(**kw) -> CitationConfig:
 # ---------------------------------------------------------------------------
 
 
+def test_source_confident_strong_title_accepts_despite_year_author_mismatch():
+    # regression: a near-exact title identifies the (specific, known) source on its own;
+    # supplied year/authors that drift (preprint year, different name) must NOT veto it, or
+    # passing metadata would lose the fast-path a bare title-only lookup would have won.
+    cfg = _cfg()
+    title = "HYCO: A Formalism for Hybrid-Cooperative PDE Modelling"
+    src = cr.SourcePaper(title=title, year=2026, authors=[{"family": "Liverani"}])
+    candidate = {"title": title, "year": 2023, "authors": [{"family": "Zuazua"}]}
+    assert cr._source_confident(src, candidate, cfg)
+
+
+def test_source_confident_rejects_unrelated_title():
+    cfg = _cfg()
+    src = cr.SourcePaper(title="A New Approach to Linear Filtering", year=1960)
+    candidate = {"title": "Deep residual learning for image recognition", "year": 1960}
+    assert not cr._source_confident(src, candidate, cfg)
+
+
+def test_source_from_meta_maps_bundle_and_prefers_its_title():
+    meta = {
+        "doi": "10.1/x",
+        "title": "Authoritative Title",
+        "year": 2021,
+        "authors": [{"family": "Smith", "given": "J"}],
+    }
+    sp = cr.source_from_meta(meta, fallback_title="ocr guess")
+    assert (sp.doi, sp.title, sp.year) == ("10.1/x", "Authoritative Title", 2021)
+    assert sp.authors == [{"family": "Smith", "given": "J"}]
+
+
+def test_source_from_meta_falls_back_to_ocr_title_when_bundle_has_none():
+    # empty/None bundle -> only the OCR fallback title; nothing else set (fast-path still tries)
+    sp = cr.source_from_meta(None, fallback_title="ocr guess")
+    assert sp.title == "ocr guess"
+    assert sp.doi is None and sp.year is None and sp.authors is None
+    # a bundle without a title keeps the fallback but takes the rest
+    sp2 = cr.source_from_meta({"doi": "10.1/y"}, fallback_title="ocr guess")
+    assert sp2.doi == "10.1/y" and sp2.title == "ocr guess"
+
+
 def test_title_similarity_near_identical_scores_high():
     a = "Discovering governing equations from data by sparse identification"
     b = "Discovering Governing Equations from Data by Sparse Identification."

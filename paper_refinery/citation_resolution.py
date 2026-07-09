@@ -22,6 +22,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from typing import TypedDict
 
 from .citation_providers import (
     crossref_search,
@@ -56,6 +57,42 @@ class SourcePaper:
     title: str | None = None
     year: int | None = None
     authors: list[dict] | None = None
+
+
+class SourceMeta(TypedDict, total=False):
+    """Optional known metadata about the paper being refined, supplied by a caller that
+    already has it (e.g. papis-ask, straight from info.yaml). The external-input sibling of
+    ``SourcePaper``. Every key is optional; an absent bundle or key just falls back to what
+    refinery derives from OCR, so passing it never creates a dependency -- it only lets
+    refinery skip re-deriving what's already known.
+
+    ``references`` (the paper's own reference list) is reserved for a later phase and ignored
+    for now.
+    """
+
+    doi: str | None
+    arxiv: str | None
+    title: str | None
+    year: int | None
+    authors: list[dict]  # [{"family": ..., "given": ...}, ...]
+    references: list[dict]  # the paper's own bibliography (reserved; not yet consumed)
+
+
+def source_from_meta(
+    meta: SourceMeta | dict | None, fallback_title: str | None = None
+) -> SourcePaper:
+    """Build a ``SourcePaper`` from a caller-supplied metadata bundle, falling back to
+    ``fallback_title`` (typically refinery's OCR'd H1) when the bundle carries no title. A
+    caller's authoritative title/year/authors supersede the OCR guess, making source
+    identification for the bulk-references fast-path far more reliable."""
+    m = meta or {}
+    return SourcePaper(
+        doi=m.get("doi"),
+        arxiv=m.get("arxiv"),
+        title=m.get("title") or fallback_title,
+        year=m.get("year"),
+        authors=m.get("authors"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -292,20 +329,29 @@ def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> d
 
 
 def _source_confident(source: SourcePaper, candidate: dict, cfg: CitationConfig) -> bool:
-    """Is a title-search hit really the source paper? Title similarity must clear the bar,
-    and year + first-author must agree when the source provides them (a title alone can land
-    on the wrong paper). Same leave-don't-guess stance as reference acceptance.
+    """Is a title-search hit really the source paper? Two-tier, mirroring ``_acceptable``:
+
+    - A **strong** title match (>= threshold) identifies the source on its own. Year/author
+      are NOT vetoes here: the source is a specific, known paper, so a near-exact title match
+      is almost certainly it, and provided year/authors often drift from a provider's record
+      (a preprint year, a name-format difference) -- vetoing on that would false-reject the
+      right paper and, crucially, do WORSE than a title-only lookup with no metadata at all.
+      Supplying more metadata must never lose the fast-path a bare title would have won.
+    - A **borderline** title match (in [relaxed, threshold)) is rescued only when year AND
+      first-author surname corroborate it -- that's where caller-supplied metadata earns its
+      keep (a garbled OCR title identified via papis's authoritative year+authors).
     """
-    if title_similarity(source.title, candidate.get("title")) < cfg.title_similarity_threshold:
-        return False
-    year, cand_year = source.year, candidate.get("year")
-    if year and cand_year and abs(year - cand_year) > cfg.year_tolerance:
-        return False
-    if source.authors:
-        src_fam, cand_fam = _first_family({"authors": source.authors}), _first_family(candidate)
-        if src_fam and cand_fam and src_fam != cand_fam:
-            return False
-    return True
+    similarity = title_similarity(source.title, candidate.get("title"))
+    if similarity >= cfg.title_similarity_threshold:
+        return True
+    if similarity >= cfg.title_similarity_relaxed:
+        year, cand_year = source.year, candidate.get("year")
+        family = _first_family({"authors": source.authors or []})
+        cand_family = _first_family(candidate)
+        return bool(
+            year is not None and year == cand_year and family and family == cand_family
+        )
+    return False
 
 
 def _dedup_candidates(candidates: list[dict]) -> list[dict]:

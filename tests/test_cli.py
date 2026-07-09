@@ -66,8 +66,8 @@ def test_main_many_refines_all_pdfs_and_reports(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_refine_many(pdf_list, cfg, *, force_parse, workers, ocr_workers):
-        seen["call"] = ([p.name for p in pdf_list], force_parse, workers, ocr_workers)
+    def fake_refine_many(pdf_list, cfg, *, force_parse, workers, ocr_workers, sources):
+        seen["call"] = ([p.name for p in pdf_list], force_parse, workers, ocr_workers, sources)
         for p in pdf_list:
             yield cli.RefineResult(
                 [Chunk("x", 0, 1, 1)],
@@ -82,8 +82,35 @@ def test_main_many_refines_all_pdfs_and_reports(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "refined 2/2 papers" in result.output
     assert "a.chunks.json: 1 chunks" in result.output
-    # CLI flags reach refine_many; DOIs are not forwarded by the batch command
-    assert seen["call"] == (["a.pdf", "b.pdf"], False, 4, 1)
+    # CLI flags reach refine_many; no --meta-map -> sources is None
+    assert seen["call"] == (["a.pdf", "b.pdf"], False, 4, 1, None)
+
+
+def test_main_many_meta_map_feeds_sources_by_path(tmp_path, monkeypatch):
+    # --meta-map aligns each PDF to its SourceMeta bundle by path; a PDF absent from the map
+    # gets None (OCR-title fallback). Path-keyed, so order/count drift can't misattribute.
+    pdfs = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
+    for p in pdfs:
+        p.write_bytes(b"%PDF-1.4 fake")
+    meta = tmp_path / "meta.json"
+    bundle = {"doi": "10.1/a", "title": "A", "year": 2020}
+    meta.write_text(json.dumps({str(pdfs[0].resolve()): bundle}))
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+
+    captured = {}
+
+    def fake_refine_many(pdf_list, cfg, *, force_parse, workers, ocr_workers, sources):
+        captured["sources"] = sources
+        for p in pdf_list:
+            yield cli.RefineResult([Chunk("x", 0, 1, 1)], p.with_suffix(".chunks.json"), p, p)
+
+    monkeypatch.setattr(cli, "refine_many", fake_refine_many)
+
+    result = CliRunner().invoke(
+        cli.main_many, [str(pdfs[0]), str(pdfs[1]), "--meta-map", str(meta)]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["sources"] == [{"doi": "10.1/a", "title": "A", "year": 2020}, None]
 
 
 def test_main_many_requires_at_least_one_pdf():
@@ -518,8 +545,8 @@ def test_refine_many_maas_streams_each_result_with_its_doi(tmp_path, monkeypatch
 
     seen = {}
 
-    def fake_refine_parsed(parsed, pdf, out, cit, wd, cfg, doi=None):
-        seen[pdf.stem] = doi
+    def fake_refine_parsed(parsed, pdf, out, cit, wd, cfg, source=None):
+        seen[pdf.stem] = source
         return [Chunk(parsed.markdown, 0, 1, 1)], []
 
     monkeypatch.setattr(cli, "_refine_parsed", fake_refine_parsed)
@@ -527,7 +554,27 @@ def test_refine_many_maas_streams_each_result_with_its_doi(tmp_path, monkeypatch
     results = list(cli.refine_many(pdfs, dois=["10.1/a", None]))
 
     assert {r.chunks_path.name for r in results} == {"a.chunks.json", "b.chunks.json"}
-    assert seen == {"a": "10.1/a", "b": None}  # each paper's DOI reaches its own pipeline
+    # the doi shorthand reaches each paper's pipeline folded into its source bundle
+    assert seen == {"a": {"doi": "10.1/a"}, "b": {}}
+
+
+def test_refine_many_routes_full_source_bundle_per_paper(tmp_path, monkeypatch):
+    # sources (the rich SourceMeta bundles) reach each paper's pipeline, aligned to pdfs
+    pdfs = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
+    for p in pdfs:
+        p.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+    monkeypatch.setattr(cli, "parse_pdf_cached", _maas_parse)
+    seen = {}
+
+    def fake_refine_parsed(parsed, pdf, out, cit, wd, cfg, source=None):
+        seen[pdf.stem] = source
+        return [Chunk(parsed.markdown, 0, 1, 1)], []
+
+    monkeypatch.setattr(cli, "_refine_parsed", fake_refine_parsed)
+    bundles = [{"doi": "10.1/a", "title": "A", "year": 2020}, None]
+    list(cli.refine_many(pdfs, sources=bundles))
+    assert seen == {"a": {"doi": "10.1/a", "title": "A", "year": 2020}, "b": {}}
 
 
 def test_refine_many_maas_parses_papers_concurrently(tmp_path, monkeypatch):

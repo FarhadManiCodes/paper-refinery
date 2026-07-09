@@ -30,7 +30,12 @@ from .backend import OcrBackend, ocr_backend
 from .chunker import Chunk, chunk_markdown
 from .citation_extraction import extract_references
 from .citation_linking import link_citations, make_citekey, rewrite_markers
-from .citation_resolution import SourcePaper, format_resolution_report, resolve_references
+from .citation_resolution import (
+    SourceMeta,
+    format_resolution_report,
+    resolve_references,
+    source_from_meta,
+)
 from .config import ParseConfig, RefineryConfig, load_config
 from .enrich import enrich_markdown
 from .figures import describe_figure, make_client
@@ -106,8 +111,18 @@ def write_chunks(chunks: list[Chunk], docname: str, source_pdf: str, out_path: P
     out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+def _merge_doi(source: SourceMeta | None, doi: str | None) -> dict:
+    """Fold the ``doi=`` shorthand into the caller's metadata bundle (an explicit bundle doi
+    wins). API-input normalization only -- the bundle->SourcePaper mapping lives in
+    citation_resolution.source_from_meta (this channel only affects the citation stage)."""
+    bundle = dict(source or {})
+    if doi and not bundle.get("doi"):
+        bundle["doi"] = doi
+    return bundle
+
+
 def _run_citations(
-    parsed: ParseResult, cfg: RefineryConfig, work_dir: Path, source_doi: str | None = None
+    parsed: ParseResult, cfg: RefineryConfig, work_dir: Path, source: dict | None = None
 ) -> tuple[list[dict], list[dict]]:
     """Citation stack on one paper's parse output: extraction (one Gemini call) ->
     resolution (verify/enrich against CrossRef/S2/OpenAlex, disk-cached).
@@ -118,13 +133,13 @@ def _run_citations(
     resolved)``, positionally aligned -- ``_refine`` links markers against
     ``extracted`` (below) and builds citekeys from ``resolved``.
 
-    The source paper (``source_doi`` if a caller has it, else the OCR'd title) drives the
-    S2 bulk-references fast-path in ``resolve_references``; unidentified/unmatched entries
-    fall back to the per-entry provider search.
+    The source paper (from the caller's ``source`` bundle if given -- doi/title/year/authors
+    -- else the OCR'd title) drives the S2 bulk-references fast-path in ``resolve_references``;
+    unidentified/unmatched entries fall back to the per-entry provider search.
     """
     extracted = extract_references([r["text"] for r in parsed.references], cfg.citation)
-    source = SourcePaper(doi=source_doi, title=_source_title(parsed.markdown))
-    resolved = resolve_references(extracted, parsed.references, cfg.citation, source=source)
+    source_paper = source_from_meta(source, fallback_title=_source_title(parsed.markdown))
+    resolved = resolve_references(extracted, parsed.references, cfg.citation, source=source_paper)
     report = format_resolution_report(extracted, resolved)
     (work_dir / "resolution_report.txt").write_text(report + "\n")
     return extracted, resolved
@@ -163,6 +178,16 @@ def _rechunk_many(pdfs: tuple[Path, ...], cfg: RefineryConfig) -> int:
     return done
 
 
+def _load_meta_map(path: Path, pdfs: tuple[Path, ...]) -> list[SourceMeta | None]:
+    """Load a JSON ``{pdf_path: SourceMeta}`` map (e.g. built by a papis wrapper from
+    info.yaml) and align it to ``pdfs`` by absolute path -- a PDF with no entry gets None, so
+    refinery falls back to its OCR'd title. Matching by path (not position) can't misattribute
+    metadata to the wrong paper."""
+    raw = json.loads(path.read_text())
+    by_abspath = {os.path.abspath(os.path.expanduser(k)): v for k, v in raw.items()}
+    return [by_abspath.get(os.path.abspath(str(p))) for p in pdfs]
+
+
 def _refine(
     pdf: Path,
     out: Path,
@@ -170,7 +195,7 @@ def _refine(
     work_dir: Path,
     cfg: RefineryConfig,
     force_parse: bool = False,
-    source_doi: str | None = None,
+    source: dict | None = None,
 ) -> tuple[list[Chunk], list[str]]:
     """Run the pipeline; returns the chunks plus human-readable summary lines to echo.
 
@@ -182,7 +207,7 @@ def _refine(
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     parsed = parse_pdf_cached(pdf, work_dir, cfg.parse, force=force_parse)
-    return _refine_parsed(parsed, pdf, out, citations_out, work_dir, cfg, source_doi)
+    return _refine_parsed(parsed, pdf, out, citations_out, work_dir, cfg, source)
 
 
 def _refine_parsed(
@@ -192,7 +217,7 @@ def _refine_parsed(
     citations_out: Path,
     work_dir: Path,
     cfg: RefineryConfig,
-    source_doi: str | None = None,
+    source: dict | None = None,
 ) -> tuple[list[Chunk], list[str]]:
     """The post-parse pipeline for one already-parsed paper: {figures+enrich ||
     citations} -> chunk -> write manifests. Returns the chunks plus summary lines.
@@ -214,7 +239,7 @@ def _refine_parsed(
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         citations_future = (
-            pool.submit(_run_citations, parsed, cfg, work_dir, source_doi)
+            pool.submit(_run_citations, parsed, cfg, work_dir, source)
             if parsed.references
             else None
         )
@@ -300,6 +325,7 @@ def refine(
     work_dir: Path | None = None,
     force_parse: bool = False,
     doi: str | None = None,
+    source: SourceMeta | None = None,
 ) -> RefineResult:
     """Run the full pipeline on one PDF and return its chunks + artifact paths.
 
@@ -310,9 +336,13 @@ def refine(
     exactly like the ``refinery`` CLI. Output locations default next to the PDF; override
     any of them explicitly. ``cfg`` defaults to ``load_config()``.
 
-    Pass the source paper's ``doi`` (papis has it in info.yaml) to enable the S2
-    bulk-references fast-path -- one call fetches the paper's whole reference list instead
-    of a per-reference provider search. Without it, the OCR'd title is used opportunistically.
+    Pass ``source`` -- a ``SourceMeta`` bundle of what a caller already knows about the paper
+    (``doi``/``title``/``year``/``authors``; papis has these in info.yaml) -- so refinery
+    doesn't re-derive the paper's identity from OCR. It makes source identification for the S2
+    bulk-references fast-path reliable (one call fetches the whole reference list instead of a
+    per-reference search). ``doi=`` is a shorthand that fills the bundle's doi if absent. All
+    optional: with nothing, refinery falls back to the OCR'd title exactly as before. Passing
+    ``source`` adds no dependency -- it's plain data.
 
     Returns refinery's own types/paths only -- no paper-qa objects cross this boundary; the
     consumer owns converting chunks into whatever its indexer wants (it may read
@@ -322,7 +352,8 @@ def refine(
     cfg = cfg or load_config()
     out, citations_out, work_dir = _default_outputs(pdf, out, citations_out, work_dir)
     chunks, _summary = _refine(
-        pdf, out, citations_out, work_dir, cfg, force_parse=force_parse, source_doi=doi
+        pdf, out, citations_out, work_dir, cfg, force_parse=force_parse,
+        source=_merge_doi(source, doi),
     )
     return RefineResult(
         chunks=chunks, chunks_path=out, citations_path=citations_out, work_dir=work_dir
@@ -337,6 +368,7 @@ def refine_many(
     force_parse: bool = False,
     workers: int = 4,
     ocr_workers: int = 2,
+    sources: Sequence[SourceMeta | None] | None = None,
 ) -> Iterator[RefineResult]:
     """Refine many PDFs concurrently, yielding each ``RefineResult`` as it finishes.
 
@@ -362,26 +394,36 @@ def refine_many(
     at a time on a shared backend while each finished parse's network stages overlap the
     next paper's OCR (``ocr_workers`` is not used there -- see ``_stream_serial_ocr``).
 
-    Outputs default next to each PDF, exactly like ``refine``. Pass ``dois`` (aligned to
-    ``pdfs``) to feed each paper's DOI into the S2 bulk-references fast-path. A paper that
-    fails (corrupt PDF, provider outage, an OCR call the cloud never fulfilled) is logged
-    and skipped rather than failing the batch.
+    Outputs default next to each PDF, exactly like ``refine``. Pass ``sources`` (a list of
+    ``SourceMeta`` bundles aligned to ``pdfs``) to feed each paper's known metadata
+    (doi/title/year/authors) into the source-identification fast-path -- see ``refine``.
+    ``dois`` is the older shorthand (a per-paper doi); when both are given they're merged
+    per paper (the bundle's own doi wins). A paper that fails (corrupt PDF, provider outage,
+    an OCR call the cloud never fulfilled) is logged and skipped rather than failing the batch.
     """
     pdfs = [Path(p) for p in pdfs]
     if dois is not None and len(dois) != len(pdfs):
         raise ValueError(f"dois has {len(dois)} entries but there are {len(pdfs)} pdfs")
+    if sources is not None and len(sources) != len(pdfs):
+        raise ValueError(f"sources has {len(sources)} entries but there are {len(pdfs)} pdfs")
     cfg = cfg or load_config()
-    doi_list: list[str | None] = list(dois) if dois is not None else [None] * len(pdfs)
-    # a real function (not a bare generator) so the arg validation above raises eagerly,
-    # at the call, rather than being deferred to the first ``next()``.
+    # one merged bundle per paper (sources bundle + dois shorthand). A real function (not a
+    # bare generator) so the arg validation above raises eagerly at the call, not at first next().
+    src_list: list[dict] = [
+        _merge_doi(
+            sources[i] if sources is not None else None,
+            dois[i] if dois is not None else None,
+        )
+        for i in range(len(pdfs))
+    ]
     if cfg.parse.mode == "maas":
-        return _stream_parallel(pdfs, doi_list, cfg, force_parse, workers, ocr_workers)
-    return _stream_serial_ocr(pdfs, doi_list, cfg, force_parse, workers)
+        return _stream_parallel(pdfs, src_list, cfg, force_parse, workers, ocr_workers)
+    return _stream_serial_ocr(pdfs, src_list, cfg, force_parse, workers)
 
 
 def _refine_one(
     pdf: Path,
-    doi: str | None,
+    source: dict | None,
     cfg: RefineryConfig,
     force_parse: bool,
     ocr_gate: threading.Semaphore,
@@ -399,14 +441,14 @@ def _refine_one(
     logger.info("%s: refine start", pdf.name)
     with ocr_gate:
         parsed = parse_pdf_cached(pdf, work_dir, cfg.parse, force=force_parse)
-    chunks, _summary = _refine_parsed(parsed, pdf, out, citations_out, work_dir, cfg, doi)
+    chunks, _summary = _refine_parsed(parsed, pdf, out, citations_out, work_dir, cfg, source)
     logger.info("%s: done (%d chunks) -- streaming result", pdf.name, len(chunks))
     return RefineResult(chunks, out, citations_out, work_dir)
 
 
 def _stream_parallel(
     pdfs: list[Path],
-    dois: list[str | None],
+    sources: list[dict],
     cfg: RefineryConfig,
     force_parse: bool,
     workers: int,
@@ -432,8 +474,8 @@ def _stream_parallel(
     pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="refine")
     try:
         futures = {
-            pool.submit(_refine_one, pdf, doi, cfg, force_parse, ocr_gate): pdf
-            for pdf, doi in zip(pdfs, dois, strict=True)
+            pool.submit(_refine_one, pdf, source, cfg, force_parse, ocr_gate): pdf
+            for pdf, source in zip(pdfs, sources, strict=True)
         }
         for fut in as_completed(futures):
             pdf = futures[fut]
@@ -495,7 +537,7 @@ def _parse_for_batch(
 
 def _stream_serial_ocr(
     pdfs: list[Path],
-    dois: list[str | None],
+    sources: list[dict],
     cfg: RefineryConfig,
     force_parse: bool,
     network_workers: int,
@@ -532,7 +574,7 @@ def _stream_serial_ocr(
 
     def _produce(net_pool: ThreadPoolExecutor) -> None:
         try:
-            for n, (pdf, doi) in enumerate(zip(pdfs, dois, strict=True), start=1):
+            for n, (pdf, source) in enumerate(zip(pdfs, sources, strict=True), start=1):
                 out, citations_out, work_dir = _default_outputs(pdf, None, None, None)
                 try:
                     parsed = _parse_for_batch(pdf, work_dir, cfg, backend, force_parse)
@@ -552,7 +594,7 @@ def _stream_serial_ocr(
                     len(pdfs),
                 )
                 fut = net_pool.submit(
-                    _refine_parsed, parsed, pdf, out, citations_out, work_dir, cfg, doi
+                    _refine_parsed, parsed, pdf, out, citations_out, work_dir, cfg, source
                 )
                 fut.add_done_callback(_on_network_done(pdf, out, citations_out, work_dir))
         finally:
@@ -666,7 +708,8 @@ def main(
         summary = _rechunk(pdf, out, work_dir, cfg)
     else:
         _chunks, summary = _refine(
-            pdf, out, citations_out, work_dir, cfg, force_parse=force_parse, source_doi=doi
+            pdf, out, citations_out, work_dir, cfg, force_parse=force_parse,
+            source=_merge_doi(None, doi),
         )
     click.echo("\n".join(summary))
 
@@ -697,6 +740,14 @@ def main(
     "below your z.ai tier's OCR concurrency (~2-3); higher risks 429s.",
 )
 @click.option(
+    "--meta-map",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="JSON file mapping each PDF path to a SourceMeta bundle {doi,title,year,authors} "
+    "(e.g. built from papis info.yaml). Fed into source identification; a PDF absent from the "
+    "map falls back to its OCR'd title. Matched by path, so it can't misattribute.",
+)
+@click.option(
     "--from",
     "from_stage",
     type=click.Choice(["chunk"]),
@@ -709,6 +760,7 @@ def main_many(
     force_parse: bool,
     workers: int,
     ocr_workers: int,
+    meta_map: Path | None,
     from_stage: str | None,
 ) -> None:
     """Refine many PDFs concurrently, writing each <pdf>.chunks.json / .citations.json.
@@ -720,17 +772,20 @@ def main_many(
 
     ``--from chunk`` re-chunks each paper's saved refinery.md instead (no OCR/network).
 
-    DOIs aren't taken here -- refinery falls back to each paper's OCR'd title for the citation
-    stage; use ``refinery <pdf> --doi`` per paper when a specific DOI matters.
+    ``--meta-map FILE`` feeds each paper's known metadata (doi/title/year/authors, from a
+    papis wrapper) into source identification; without it refinery falls back to the OCR'd
+    title. It's optional complementary data -- no papis dependency.
     """
     _setup_logging()
     cfg = load_config()
     if from_stage == "chunk":
         done = _rechunk_many(pdfs, cfg)
     else:
+        sources = _load_meta_map(meta_map, pdfs) if meta_map is not None else None
         done = 0
         for result in refine_many(
-            list(pdfs), cfg, force_parse=force_parse, workers=workers, ocr_workers=ocr_workers
+            list(pdfs), cfg, force_parse=force_parse, workers=workers,
+            ocr_workers=ocr_workers, sources=sources,
         ):
             done += 1
             click.echo(
