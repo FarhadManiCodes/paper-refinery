@@ -42,6 +42,7 @@ from .enrich import enrich_markdown
 from .figures import describe_figure, make_client
 from .parse import ParseResult
 from .parse_cache import load_checkpoint, parse_pdf_cached
+from .pdf_split import merge_parse_results, page_count, split_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +190,59 @@ def _load_meta_map(path: Path, pdfs: tuple[Path, ...]) -> list[SourceMeta | None
     return [by_abspath.get(os.path.abspath(str(p))) for p in pdfs]
 
 
+def _parse_maybe_split(
+    pdf: Path,
+    work_dir: Path,
+    cfg: RefineryConfig,
+    backend: OcrBackend | None = None,
+    force_parse: bool = False,
+) -> ParseResult:
+    """``parse_pdf_cached``, transparently splitting first when the PDF exceeds
+    ``cfg.parse.max_pages_per_part`` -- cloud OCR hard-caps a single request's page
+    count (see ``pdf_split.py``). A PDF within the limit is parsed exactly as before --
+    the only added cost is the ``page_count`` check.
+
+    Each part gets its own ``work_dir/parts/part_N/`` checkpoint, so re-running an
+    unchanged book skips OCR for every part. Reuses ``backend`` across parts when given;
+    spawns and reuses its own for the duration of this call otherwise (matches
+    ``parse_pdf``'s own convention).
+    """
+    if page_count(pdf) <= cfg.parse.max_pages_per_part:
+        if backend is not None:
+            return parse_pdf_cached(pdf, work_dir, cfg.parse, backend=backend, force=force_parse)
+        return parse_pdf_cached(pdf, work_dir, cfg.parse, force=force_parse)
+
+    parts_dir = work_dir / "parts"
+    parts = split_pdf(pdf, parts_dir, cfg.parse.max_pages_per_part)
+    logger.info(
+        "%s: %d pages > %d -- split into %d parts for OCR",
+        pdf.name,
+        sum(n for _, n in parts),
+        cfg.parse.max_pages_per_part,
+        len(parts),
+    )
+
+    def _parse_parts(active_backend: OcrBackend) -> ParseResult:
+        results = [
+            parse_pdf_cached(
+                part_path,
+                parts_dir / f"part_{i}",
+                cfg.parse,
+                backend=active_backend,
+                force=force_parse,
+            )
+            for i, (part_path, _n) in enumerate(parts)
+        ]
+        return merge_parse_results(
+            results, [n for _, n in parts], work_dir / cfg.parse.figures_dir_name
+        )
+
+    if backend is not None:
+        return _parse_parts(backend)
+    with ocr_backend(cfg.parse) as own:
+        return _parse_parts(own)
+
+
 def _refine(
     pdf: Path,
     out: Path,
@@ -207,7 +261,7 @@ def _refine(
     next paper OCRs.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
-    parsed = parse_pdf_cached(pdf, work_dir, cfg.parse, force=force_parse)
+    parsed = _parse_maybe_split(pdf, work_dir, cfg, force_parse=force_parse)
     return _refine_parsed(parsed, pdf, out, citations_out, work_dir, cfg, source)
 
 
@@ -353,7 +407,12 @@ def refine(
     cfg = cfg or load_config()
     out, citations_out, work_dir = _default_outputs(pdf, out, citations_out, work_dir)
     chunks, _summary = _refine(
-        pdf, out, citations_out, work_dir, cfg, force_parse=force_parse,
+        pdf,
+        out,
+        citations_out,
+        work_dir,
+        cfg,
+        force_parse=force_parse,
         source=_merge_doi(source, doi),
     )
     return RefineResult(
@@ -441,7 +500,7 @@ def _refine_one(
     work_dir.mkdir(parents=True, exist_ok=True)
     logger.info("%s: refine start", pdf.name)
     with ocr_gate:
-        parsed = parse_pdf_cached(pdf, work_dir, cfg.parse, force=force_parse)
+        parsed = _parse_maybe_split(pdf, work_dir, cfg, force_parse=force_parse)
     chunks, _summary = _refine_parsed(parsed, pdf, out, citations_out, work_dir, cfg, source)
     logger.info("%s: done (%d chunks) -- streaming result", pdf.name, len(chunks))
     return RefineResult(chunks, out, citations_out, work_dir)
@@ -525,6 +584,11 @@ def _parse_for_batch(
     Checks the checkpoint first (unless ``force_parse``) so a hit skips OCR entirely --
     the backend stays unspawned. Only a real miss calls ``backend.get()``, keeping OCR
     the single serial bottleneck without ever spinning up a server the batch doesn't need.
+    This pre-check only ever matches a normal (unsplit) paper's checkpoint -- a split
+    book's checkpoints live per-part under ``work_dir/parts/``, so a fully-cached split
+    book still spawns the backend here before ``_parse_maybe_split`` discovers, per
+    part, that there's nothing to OCR. Rare enough (a book, re-run, inside a selfhosted
+    batch) not to be worth the extra bookkeeping to avoid.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     if not force_parse:
@@ -533,7 +597,7 @@ def _parse_for_batch(
             logger.info("%s: parse checkpoint hit (no OCR)", pdf.name)
             return cached
     logger.info("%s: OCR start (serial -- the batch's one shared-GPU stage)", pdf.name)
-    return parse_pdf_cached(pdf, work_dir, cfg.parse, backend=backend.get(), force=force_parse)
+    return _parse_maybe_split(pdf, work_dir, cfg, backend=backend.get(), force_parse=force_parse)
 
 
 def _stream_serial_ocr(
@@ -709,7 +773,12 @@ def main(
         summary = _rechunk(pdf, out, work_dir, cfg)
     else:
         _chunks, summary = _refine(
-            pdf, out, citations_out, work_dir, cfg, force_parse=force_parse,
+            pdf,
+            out,
+            citations_out,
+            work_dir,
+            cfg,
+            force_parse=force_parse,
             source=_merge_doi(None, doi),
         )
     click.echo("\n".join(summary))
@@ -785,8 +854,12 @@ def main_many(
         sources = _load_meta_map(meta_map, pdfs) if meta_map is not None else None
         done = 0
         for result in refine_many(
-            list(pdfs), cfg, force_parse=force_parse, workers=workers,
-            ocr_workers=ocr_workers, sources=sources,
+            list(pdfs),
+            cfg,
+            force_parse=force_parse,
+            workers=workers,
+            ocr_workers=ocr_workers,
+            sources=sources,
         ):
             done += 1
             click.echo(
@@ -801,9 +874,7 @@ def main_many(
 
 
 @click.command()
-@click.argument(
-    "citations_json", type=click.Path(exists=True, dir_okay=False, path_type=Path)
-)
+@click.argument("citations_json", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
     "--all",
     "include_all",

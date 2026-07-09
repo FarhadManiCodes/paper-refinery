@@ -74,6 +74,12 @@ class ParseConfig:
     glmocr_config_overrides: dict = field(default_factory=dict)
     #   dotted-path escape hatch into glmocr's own config (e.g. {"pipeline.max_workers": 1}
     #   to cut region-OCR concurrency on constrained hardware); forwarded as GlmOcr(_dotted=...)
+    max_pages_per_part: int = 100
+    #   z.ai's maas OCR endpoint hard-caps a single request at 100 pages (HTTP 400 above
+    #   it); a longer PDF (e.g. a book) is transparently split into <=this-many-page parts
+    #   (pdf_split.split_pdf), each parsed independently and glued back into one ParseResult
+    #   (pdf_split.merge_parse_results) before the rest of the pipeline runs, unaware a split
+    #   ever happened. No known cap in selfhosted mode -- raise this in config.toml there.
 
 
 @dataclass(slots=True)

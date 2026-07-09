@@ -1,5 +1,6 @@
 """Tests for the CLI: the chunks-manifest writer and the main orchestration wiring."""
 
+import contextlib
 import json
 import logging
 import threading
@@ -12,6 +13,15 @@ from paper_refinery.chunker import Chunk
 from paper_refinery.cli import _relativize_image_links, write_chunks
 from paper_refinery.config import RefineryConfig
 from paper_refinery.parse import ParseResult
+
+
+@pytest.fixture(autouse=True)
+def _single_part_pdf(monkeypatch):
+    """Every test's fake PDF (often not even real PDF bytes) is under the split
+    threshold by default, so _parse_maybe_split's page_count check never tries to
+    actually open it -- the split path itself is exercised by dedicated tests below,
+    which override this."""
+    monkeypatch.setattr(cli, "page_count", lambda pdf: 1)
 
 
 def test_relativize_image_links_rewrites_absolute_paths(tmp_path):
@@ -466,6 +476,55 @@ def test_force_parse_flag_controls_the_checkpoint_bypass(tmp_path, monkeypatch):
     assert seen["force"] is True  # flag forces a re-OCR
 
 
+def test_main_splits_long_pdf_into_parts_and_glues_before_chunking(tmp_path, monkeypatch):
+    # a PDF over max_pages_per_part must be split, each part parsed on its own, and the
+    # results glued into one ParseResult (page markers offset) before chunking runs --
+    # exercised end to end through the CLI, only the OCR/split legs themselves are faked.
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    part_paths = [tmp_path / "part_0.pdf", tmp_path / "part_1.pdf"]
+    for p in part_paths:
+        p.write_bytes(b"%PDF-1.4 fake")
+
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+    monkeypatch.setattr(cli, "page_count", lambda p: 150)  # over the 100-page cap
+    fake_parts = [(part_paths[0], 100), (part_paths[1], 50)]
+    monkeypatch.setattr(cli, "split_pdf", lambda pdf, out_dir, max_pages: fake_parts)
+
+    @contextlib.contextmanager
+    def fake_ocr_backend(cfg=None):
+        yield object()
+
+    monkeypatch.setattr(cli, "ocr_backend", fake_ocr_backend)
+
+    seen_parse_calls = []
+
+    def fake_parse(p, d, c, backend=None, force=False):
+        seen_parse_calls.append(p)
+        idx = part_paths.index(p)
+        return ParseResult(markdown=f"<page_number>1</page_number>\n\npart{idx}")
+
+    monkeypatch.setattr(cli, "parse_pdf_cached", fake_parse)
+    monkeypatch.setattr(cli, "make_client", lambda cfg: object())
+    monkeypatch.setattr(cli, "enrich_markdown", lambda parsed, cfg, describe: parsed.markdown)
+
+    seen_chunk_md = {}
+
+    def fake_chunk(md, cfg):
+        seen_chunk_md["md"] = md
+        return [Chunk(md, 0, 1, 1)]
+
+    monkeypatch.setattr(cli, "chunk_markdown", fake_chunk)
+
+    result = CliRunner().invoke(cli.main, [str(pdf)])
+    assert result.exit_code == 0, result.output
+    assert seen_parse_calls == part_paths  # both parts parsed, in order
+    md = seen_chunk_md["md"]
+    assert "<page_number>1</page_number>" in md  # part 0, unshifted
+    assert "<page_number>101</page_number>" in md  # part 1, offset by part 0's 100 pages
+    assert "part0" in md and "part1" in md
+
+
 def test_from_chunk_rechunks_refinery_md_without_running_upstream(tmp_path, monkeypatch):
     pdf = tmp_path / "p.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")
@@ -646,9 +705,7 @@ def test_refine_many_maas_caps_ocr_concurrency(tmp_path, monkeypatch):
         return ParseResult(markdown=pdf.stem)
 
     monkeypatch.setattr(cli, "parse_pdf_cached", fake_parse)
-    monkeypatch.setattr(
-        cli, "_refine_parsed", lambda *a, **k: ([Chunk("MD", 0, 1, 1)], [])
-    )
+    monkeypatch.setattr(cli, "_refine_parsed", lambda *a, **k: ([Chunk("MD", 0, 1, 1)], []))
 
     results = list(cli.refine_many(pdfs, workers=3, ocr_workers=1))
     assert len(results) == 3
