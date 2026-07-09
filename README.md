@@ -187,6 +187,7 @@ In selfhosted mode `ZHIPU_API_KEY` isn't needed; in the default maas mode `HF_TO
 ```bash
 refinery path/to/paper.pdf            # one PDF -> paper.chunks.json, .citations.json, .refinery/
 refinery-batch a.pdf b.pdf c.pdf      # many PDFs, refined concurrently (each -> its own sidecars)
+refinery-export-citations paper.citations.json   # -> papis/CrossRef `citations:` YAML (copy-paste)
 ```
 
 `refinery-batch` runs the papers through `refine_many`: cloud OCR is gated to `--ocr-workers`
@@ -194,9 +195,13 @@ refinery-batch a.pdf b.pdf c.pdf      # many PDFs, refined concurrently (each ->
 (default 4). Papers print in completion order; one that fails is logged and skipped (and if *nothing*
 refines, it exits non-zero, so a `&&` chain stops). `--force-parse` re-OCRs all; `--from chunk`
 re-chunks each saved `refinery.md` only (no OCR/network — for library-wide chunk tuning).
-(Per-paper DOIs aren't taken here — use the single-PDF
-`refinery <pdf> --doi` when a DOI matters.) A shell wrapper can drive a whole papis library
-with it, e.g. `refinery-batch $(papis list --file) && papis ask index`.
+`--meta-map FILE` (a JSON `{pdf_path: {doi, title, year, authors, references}}`) feeds each
+paper's known metadata — see the **metadata channel** below. A shell wrapper can drive a whole
+papis library, e.g. `refinery-batch $(papis list --file) && papis ask index`.
+
+`refinery-export-citations <pdf>.citations.json` prints the verified references as a
+papis/CrossRef `citations:` YAML block (for pasting into an `info.yaml`); `--all` includes
+unverified entries.
 
 Single-PDF options (all optional; outputs default next to the PDF):
 
@@ -215,24 +220,25 @@ owns turning chunks into whatever its indexer wants.
 
 ```python
 from pathlib import Path
-from paper_refinery import refine, refine_many, RefineResult
+from paper_refinery import refine, refine_many, RefineResult, SourceMeta, to_papis_citations
 
-# one paper
-result: RefineResult = refine(Path("paper.pdf"), doi="10.1234/abc")
+# one paper — pass what you already know (from papis info.yaml) so refinery doesn't
+# re-derive the paper's identity/references from OCR (all optional, graceful fallback)
+result: RefineResult = refine(Path("paper.pdf"), source={"doi": "10.1234/abc", "title": ...})
 
-# many papers — OCR runs serially on one shared OCR backend while each paper's
-# network stages (figures, citations) overlap the next paper's OCR. Yields each
-# RefineResult in COMPLETION order (not input order) as soon as it is ready, so a
-# caller can index each paper the moment it finishes rather than blocking on the batch.
-for result in refine_many(pdfs, dois=dois):   # dois aligned to pdfs, entries may be None
+# many papers — each paper's whole pipeline runs concurrently on a pool of `workers`, with
+# OCR gated separately to `ocr_workers`. Yields each RefineResult in COMPLETION order (not
+# input order) as soon as it is ready, so a caller can index each paper the moment it
+# finishes rather than blocking on the batch.
+for result in refine_many(pdfs, sources=sources):   # sources aligned to pdfs, entries may be None
     index(result)
 ```
 
-`refine(pdf, cfg=None, *, out=None, citations_out=None, work_dir=None, force_parse=False, doi=None) -> RefineResult`
+`refine(pdf, cfg=None, *, out=None, citations_out=None, work_dir=None, force_parse=False, doi=None, source=None) -> RefineResult`
 reuses the parse checkpoint (pass `force_parse=True` to re-OCR). `cfg` defaults to
-`load_config()`.
+`load_config()`. `source` is the metadata channel (below); `doi=` is a shorthand folded into it.
 
-`refine_many(pdfs, cfg=None, *, dois=None, force_parse=False, workers=4, ocr_workers=2) -> Iterator[RefineResult]`.
+`refine_many(pdfs, cfg=None, *, dois=None, force_parse=False, workers=4, ocr_workers=2, sources=None) -> Iterator[RefineResult]`.
 In the default cloud (`maas`) mode each paper runs its whole pipeline concurrently on a pool
 of `workers`, and results stream out in completion order. **OCR is gated separately** by
 `ocr_workers` (default 2): the cloud OCR endpoint rate-limits concurrent requests (z.ai
@@ -256,15 +262,43 @@ never fulfilled (an empty parse is caught and treated as a failure, never writte
 | `citations_path: Path` | `<pdf>.citations.json` (written only when the paper had references) |
 | `work_dir: Path` | `<pdf>.refinery/` — refinery.md, references.md, figures/, parse_cache/ |
 
+### The metadata channel (optional; papis integration)
+
+`refine(source=…)` / `refine_many(sources=…)` / `refinery-batch --meta-map` accept a
+**`SourceMeta`** bundle of what a caller already knows about the paper (papis has it in
+`info.yaml`), so refinery doesn't re-derive it from OCR. Every key is optional and degrades
+gracefully — passing it adds **no dependency**, it's plain data.
+
+```python
+source: SourceMeta = {
+    "doi": "10.1234/abc", "title": "…", "year": 2022,
+    "authors": [{"family": "Smith", "given": "J"}],
+    "references": [ ... ],   # the paper's own bibliography (papis info.yaml `citations:`)
+}
+```
+
+- `doi`/`title`/`year`/`authors` strengthen **source identification** for the S2
+  bulk-references fast-path (a confidently-identified source ⇒ its whole reference list
+  resolves in one call).
+- `references` (the paper's own bibliography — refinery's `{title,doi,year,authors}` shape *or*
+  CrossRef-reference keys `article-title`/`DOI`/`author`) are matched against the printed
+  references **locally, before any network call** (`match="papis"`). If they cover the whole
+  bibliography, the S2 fetch is **skipped entirely** — resolution with zero network.
+
+**`to_papis_citations(references, *, verified_only=True)`** is the reverse: it renders
+refinery's resolved references back into the papis/CrossRef `citations:` shape (also via the
+`refinery-export-citations` CLI), for enriching a papis library with references it was missing.
+
 ### Output shapes
 
 `<pdf>.chunks.json`:
 
 ```jsonc
 {
+  "schema_version": 1,               // versioned envelope so a consumer can detect an
+  "parser": "paper-refinery",        // incompatible format instead of silently mis-parsing
   "source_pdf": "…/paper.pdf",
   "docname": "paper",
-  "parser": "paper-refinery",
   "chunks": [
     { "index": 0, "text": "…", "page_start": 1, "page_end": 2,
       "overlap_chars": 0, "overlap_mode": "-" }
@@ -276,10 +310,12 @@ never fulfilled (an empty parse is caught and treated as a failure, never writte
 
 ```jsonc
 {
+  "schema_version": 1,
+  "parser": "paper-refinery",
   "source_pdf": "…/paper.pdf",
   "docname": "paper",
   "references": [ { "title": "…", "year": 2020, "authors": [...], "doi": "…",
-                    "verified": true, "match": "crossref", "...": "..." } ],
+                    "verified": true, "match": "crossref|bulk|papis|doi", "...": "..." } ],
   "linking": {
     "style": "numbered-bracket|numbered-paren|author-year",
     "markers": [ { "text": "[1]", "refs": [0] } ],

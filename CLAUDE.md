@@ -95,7 +95,16 @@ citation_resolution.py   layer 2/3: verify/enrich each reference against CrossRe
                           one S2 bulk /references call (filled from OpenAlex referenced_works
                           when S2 is publisher-elided), match each printed ref locally, and
                           fall back to the per-entry provider search only for what doesn't
-                          match -- decides what to trust from citation_providers.py's answers
+                          match -- decides what to trust from citation_providers.py's answers.
+                          METADATA CHANNEL: SourceMeta (external-input sibling of SourcePaper)
+                          carries what a caller already knows (doi/title/year/authors +
+                          references); source_from_meta -> SourcePaper (strengthens source ID;
+                          _source_confident is two-tier so year/author never veto a strong
+                          title). Caller-supplied `references` (papis citations, any of
+                          refinery's or CrossRef-reference shape) are normalized into a local
+                          bulk pool matched FIRST (match="papis"); the S2 fetch is skipped
+                          entirely when they cover every printed ref. to_papis_citations() is
+                          the inverse (resolved refs -> papis/CrossRef citations: shape).
 citation_linking.py      layer 4: deterministic (no LLM) in-text marker detection against
                           the layer-1 EXTRACTED (printed-form) entries, plus the
                           resolution-verified-only `[surname_year]` citekey rewrite
@@ -113,12 +122,15 @@ cli.py                    orchestrate the above (citations run concurrently with
                           OCR gated separately to `ocr_workers`=2 (z.ai rate-limits ~2-3
                           concurrent OCR calls; the network tails run at the higher `workers`);
                           selfhosted keeps the serial-OCR-on-one-shared-backend path).
-                          Two console scripts: `refinery` (one PDF; main()) and
-                          `refinery-batch` (many PDFs; main_many() -> refine_many, flags
-                          --workers/--ocr-workers/--force-parse). CLI flags --force-parse /
-                          --from chunk / --doi. parse_pdf raises on a zero-region OCR result
-                          (maas SDK reports an exhausted 429 as empty) so a throttled paper is
-                          skipped, never written as a 0-chunk manifest.
+                          refine()/refine_many() take a SourceMeta `source`/`sources` bundle
+                          (see citation_resolution) -- `doi=`/`dois=` are shorthands folded in.
+                          Three console scripts: `refinery` (one PDF; main()), `refinery-batch`
+                          (many PDFs; main_many() -> refine_many; --workers/--ocr-workers/
+                          --force-parse/--from chunk/--meta-map FILE={pdf_path: SourceMeta}),
+                          and `refinery-export-citations` (main_export_citations() ->
+                          to_papis_citations -> papis citations: YAML). parse_pdf raises on a
+                          zero-region OCR result (maas SDK reports an exhausted 429 as empty) so
+                          a throttled paper is skipped, never written as a 0-chunk manifest.
 ```
 
 ### Key cross-cutting contracts
