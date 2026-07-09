@@ -57,6 +57,7 @@ class SourcePaper:
     title: str | None = None
     year: int | None = None
     authors: list[dict] | None = None
+    references: list[dict] | None = None  # the paper's own bibliography, supplied by a caller
 
 
 class SourceMeta(TypedDict, total=False):
@@ -66,8 +67,11 @@ class SourceMeta(TypedDict, total=False):
     refinery derives from OCR, so passing it never creates a dependency -- it only lets
     refinery skip re-deriving what's already known.
 
-    ``references`` (the paper's own reference list) is reserved for a later phase and ignored
-    for now.
+    ``references`` is the paper's own bibliography if the caller already has it (papis stores
+    it in info.yaml ``citations:``, from CrossRef). Each entry may use refinery's candidate
+    shape (``title``/``doi``/``year``/``authors``) or common CrossRef-reference keys
+    (``article-title``/``volume-title``/``DOI``/``author``) -- both are accepted. It's matched
+    against the printed references locally (no network) before any provider search.
     """
 
     doi: str | None
@@ -75,7 +79,7 @@ class SourceMeta(TypedDict, total=False):
     title: str | None
     year: int | None
     authors: list[dict]  # [{"family": ..., "given": ...}, ...]
-    references: list[dict]  # the paper's own bibliography (reserved; not yet consumed)
+    references: list[dict]  # the paper's own bibliography (see above)
 
 
 def source_from_meta(
@@ -92,6 +96,7 @@ def source_from_meta(
         title=m.get("title") or fallback_title,
         year=m.get("year"),
         authors=m.get("authors"),
+        references=m.get("references"),
     )
 
 
@@ -373,6 +378,51 @@ def _dedup_candidates(candidates: list[dict]) -> list[dict]:
     return out
 
 
+def _normalize_caller_references(entries: list[dict]) -> list[dict]:
+    """Turn caller-supplied reference entries (``SourceMeta.references``) into bulk candidates.
+
+    Accepts refinery's candidate shape (title/doi/year/authors) OR common CrossRef-reference
+    keys (article-title/volume-title/DOI/author-as-string), so a papis wrapper can pass
+    info.yaml ``citations:`` almost verbatim. Entries with neither a title nor a DOI are
+    dropped (nothing to match on). Each candidate is tagged ``_pool="papis"`` so a hit is
+    reported as ``match="papis"`` (vs ``"bulk"`` for the S2 pool).
+    """
+    out: list[dict] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        title = (
+            e.get("title")
+            or e.get("article-title")
+            or e.get("volume-title")
+            or e.get("unstructured")
+        )
+        doi = e.get("doi") or e.get("DOI")
+        if not (title or doi):
+            continue
+        raw_year = e.get("year")
+        try:
+            year = int(str(raw_year)[:4]) if raw_year else None
+        except ValueError:
+            year = None
+        authors = e.get("authors")
+        if not authors and e.get("author"):
+            a = e["author"]
+            authors = [{"family": a}] if isinstance(a, str) else a
+        out.append(
+            {
+                "title": title,
+                "doi": doi,
+                "year": year,
+                "authors": authors,
+                "source": "papis",
+                "provider_type": None,
+                "_pool": "papis",
+            }
+        )
+    return out
+
+
 def _source_references(
     source: SourcePaper | None, cfg: CitationConfig, n_refs: int
 ) -> list[dict] | None:
@@ -413,14 +463,14 @@ def _match_in_bulk(
         doi = doi.lower()
         for cand in bulk:
             if (cand.get("doi") or "").lower() == doi:
-                return _merge_candidate(dict(extracted), cand, "bulk")
+                return _merge_candidate(dict(extracted), cand, cand.get("_pool", "bulk"))
     best, best_sim = None, 0.0
     for cand in bulk:
         if _acceptable(extracted, cand, cfg):
             s = title_similarity(extracted.get("title"), cand.get("title"))
             if s > best_sim:
                 best, best_sim = cand, s
-    return _merge_candidate(dict(extracted), best, "bulk") if best is not None else None
+    return _merge_candidate(dict(extracted), best, best.get("_pool", "bulk")) if best else None
 
 
 def resolve_references(
@@ -441,8 +491,17 @@ def resolve_references(
     text's leading marker when possible.
     """
     padded = (list(extracted) + [{}] * len(raw_references))[: len(raw_references)]
-    # S2 (+ OpenAlex fill when S2 is short) fetched once; None -> pure per-entry path
-    bulk = _source_references(source, cfg, len(raw_references))
+    # Bulk candidate pool matched locally per printed ref (no network per ref). Caller-supplied
+    # references (papis citations, tagged match="papis") come FIRST -- they're free, need no
+    # source lookup, and survive S2 throttling -- then the S2/OpenAlex source references
+    # (match="bulk") add coverage. Concatenated, NOT cross-deduped: _match_in_bulk returns the
+    # single best hit per ref, so keeping both pools lets the better-matching candidate win. A
+    # cross-pool dedup would let a papis entry DISPLACE a provider entry that matched the printed
+    # ref better (observed live on brunton: 44 bulk hits collapsed to 8, the rest lost to the
+    # network fallback). None -> pure per-entry path.
+    caller = _normalize_caller_references(source.references) if source and source.references else []
+    provider_bulk = _source_references(source, cfg, len(raw_references)) or []
+    bulk = [*caller, *provider_bulk] or None
 
     def resolve_one(i: int) -> dict:
         raw = raw_references[i]

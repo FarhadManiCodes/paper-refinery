@@ -500,6 +500,41 @@ def test_dedup_candidates_by_doi_then_title():
     assert [c["title"] for c in out] == ["Paper A", "Paper B"]
 
 
+def test_normalize_caller_references_handles_crossref_and_refinery_shapes():
+    entries = [
+        {"article-title": "T1", "DOI": "10.1/a", "year": "2007", "author": "Smith"},  # crossref
+        {"title": "T2", "doi": "10.2/b", "year": 2010, "authors": [{"family": "Doe"}]},  # refinery
+        {"volume-title": "Book Title", "year": "2008"},  # book, no doi -> kept (has a title)
+        {"year": "1999"},  # neither title nor doi -> dropped
+        "not a dict",  # ignored
+    ]
+    out = cr._normalize_caller_references(entries)
+    assert [c["title"] for c in out] == ["T1", "T2", "Book Title"]
+    assert out[0]["doi"] == "10.1/a" and out[0]["year"] == 2007
+    assert out[0]["authors"] == [{"family": "Smith"}] and out[0]["_pool"] == "papis"
+    assert out[2]["doi"] is None  # book kept on title alone
+
+
+def test_resolve_references_uses_caller_references_locally(monkeypatch):
+    # papis-supplied references match printed refs with NO network and report match="papis";
+    # no source lookup, no per-entry search needed
+    monkeypatch.setattr(cr, "s2_paper_id", lambda *a, **k: pytest.fail("no source lookup"))
+    monkeypatch.setattr(
+        cr, "verify_and_resolve", lambda *a, **k: pytest.fail("no per-entry search")
+    )
+    source = cr.SourcePaper(
+        references=[
+            {"article-title": "Attention Is All You Need", "DOI": "10.5/aiayn", "year": "2017"}
+        ]
+    )
+    raw = [{"page": 1, "number": "1", "text": "[1] Vaswani et al. Attention is all you need."}]
+    out = cr.resolve_references(
+        [{"title": "Attention is all you need"}], raw, _cfg(), source=source
+    )
+    assert out[0]["verified"] and out[0]["match"] == "papis"
+    assert out[0]["doi"] == "10.5/aiayn" and out[0]["year"] == 2017
+
+
 def test_match_in_bulk_by_shared_doi():
     bulk = [
         {"title": "Wrong", "doi": "10.9999/z", "source": "semanticscholar"},
