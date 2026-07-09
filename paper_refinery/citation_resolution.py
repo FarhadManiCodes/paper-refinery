@@ -482,30 +482,38 @@ def resolve_references(
     """Resolve a whole bibliography: layer-1 output positionally merged with parse.py's raw
     ``[{page, number, text}]`` list, each entry verified concurrently.
 
-    The file's one public orchestrator. When ``source`` identifies the paper in S2, its whole
-    reference list is fetched ONCE and each entry is matched locally (the fast-path); anything
-    unmatched -- or every entry when the source isn't found -- falls back to the per-entry
-    provider search. Deliberately does NOT call ``extract_references`` itself -- cli.py owns
-    sequencing. Output entries: ``{page, number, raw_text, ...resolved fields..., verified,
-    match, type}``, in input order. A missing parse-level ``number`` is recovered from the raw
-    text's leading marker when possible.
+    The file's one public orchestrator. Each printed ref is resolved locally (no per-ref
+    network) against, in order: (1) the caller's OWN references (papis ``citations:``, tagged
+    match="papis"), then (2) the source paper's references fetched ONCE from S2/OpenAlex
+    (match="bulk"); whatever neither covers falls back to a per-entry provider search. The S2
+    fetch is SKIPPED entirely when the caller's references already cover every printed ref --
+    so a paper with complete papis citations resolves with zero network. Deliberately does NOT
+    call ``extract_references`` itself -- cli.py owns sequencing. Output entries: ``{page,
+    number, raw_text, ...resolved fields..., verified, match, type}``, in input order; a
+    missing parse-level ``number`` is recovered from the raw text's leading marker.
     """
+    if not raw_references:
+        return []
     padded = (list(extracted) + [{}] * len(raw_references))[: len(raw_references)]
-    # Bulk candidate pool matched locally per printed ref (no network per ref). Caller-supplied
-    # references (papis citations, tagged match="papis") come FIRST -- they're free, need no
-    # source lookup, and survive S2 throttling -- then the S2/OpenAlex source references
-    # (match="bulk") add coverage. Concatenated, NOT cross-deduped: _match_in_bulk returns the
-    # single best hit per ref, so keeping both pools lets the better-matching candidate win. A
-    # cross-pool dedup would let a papis entry DISPLACE a provider entry that matched the printed
-    # ref better (observed live on brunton: 44 bulk hits collapsed to 8, the rest lost to the
-    # network fallback). None -> pure per-entry path.
+
+    # Pass 1: resolve each printed ref against the caller's own references (papis citations) --
+    # local, free, no source lookup, survives S2 throttling.
     caller = _normalize_caller_references(source.references) if source and source.references else []
-    provider_bulk = _source_references(source, cfg, len(raw_references)) or []
-    bulk = [*caller, *provider_bulk] or None
+    caller_hits: list[dict | None] = [
+        _match_in_bulk(padded[i], raw_references[i]["text"], caller, cfg) if caller else None
+        for i in range(len(raw_references))
+    ]
+    # Only fetch the S2/OpenAlex source references if the caller pool left gaps -- when papis
+    # already covered the whole bibliography we skip the source lookup + fetch entirely.
+    provider_bulk = (
+        [] if all(caller_hits) else (_source_references(source, cfg, len(raw_references)) or [])
+    )
 
     def resolve_one(i: int) -> dict:
         raw = raw_references[i]
-        resolved = _match_in_bulk(padded[i], raw["text"], bulk, cfg) if bulk is not None else None
+        resolved = caller_hits[i]
+        if resolved is None and provider_bulk:
+            resolved = _match_in_bulk(padded[i], raw["text"], provider_bulk, cfg)
         if resolved is None:
             resolved = verify_and_resolve(padded[i], raw["text"], cfg)
         entry = {
@@ -517,8 +525,6 @@ def resolve_references(
         entry["type"] = infer_type(entry, raw["text"])
         return entry
 
-    if not raw_references:
-        return []
     with ThreadPoolExecutor(max_workers=cfg.max_workers) as pool:
         return list(pool.map(resolve_one, range(len(raw_references))))
 

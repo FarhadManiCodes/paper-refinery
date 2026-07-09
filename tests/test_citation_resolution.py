@@ -535,6 +535,57 @@ def test_resolve_references_uses_caller_references_locally(monkeypatch):
     assert out[0]["doi"] == "10.5/aiayn" and out[0]["year"] == 2017
 
 
+def test_resolve_references_skips_s2_when_caller_covers_all(monkeypatch):
+    # when the caller's references resolve EVERY printed ref, the S2/OpenAlex source fetch is
+    # skipped entirely -- zero network ("don't re-resolve what papis already has")
+    monkeypatch.setattr(
+        cr,
+        "_source_references",
+        lambda *a, **k: pytest.fail("must not fetch S2 when papis covers all"),
+    )
+    monkeypatch.setattr(
+        cr, "verify_and_resolve", lambda *a, **k: pytest.fail("no per-entry search")
+    )
+    source = cr.SourcePaper(
+        references=[
+            {"article-title": "Alpha Study", "DOI": "10.1/a"},
+            {"article-title": "Beta Study", "DOI": "10.2/b"},
+        ]
+    )
+    raw = [
+        {"page": 1, "number": "1", "text": "[1] Alpha study. 2020."},
+        {"page": 1, "number": "2", "text": "[2] Beta study. 2021."},
+    ]
+    out = cr.resolve_references(
+        [{"title": "Alpha Study"}, {"title": "Beta Study"}], raw, _cfg(), source=source
+    )
+    assert all(o["match"] == "papis" and o["verified"] for o in out)
+
+
+def test_resolve_references_fetches_s2_only_for_caller_gaps(monkeypatch):
+    # a ref the caller lacks triggers the S2 fetch (once); the caller-covered ref stays "papis"
+    calls = {"s2": 0}
+
+    def fake_source_refs(src, cfg, n):
+        calls["s2"] += 1
+        return [{"title": "Gamma Study", "doi": "10.3/c", "source": "semanticscholar"}]
+
+    monkeypatch.setattr(cr, "_source_references", fake_source_refs)
+    monkeypatch.setattr(
+        cr, "verify_and_resolve", lambda *a, **k: pytest.fail("bulk should cover it")
+    )
+    source = cr.SourcePaper(references=[{"article-title": "Alpha Study", "DOI": "10.1/a"}])
+    raw = [
+        {"page": 1, "number": "1", "text": "[1] Alpha study."},
+        {"page": 1, "number": "2", "text": "[2] Gamma study."},
+    ]
+    out = cr.resolve_references(
+        [{"title": "Alpha Study"}, {"title": "Gamma Study"}], raw, _cfg(), source=source
+    )
+    assert calls["s2"] == 1
+    assert out[0]["match"] == "papis" and out[1]["match"] == "bulk"
+
+
 def test_match_in_bulk_by_shared_doi():
     bulk = [
         {"title": "Wrong", "doi": "10.9999/z", "source": "semanticscholar"},
