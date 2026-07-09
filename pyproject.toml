@@ -19,6 +19,8 @@ dependencies = [
   "python-dotenv>=1.0",           # loads API keys from ~/.config/paper-refinery/secrets/
                                    # (already transitive via glmocr; declared explicitly
                                    # since config.py imports it directly)
+  "pyyaml>=6.0",                  # refinery-export-citations emits papis/CrossRef citations:
+                                   # YAML (already transitive via glmocr; declared explicitly)
 ]
 
 [project.optional-dependencies]
@@ -30,6 +32,7 @@ local = ["glmocr[selfhosted]>=0.1.5"]
 [project.scripts]
 refinery = "paper_refinery.cli:main"                 # one PDF
 refinery-batch = "paper_refinery.cli:main_many"      # many PDFs, parallel (OCR-gated)
+refinery-export-citations = "paper_refinery.cli:main_export_citations"  # -> papis citations: YAML
 
 [build-system]
 requires = ["hatchling"]

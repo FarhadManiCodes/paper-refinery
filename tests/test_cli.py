@@ -113,6 +113,25 @@ def test_main_many_meta_map_feeds_sources_by_path(tmp_path, monkeypatch):
     assert captured["sources"] == [{"doi": "10.1/a", "title": "A", "year": 2020}, None]
 
 
+def test_main_export_citations_renders_papis_yaml(tmp_path):
+    cj = tmp_path / "p.citations.json"
+    cj.write_text(
+        json.dumps(
+            {
+                "references": [
+                    {"title": "Alpha", "doi": "10.1/a", "verified": True},
+                    {"title": "Guess", "verified": False},
+                ]
+            }
+        )
+    )
+    result = CliRunner().invoke(cli.main_export_citations, [str(cj)])
+    assert result.exit_code == 0, result.output
+    assert "citations:" in result.output
+    assert "article-title: Alpha" in result.output and "DOI: 10.1/a" in result.output
+    assert "Guess" not in result.output  # unverified skipped by default
+
+
 def test_main_many_requires_at_least_one_pdf():
     result = CliRunner().invoke(cli.main_many, [])
     assert result.exit_code != 0  # nargs=-1 required -> click usage error

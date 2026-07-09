@@ -35,6 +35,7 @@ from .citation_resolution import (
     format_resolution_report,
     resolve_references,
     source_from_meta,
+    to_papis_citations,
 )
 from .config import ParseConfig, RefineryConfig, load_config
 from .enrich import enrich_markdown
@@ -797,6 +798,31 @@ def main_many(
     # succeeds, since the produced sidecars are worth indexing and the count above flags it.
     if done == 0:
         raise SystemExit(1)
+
+
+@click.command()
+@click.argument(
+    "citations_json", type=click.Path(exists=True, dir_okay=False, path_type=Path)
+)
+@click.option(
+    "--all",
+    "include_all",
+    is_flag=True,
+    default=False,
+    help="Include unverified references too (default: verified only).",
+)
+def main_export_citations(citations_json: Path, include_all: bool) -> None:
+    """Render a <pdf>.citations.json's references as a papis/CrossRef ``citations:`` YAML block.
+
+    For pasting into a papis info.yaml (or a future write-back). Verified references only unless
+    ``--all``. Prints YAML to stdout. This is a convenience view -- refinery's own
+    ``citations.json`` (richer: raw_text, linking, provenance) stays the canonical output.
+    """
+    import yaml
+
+    data = json.loads(citations_json.read_text())
+    entries = to_papis_citations(data.get("references", []), verified_only=not include_all)
+    click.echo(yaml.safe_dump({"citations": entries}, allow_unicode=True, sort_keys=False).rstrip())
 
 
 if __name__ == "__main__":

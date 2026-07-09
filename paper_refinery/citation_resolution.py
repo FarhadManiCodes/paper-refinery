@@ -100,6 +100,41 @@ def source_from_meta(
     )
 
 
+def to_papis_citations(references: list[dict], *, verified_only: bool = True) -> list[dict]:
+    """Render refinery's resolved references in the CrossRef-reference shape papis stores under
+    ``citations:`` (article-title / DOI / author / year / journal-title / volume) -- for pasting
+    into an info.yaml or a future write-back. The inverse of ``_normalize_caller_references``.
+
+    Only entries with a title or DOI are emitted; ``verified_only`` (default) skips unverified
+    guesses so nothing unresolved pollutes papis's authoritative list. ``author`` is the first
+    author's family name (CrossRef's reference convention).
+    """
+    out: list[dict] = []
+    for ref in references:
+        if verified_only and not ref.get("verified"):
+            continue
+        title, doi = ref.get("title"), ref.get("doi")
+        if not (title or doi):
+            continue
+        entry: dict = {}
+        if title:
+            entry["article-title"] = title
+        if doi:
+            entry["DOI"] = doi
+        authors = ref.get("authors") or []
+        fam = authors[0].get("family") if authors and isinstance(authors[0], dict) else None
+        if fam:
+            entry["author"] = fam
+        if ref.get("year"):
+            entry["year"] = str(ref["year"])
+        if ref.get("container_title"):
+            entry["journal-title"] = ref["container_title"]
+        if ref.get("volume"):
+            entry["volume"] = ref["volume"]
+        out.append(entry)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Acceptance check
 # ---------------------------------------------------------------------------
@@ -353,9 +388,7 @@ def _source_confident(source: SourcePaper, candidate: dict, cfg: CitationConfig)
         year, cand_year = source.year, candidate.get("year")
         family = _first_family({"authors": source.authors or []})
         cand_family = _first_family(candidate)
-        return bool(
-            year is not None and year == cand_year and family and family == cand_family
-        )
+        return bool(year is not None and year == cand_year and family and family == cand_family)
     return False
 
 

@@ -62,6 +62,51 @@ def test_source_from_meta_falls_back_to_ocr_title_when_bundle_has_none():
     assert sp2.doi == "10.1/y" and sp2.title == "ocr guess"
 
 
+def test_to_papis_citations_maps_verified_refs_and_skips_the_rest():
+    refs = [
+        {
+            "title": "Alpha",
+            "doi": "10.1/a",
+            "year": 2007,
+            "authors": [{"family": "Smith", "given": "J"}],
+            "container_title": "J. X",
+            "volume": "34",
+            "verified": True,
+        },
+        {"title": "Unverified guess", "verified": False},  # skipped by default
+        {"raw_text": "junk", "verified": True},  # no title/doi -> skipped
+    ]
+    out = cr.to_papis_citations(refs)
+    assert out == [
+        {
+            "article-title": "Alpha",
+            "DOI": "10.1/a",
+            "author": "Smith",
+            "year": "2007",
+            "journal-title": "J. X",
+            "volume": "34",
+        }
+    ]
+    # --all includes unverified entries that still have a title/doi
+    assert len(cr.to_papis_citations(refs, verified_only=False)) == 2
+
+
+def test_papis_citations_round_trips_through_the_normalizer():
+    # to_papis_citations is the inverse of _normalize_caller_references
+    refs = [
+        {
+            "title": "Alpha Beta",
+            "doi": "10.1/a",
+            "year": 2007,
+            "authors": [{"family": "Smith"}],
+            "verified": True,
+        }
+    ]
+    back = cr._normalize_caller_references(cr.to_papis_citations(refs))
+    assert back[0]["title"] == "Alpha Beta" and back[0]["doi"] == "10.1/a"
+    assert back[0]["year"] == 2007 and back[0]["authors"] == [{"family": "Smith"}]
+
+
 def test_title_similarity_near_identical_scores_high():
     a = "Discovering governing equations from data by sparse identification"
     b = "Discovering Governing Equations from Data by Sparse Identification."
