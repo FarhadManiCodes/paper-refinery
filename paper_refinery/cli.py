@@ -1,12 +1,17 @@
 """refinery CLI -- parse -> {figures+enrich || citations} -> chunk -> write manifests.
 
-`refinery paper.pdf` produces two finals next to the PDF -- `paper.chunks.json` (the
-hand-off papis-ask ingests via paper-qa's ``Docs.aadd_texts``) and
-`paper.citations.json` (the verified/enriched bibliography + in-text linking) -- and
-one work directory `paper.refinery/` holding everything reviewable or intermediate:
-`refinery.md`, `references.md`, `resolution_report.txt`, `figures/`. The work
-directory is self-contained (markdown image links are relative to it) and per-paper,
-so two PDFs in one folder no longer share -- and overwrite -- a common `figures/`.
+`refinery paper.pdf` produces three finals next to the PDF -- `paper.chunks.json` (the
+hand-off papis-ask ingests via paper-qa's ``Docs.aadd_texts``), `paper.citations.json`
+(the verified/enriched bibliography + in-text linking), and `paper.md` (a human-review
+copy of the enriched markdown, with multi-line ``$$``/content/``$$`` display-math
+blocks collapsed to single-line form so Markdown viewers that only conceal single-line
+math -- confirmed for render-markdown.nvim -- render it cleanly) -- and one work
+directory `paper.refinery/` holding everything reviewable or intermediate: the
+uncollapsed `refinery.md` (the exact input `--from chunk` re-chunks from -- never
+rewritten after the fact, so re-chunking always sees the original), `references.md`,
+`resolution_report.txt`, `figures/`. The work directory is self-contained (markdown
+image links are relative to it) and per-paper, so two PDFs in one folder no longer
+share -- and overwrite -- a common `figures/`.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import click
+from mathunicode import collapse_math_blocks
 
 from .backend import OcrBackend, ocr_backend
 from .chunker import Chunk, chunk_markdown
@@ -101,6 +107,27 @@ def _default_outputs(
     )
 
 
+def _write_readonly(path: Path, text: str) -> None:
+    """Atomically write a real pipeline artifact (refinery.md, chunks.json,
+    citations.json), then make it read-only.
+
+    These are inputs future runs read back (refinery.md is the exact input
+    ``--from chunk`` re-chunks from; chunks.json/citations.json are what
+    papis-ask ingests) -- a hand-edit that looks harmless (e.g. reformatting
+    refinery.md for easier reading) can silently change re-chunking
+    boundaries later. Read-only doesn't block a later refinery run from
+    rewriting the file: os.replace() only needs write permission on the
+    *directory*, not the file being replaced (confirmed empirically), so
+    this is unconditionally safe to add. It only stops a *direct*
+    ``open(path, "w")`` by some other tool/edit, which does check the
+    file's own permission bits and fails loudly instead of corrupting it.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+    path.chmod(0o444)
+
+
 def write_chunks(chunks: list[Chunk], docname: str, source_pdf: str, out_path: Path) -> None:
     """Serialize chunks to the hand-off JSON that papis-ask ingests via aadd_texts."""
     payload = {
@@ -110,7 +137,7 @@ def write_chunks(chunks: list[Chunk], docname: str, source_pdf: str, out_path: P
         "docname": docname,
         "chunks": [c.to_dict() for c in chunks],
     }
-    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    _write_readonly(out_path, json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 def _merge_doi(source: SourceMeta | None, doi: str | None) -> dict:
@@ -345,15 +372,28 @@ def _refine_parsed(
                         "ambiguous": link.ambiguous,
                     },
                 }
-                citations_out.write_text(json.dumps(payload, indent=1, ensure_ascii=False))
+                _write_readonly(citations_out, json.dumps(payload, indent=1, ensure_ascii=False))
                 verified = sum(1 for r in resolved if r.get("verified"))
                 summary.append(f"citations: {verified}/{len(resolved)} verified -> {citations_out}")
 
         # keep the enriched markdown (citekeys rewritten, if the citation stage ran)
-        # as a reviewable artifact, before chunking
+        # as a reviewable artifact, before chunking. This is the exact input
+        # `--from chunk` re-chunks from -- it must never be rewritten after the
+        # fact (e.g. by a math-collapsing pass for prettier viewing), or a later
+        # re-chunk would see different newline/boundary structure than the
+        # original run did.
         md_out = work_dir / "refinery.md"
-        md_out.write_text(enriched)
+        _write_readonly(md_out, enriched)
         summary.append(f"enriched markdown -> {md_out}")
+
+        # separate, human-review-only copy next to the PDF, never read back by
+        # anything -- safe to reformat freely. Collapsing multi-line $$/content/$$
+        # blocks to one line lets Markdown viewers that only conceal single-line
+        # math (confirmed for render-markdown.nvim) render it cleanly, without
+        # touching the real pipeline input above.
+        review_out = pdf.with_suffix(".md")
+        review_out.write_text(collapse_math_blocks(enriched))
+        summary.append(f"review copy (collapsed math) -> {review_out}")
 
     chunks = chunk_markdown(enriched, cfg.chunk)
     write_chunks(chunks, pdf.stem, str(pdf), out)

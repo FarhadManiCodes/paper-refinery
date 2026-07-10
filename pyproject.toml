@@ -21,7 +21,13 @@ dependencies = [
                                    # since config.py imports it directly)
   "pyyaml>=6.0",                  # refinery-export-citations emits papis/CrossRef citations:
                                    # YAML (already transitive via glmocr; declared explicitly)
+  "mathunicode",                  # collapses multi-line $$ blocks in the human-review .md
+                                   # copy written next to the PDF; local sibling project,
+                                   # also used by papis-ask and render-markdown.nvim
 ]
+
+[tool.uv.sources]
+mathunicode = { path = "../mathunicode", editable = true }
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
