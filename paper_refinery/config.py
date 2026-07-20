@@ -134,6 +134,12 @@ class CitationConfig:
     api_key_env: str = "GOOGLE_API_KEY"
     retry_attempts: int = 4  # attempts before giving up (Gemini and resolver HTTP alike)
     retry_base_delay: float = 4.0  # seconds; doubles each retry
+    extract_batch_size: int = 50
+    #   references per extraction call. One structured ExtractedReference per input line is
+    #   sizeable, so a whole book's bibliography in a single call (confirmed live: 495 refs)
+    #   overruns the model's output-token cap -> truncated, unparseable JSON -> zero
+    #   extracted. Batches of this size stay well under the cap; batches run concurrently on
+    #   `max_workers` and are re-concatenated in order.
 
     # -- resolution (citation_resolution.py) --
     s2_api_base: str = "https://api.semanticscholar.org/graph/v1"

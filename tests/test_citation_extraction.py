@@ -146,6 +146,100 @@ def test_extract_references_fails_fast_on_non_retryable_error():
     assert len(calls) == 1
 
 
+def test_extract_references_batches_and_concatenates_in_order():
+    # the live Ferziger failure: 495 refs in one call overran the output-token cap ->
+    # unparseable JSON -> 0 extracted. Batching keeps each call small; the batches must
+    # re-concatenate in the original reference order.
+    import re as _re
+
+    seen_batches = []
+    # only the appended reference-listing lines ("N. ref M"), never _PROMPT's own
+    # numbered instruction lines
+    ref_line = _re.compile(r"^\d+\. (ref \d+)$")
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                titles = [m.group(1) for ln in contents.splitlines() if (m := ref_line.match(ln))]
+                seen_batches.append(titles)
+                return type("R", (), {"parsed": [ExtractedReference(title=t) for t in titles]})()
+
+    raws = [f"ref {i}" for i in range(10)]
+    cfg = CitationConfig(extract_batch_size=3, max_workers=4)
+    out = extract_references(raws, cfg, client=FakeClient())
+
+    assert [item["title"] for item in out] == raws  # order preserved end to end
+    assert len(seen_batches) == 4  # 10 refs / batch 3 -> 3+3+3+1
+    assert sorted(len(b) for b in seen_batches) == [1, 3, 3, 3]
+
+
+def test_extract_references_batch_failure_degrades_that_batch_only():
+    import re as _re
+
+    ref_line = _re.compile(r"^\d+\. (ref \d+)$")
+
+    # one bad batch (unparseable response) must pad to {} for its slots without
+    # misaligning the good batches around it
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                titles = [m.group(1) for ln in contents.splitlines() if (m := ref_line.match(ln))]
+                if "ref 3" in titles:  # the second batch (indices 3,4,5) returns junk
+                    return type("R", (), {"parsed": None})()
+                return type("R", (), {"parsed": [ExtractedReference(title=t) for t in titles]})()
+
+    raws = [f"ref {i}" for i in range(6)]
+    cfg = CitationConfig(extract_batch_size=3, max_workers=4)
+    out = extract_references(raws, cfg, client=FakeClient())
+
+    assert [item.get("title") for item in out] == [
+        "ref 0",
+        "ref 1",
+        "ref 2",
+        None,  # batch 2 failed -> {} for each of its three slots, still positioned right
+        None,
+        None,
+    ]
+
+
+def test_extract_references_batch_that_raises_degrades_that_batch_only(caplog):
+    # a batch raising (non-retryable error, or exhausted retries) must not abort the
+    # whole extraction -- degrade just that batch to {}, keeping the others. Same
+    # "one bad unit never fails the whole" pattern as enrich.py.
+    import re as _re
+
+    ref_line = _re.compile(r"^\d+\. (ref \d+)$")
+
+    class FakeAuthError(Exception):
+        code = 401  # non-retryable per retry.py
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                titles = [m.group(1) for ln in contents.splitlines() if (m := ref_line.match(ln))]
+                if "ref 3" in titles:  # the second batch raises instead of returning
+                    raise FakeAuthError("boom")
+                return type("R", (), {"parsed": [ExtractedReference(title=t) for t in titles]})()
+
+    raws = [f"ref {i}" for i in range(6)]
+    cfg = CitationConfig(extract_batch_size=3, max_workers=4, retry_attempts=1)
+    with caplog.at_level(logging.WARNING):
+        out = extract_references(raws, cfg, client=FakeClient())
+
+    assert "a batch of 3 references failed" in caplog.text
+    assert [item.get("title") for item in out] == [
+        "ref 0",
+        "ref 1",
+        "ref 2",
+        None,  # the raising batch -> {} x3, others unaffected
+        None,
+        None,
+    ]
+
+
 def test_extract_references_sends_schema_and_deterministic_config():
     seen = {}
 

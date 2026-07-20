@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
@@ -107,22 +108,12 @@ def make_client(cfg: CitationConfig) -> Client:
     return genai.Client(api_key=api_key)
 
 
-def extract_references(
-    raw_texts: list[str], cfg: CitationConfig, client: Client | None = None
-) -> list[dict]:
-    """Extract rough structured fields from each raw reference string, in one batched,
-    schema-enforced Gemini call.
-
-    Order-preserving: ``output[i]`` corresponds to ``raw_texts[i]`` -- callers re-attach
-    this to parse.py's own page/number metadata by position. An entry the model couldn't
-    extract anything useful from comes back as ``{}``, never dropped (dropping a
-    position would silently misalign every entry after it).
-    """
+def _extract_batch(raw_texts: list[str], cfg: CitationConfig, client: Client) -> list[dict]:
+    """One extraction Gemini call over a batch of reference strings. Order-preserving and
+    padded/truncated to exactly ``len(raw_texts)``; a batch the model returns nothing
+    usable for degrades to all-``{}`` for that batch, never crashes and never misaligns
+    the batches around it."""
     from google.genai import types
-
-    if not raw_texts:
-        return []
-    client = client or make_client(cfg)
 
     listing = "\n\n".join(f"{i + 1}. {t}" for i, t in enumerate(raw_texts))
     prompt = f"{_PROMPT}\n\n{listing}"
@@ -152,12 +143,60 @@ def extract_references(
     items = [r.model_dump(exclude_none=True) for r in rows if isinstance(r, ExtractedReference)]
     if len(items) != len(raw_texts):
         logger.warning(
-            "extract_references: got %d items for %d input lines; padding/truncating "
-            "to align by position",
+            "extract_references: got %d items for %d input lines in a batch; "
+            "padding/truncating to align by position",
             len(items),
             len(raw_texts),
         )
-    items = (items + [{}] * len(raw_texts))[: len(raw_texts)]
+    return (items + [{}] * len(raw_texts))[: len(raw_texts)]
+
+
+def extract_references(
+    raw_texts: list[str], cfg: CitationConfig, client: Client | None = None
+) -> list[dict]:
+    """Extract rough structured fields from each raw reference string, via one or more
+    schema-enforced Gemini calls (batched at ``cfg.extract_batch_size``, run concurrently
+    on ``cfg.max_workers`` and re-concatenated in order).
+
+    Batching is not cosmetic: one ExtractedReference per input line is sizeable, so a whole
+    book's bibliography in a single call (confirmed live: 495 refs) overruns the model's
+    output-token cap -> truncated, unparseable JSON -> zero extracted. Each batch stays
+    well under the cap.
+
+    Order-preserving: ``output[i]`` corresponds to ``raw_texts[i]`` -- callers re-attach
+    this to parse.py's own page/number metadata by position. An entry the model couldn't
+    extract anything useful from comes back as ``{}``, never dropped (dropping a
+    position would silently misalign every entry after it). One batch failing (a
+    non-retryable error, or exhausted retries) degrades just that batch to ``{}`` without
+    losing the others -- same as enrich.py's "one bad figure never fails the page".
+    """
+    if not raw_texts:
+        return []
+    client = client or make_client(cfg)
+
+    size = max(1, cfg.extract_batch_size)
+    batches = [raw_texts[i : i + size] for i in range(0, len(raw_texts), size)]
+    if len(batches) == 1:
+        items = _extract_batch(batches[0], cfg, client)
+    else:
+        with ThreadPoolExecutor(max_workers=cfg.max_workers) as pool:
+            futures = [pool.submit(_extract_batch, b, cfg, client) for b in batches]
+            results: list[list[dict]] = []
+            # collect in submission order (not completion order) so the batches
+            # re-concatenate in the original reference order; each batch is already
+            # position-aligned to its own inputs
+            for batch, future in zip(batches, futures, strict=True):
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    logger.warning(
+                        "extract_references: a batch of %d references failed (%r) -- "
+                        "leaving them unextracted",
+                        len(batch),
+                        exc,
+                    )
+                    results.append([{}] * len(batch))
+        items = [item for batch_items in results for item in batch_items]
     return _sanitize_citation_keys(raw_texts, items)
 
 
