@@ -174,6 +174,40 @@ class CitationConfig:
 
 
 @dataclass(slots=True)
+class TypesetConfig:
+    """Markdown -> typeset PDF via pandoc + xelatex (see typeset.py): a clean re-typeset
+    reading copy with a table of contents and inline images, skipping figure-description
+    and citation resolution entirely. ``pandoc`` and ``pdf_engine`` are system binaries,
+    not pip dependencies -- see README's "Development setup" for install instructions."""
+
+    pdf_engine: str = "xelatex"
+    toc_depth: int = 2
+    image_max_width: str = "70%"
+    #   crops have no natural relation to the page's text width; any image without an
+    #   explicit {width=...} in the markdown is capped at this via a pandoc lua filter
+    margin: str = "1in"
+    documentclass: str = "report"
+    font_size: str = "11pt"
+    #   default LaTeX 10pt at 1in margins on letter/A4 runs ~90-100 characters per line --
+    #   uncomfortably wide for reading; 11pt alone shortens that to a more comfortable range
+    #   without narrowing the text block itself
+    main_font: str = "Noto Serif"
+    #   xelatex + fontspec system-font lookup (not a LaTeX package), so this must be
+    #   installed as a system font, not a TeX Live one -- Noto Serif chosen specifically for
+    #   its broad Unicode coverage (GLM-OCR occasionally emits stray Unicode glyphs
+    #   Computer-Modern-derived fonts don't cover). Empty string -> leave xelatex's own
+    #   default (Latin Modern) alone, for a system without Noto installed.
+    line_stretch: float = 1.15  # pandoc's `linestretch` var (-> setspace \linespread)
+    clean_toc_with_llm: bool = False
+    #   opt-in (off by default -- the whole point of this command is not needing an API
+    #   key): one extra Gemini call (typeset.classify_headings, using CitationConfig's
+    #   model/key/retry settings) judges each remaining heading as a genuine section start
+    #   or a mistagged table-of-contents/listing line the mechanical dedup pass can't
+    #   catch (confirmed live: OCR mistags some printed-contents-page lines as headings,
+    #   inconsistently, so no positional rule catches all of it reliably)
+
+
+@dataclass(slots=True)
 class RefineryConfig:
     """Top-level config bundling each stage."""
 
@@ -181,6 +215,7 @@ class RefineryConfig:
     parse: ParseConfig = field(default_factory=ParseConfig)
     figure: FigureConfig = field(default_factory=FigureConfig)
     citation: CitationConfig = field(default_factory=CitationConfig)
+    typeset: TypesetConfig = field(default_factory=TypesetConfig)
 
 
 def _xdg_config_home() -> Path:
@@ -329,8 +364,8 @@ def load_config(path: Path | None = None) -> RefineryConfig:
         mmproj_path = "/home/you/.cache/paper-refinery/models/mmproj-GLM-OCR-Q8_0.gguf"
 
     Each top-level TOML table maps to a ``RefineryConfig`` sub-config by name (``parse``,
-    ``figure``, ``chunk``, ``citation``); each key in it must match a dataclass field on
-    that sub-config.
+    ``figure``, ``chunk``, ``citation``, ``typeset``); each key in it must match a dataclass
+    field on that sub-config.
     """
     _load_secrets()
     cfg = RefineryConfig()

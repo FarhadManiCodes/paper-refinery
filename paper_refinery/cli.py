@@ -49,6 +49,7 @@ from .figures import describe_figure, make_client
 from .parse import ParseResult
 from .parse_cache import load_checkpoint, parse_pdf_cached
 from .pdf_split import merge_parse_results, page_count, split_pdf
+from .typeset import render_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +269,41 @@ def _parse_maybe_split(
         return _parse_parts(backend)
     with ocr_backend(cfg.parse) as own:
         return _parse_parts(own)
+
+
+def _typeset(
+    input_path: Path,
+    out: Path,
+    work_dir: Path,
+    cfg: RefineryConfig,
+    force_parse: bool = False,
+    title: str | None = None,
+    author: str | None = None,
+) -> list[str]:
+    """Typeset ``input_path`` into ``out``: a PDF is parsed fresh (OCR only -- no
+    figure-description or citation stages, reusing the checkpoint like the full pipeline
+    does), an already-parsed markdown file is typeset as-is. Returns a summary line per
+    distinct recoverable TeX error the compile encountered (see typeset.render_pdf).
+    """
+    if input_path.suffix.lower() == ".pdf":
+        # parse.py bakes whatever work_dir Path it's given straight into each crop's
+        # markdown link, verbatim -- a relative work_dir means a link relative to
+        # *this process's* cwd, not to parsed.md's own directory. render_pdf later runs
+        # pandoc/xelatex with cwd=<parsed.md's directory>, so that link would resolve
+        # against the wrong base. Absolute up front avoids the ambiguity entirely (the
+        # main `refine()` pipeline instead relativizes afterwards -- see
+        # `_relativize_image_links` -- but that only needs to hold for a portable
+        # refinery.md; nothing here needs to survive being moved).
+        work_dir = work_dir.resolve()
+        work_dir.mkdir(parents=True, exist_ok=True)
+        parsed = _parse_maybe_split(input_path, work_dir, cfg, force_parse=force_parse)
+        md_path = work_dir / "parsed.md"
+        md_path.write_text(parsed.markdown)
+    else:
+        md_path = input_path
+    return render_pdf(
+        md_path, out, cfg.typeset, title=title, author=author, citation_cfg=cfg.citation
+    )
 
 
 def _refine(
@@ -934,6 +970,71 @@ def main_export_citations(citations_json: Path, include_all: bool) -> None:
     data = json.loads(citations_json.read_text())
     entries = to_papis_citations(data.get("references", []), verified_only=not include_all)
     click.echo(yaml.safe_dump({"citations": entries}, allow_unicode=True, sort_keys=False).rstrip())
+
+
+@click.command()
+@click.argument("input_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--out",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Output PDF (default: <input-stem>.typeset.pdf next to the input).",
+)
+@click.option(
+    "--work-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Directory for parse artifacts when INPUT_PATH is a PDF (default: <pdf-stem>.refinery/ "
+    "next to the PDF). Ignored for markdown input.",
+)
+@click.option(
+    "--force-parse",
+    is_flag=True,
+    default=False,
+    help="Re-run OCR, bypassing the parse checkpoint. Ignored for markdown input.",
+)
+@click.option("--title", default=None, help="PDF title-page title (omitted -> no title page).")
+@click.option("--author", default=None, help="PDF title-page author.")
+@click.option(
+    "--clean-toc",
+    is_flag=True,
+    default=False,
+    help="One extra Gemini call (needs GOOGLE_API_KEY) to catch table-of-contents lines the "
+    "OCR layout model mistagged as headings, beyond the always-on mechanical dedup. Off by "
+    "default -- this command otherwise needs no API key.",
+)
+def main_typeset(
+    input_path: Path,
+    out: Path | None,
+    work_dir: Path | None,
+    force_parse: bool,
+    title: str | None,
+    author: str | None,
+    clean_toc: bool,
+) -> None:
+    """Typeset a scanned PDF (or an already-parsed .md) into a clean PDF with a table of
+    contents and inline images -- no figure-description or citation-verification stages.
+
+    INPUT_PATH is either a PDF (parsed fresh, reusing the OCR checkpoint like `refinery`
+    does) or an already-parsed markdown file (e.g. a previous run's <pdf>.refinery/parsed.md
+    or refinery.md) -- typeset only, no OCR. No network calls unless --clean-toc is given.
+
+    Needs ``pandoc`` and ``xelatex`` on PATH (system binaries, not pip dependencies -- see
+    README's "Development setup").
+    """
+    _setup_logging()
+    cfg = load_config()
+    cfg.typeset.clean_toc_with_llm = clean_toc
+    out = out or input_path.with_name(input_path.stem + ".typeset.pdf")
+    work_dir = work_dir or input_path.with_suffix(".refinery")
+    errors = _typeset(
+        input_path, out, work_dir, cfg, force_parse=force_parse, title=title, author=author
+    )
+    lines = [f"wrote {out}"]
+    if errors:
+        lines.append(f"{len(errors)} recoverable TeX error kind(s) during compile:")
+        lines += [f"  {e}" for e in errors]
+    click.echo("\n".join(lines))
 
 
 if __name__ == "__main__":

@@ -114,6 +114,60 @@ parse_cache.py           parse checkpoint: persist ParseResult + its raw crops t
                           <pdf>.refinery/parse_cache/ keyed on pdf-hash + parse-config
                           signature, so a re-run skips the (~10-min) OCR pass; parse_pdf_cached()
                           wraps parse_pdf, restoring crops on a hit
+typeset.py                markdown -> typeset PDF via pandoc + xelatex (system binaries, not
+                          pip deps): a clean, reflowed reading copy with a TOC and inline
+                          images -- no figure-description or citation stages. render_pdf()
+                          drives xelatex directly (twice, for TOC page numbers), not via
+                          pandoc's own --pdf-engine path, since that treats any nonzero engine
+                          exit code as total failure and discards a PDF that nonstopmode's
+                          error recovery actually completed -- judged instead by whether a
+                          PDF came out. Repairs OCR'd input before compiling: strips
+                          <page_number> markers (bypassing chunker.py, which normally does),
+                          blanks a FIGURE_CROP/FIGURE-numbered image's alt text (else pandoc
+                          auto-captions/floats it, duplicating the real caption already in the
+                          body), trims the padding space inside $ .../$$ ...$$ (pandoc's
+                          dollar-math needs none), merges an OCR-malformed stacked
+                          superscript/subscript (TeX's one truly fatal, non-recoverable math
+                          error class), and demotes an immediately-repeated heading (OCR
+                          re-tagging a book's running header as its own heading) -- demotion
+                          is positional (by occurrence index among all headings, from
+                          _find_headings), never text-matched, since a title like "EXERCISES"
+                          can legitimately repeat many times as real section starts.
+                          TypesetConfig.clean_toc_with_llm (opt-in, off by default) adds two
+                          sequential batched Gemini calls (reusing CitationConfig's
+                          model/key/retry -- gemini-3.1-flash-lite), not one: classify_real_headings
+                          first (heading text + what follows it only) catches a printed
+                          table-of-contents line mistagged as a heading, inconsistently, so no
+                          positional rule catches all of it; classify_chapter_level then runs
+                          only on confirmed-real headings (adding "preceded by" context) to tell
+                          a chapter/part heading from a section/subsection one, so LaTeX
+                          page-breaks correctly (\chapter vs \section) and the TOC nests
+                          properly. Kept as two calls, not one combined pass -- confirmed live
+                          that giving "preceded by" context during the real/not-real judgment
+                          backfires: a dense run of consecutive table-of-contents lines are each
+                          "preceded by" something that itself looks like a chapter title (the
+                          correct pattern for a genuine heading), tricking the model into
+                          treating the whole polluted run as real chapters. A final deterministic
+                          pass, _promote_orphaned_chapter_subsections, catches what neither
+                          classification call can: a chapter whose bare "CHAPTER N" marker was
+                          never OCR-tagged as its own heading at all AND doesn't follow the
+                          previous chapter's "EXERCISES" (confirmed live on Weinstock's
+                          "Calculus of Variations" -- chapters 2 and 9 both), by promoting a
+                          "section"-level heading to "chapter" when it's immediately followed by
+                          a subsection numbered "N-1." (chapter numbering always resets there).
+                          Two adjacent "chapter"-level headings (a bare "CHAPTER N" marker still
+                          OCR'd as its own region, immediately followed by its title) are merged
+                          into one combined H1 -- otherwise LaTeX would page-break twice per
+                          chapter. Judgments are matched back to their candidate by an explicit
+                          `index` field the model itself echoes, not by response-list position --
+                          confirmed live the model's output count occasionally doesn't exactly
+                          match the input (150 judgments for 147 candidates) -- and fail open
+                          per-candidate on anything unmatched, so a few stray indices cost only
+                          those candidates, not the whole pass. A font/size/line-spacing default
+                          (Noto Serif, 11pt, 1.15x) is tuned for reading rather than LaTeX
+                          defaults; TypesetConfig.main_font falls back to xelatex's own default
+                          (via fc-match) when not installed, rather than hard-failing the compile
+                          over a missing system font.
 cli.py                    orchestrate the above (citations run concurrently with figure
                           enrich); write .chunks.json / .citations.json / paper.refinery/.
                           Public API: refine() (one PDF) and refine_many() (streaming batch,
@@ -124,11 +178,18 @@ cli.py                    orchestrate the above (citations run concurrently with
                           selfhosted keeps the serial-OCR-on-one-shared-backend path).
                           refine()/refine_many() take a SourceMeta `source`/`sources` bundle
                           (see citation_resolution) -- `doi=`/`dois=` are shorthands folded in.
-                          Three console scripts: `refinery` (one PDF; main()), `refinery-batch`
+                          Four console scripts: `refinery` (one PDF; main()), `refinery-batch`
                           (many PDFs; main_many() -> refine_many; --workers/--ocr-workers/
                           --force-parse/--from chunk/--meta-map FILE={pdf_path: SourceMeta}),
-                          and `refinery-export-citations` (main_export_citations() ->
-                          to_papis_citations -> papis citations: YAML). parse_pdf raises on a
+                          `refinery-export-citations` (main_export_citations() ->
+                          to_papis_citations -> papis citations: YAML), and `refinery-typeset`
+                          (main_typeset() -> _typeset() -> typeset.render_pdf; PDF input is
+                          parsed fresh with an absolute work_dir -- parse.py bakes whatever
+                          work_dir Path it's given straight into each crop's markdown link, so
+                          a relative one would resolve against the wrong base once render_pdf
+                          runs pandoc/xelatex with cwd=<parsed.md's directory>; markdown input
+                          is typeset as-is, e.g. a prior run's refinery.md, already correctly
+                          relativized by _relativize_image_links). parse_pdf raises on a
                           zero-region OCR result (maas SDK reports an exhausted 429 as empty) so
                           a throttled paper is skipped, never written as a 0-chunk manifest.
 ```

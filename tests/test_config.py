@@ -8,6 +8,7 @@ from paper_refinery.config import (
     FigureConfig,
     ParseConfig,
     RefineryConfig,
+    TypesetConfig,
     _default_config_path,
     load_config,
 )
@@ -25,6 +26,17 @@ def test_refinery_config_composes_subconfigs():
     assert isinstance(r.parse, ParseConfig)
     assert isinstance(r.figure, FigureConfig)
     assert isinstance(r.citation, CitationConfig)
+    assert isinstance(r.typeset, TypesetConfig)
+
+
+def test_typeset_config_defaults():
+    c = TypesetConfig()
+    assert c.pdf_engine == "xelatex"
+    assert c.toc_depth == 2
+    assert c.font_size == "11pt"
+    assert c.main_font == "Noto Serif"
+    assert c.line_stretch == 1.15
+    assert c.clean_toc_with_llm is False
 
 
 def test_citation_config_defaults():

@@ -22,6 +22,8 @@ chunks are plain data, so it works as a front-end for any RAG pipeline, not just
 - **Optional — a local OCR backend** instead of the cloud: `llama-server` + GLM-OCR GGUF
   weights + a GPU + the `.[local]` install extra. See
   [Local (selfhosted) OCR backend (optional)](#local-selfhosted-ocr-backend-optional).
+- **Optional — `pandoc` + `xelatex` on PATH**, only for `refinery-typeset` (re-typesetting a
+  PDF into a clean, reflowed PDF with a TOC). Not needed for the main pipeline.
 
 ## Pipeline
 
@@ -194,6 +196,7 @@ In selfhosted mode `ZHIPU_API_KEY` isn't needed; in the default maas mode `HF_TO
 refinery path/to/paper.pdf            # one PDF -> paper.chunks.json, .citations.json, .refinery/
 refinery-batch a.pdf b.pdf c.pdf      # many PDFs, refined concurrently (each -> its own sidecars)
 refinery-export-citations paper.citations.json   # -> papis/CrossRef `citations:` YAML (copy-paste)
+refinery-typeset path/to/paper.pdf    # PDF (or an already-parsed .md) -> a clean typeset PDF
 ```
 
 `refinery-batch` runs the papers through `refine_many`: cloud OCR is gated to `--ocr-workers`
@@ -208,6 +211,20 @@ papis library, e.g. `refinery-batch $(papis list --file) && papis ask index`.
 `refinery-export-citations <pdf>.citations.json` prints the verified references as a
 papis/CrossRef `citations:` YAML block (for pasting into an `info.yaml`); `--all` includes
 unverified entries.
+
+`refinery-typeset` re-typesets a scanned PDF into a clean, reflowed PDF with a table of
+contents and inline images — no figure-description or citation-verification stages, so it
+needs no API keys by default. Point it at a PDF (parsed fresh, reusing the OCR checkpoint) or
+at an already-parsed markdown file (e.g. a previous run's `<pdf>.refinery/refinery.md` or
+`parsed.md`) to skip OCR entirely. `--title`/`--author` set an optional title page;
+`--out`/`--work-dir`/`--force-parse` mirror the single-PDF flags below. Typography (font,
+size, line spacing) is tuned for reading rather than LaTeX defaults — see `TypesetConfig` in
+`config.toml` to override. `--clean-toc` adds a few Gemini calls (needs `GOOGLE_API_KEY`) beyond the always-on
+mechanical dedup: catching table-of-contents lines the OCR layout model mistagged as
+headings, and classifying real chapter/part headings vs. section/subsection ones so
+chapters start on their own page and the TOC nests properly — off by default. Needs
+`pandoc` and `xelatex` on `PATH` — system binaries, not pip dependencies (e.g. Arch:
+`pacman -S pandoc texlive-xetex`; Debian/Ubuntu: `apt install pandoc texlive-xetex`).
 
 Single-PDF options (all optional; outputs default next to the PDF):
 

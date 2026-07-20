@@ -39,6 +39,7 @@ local = ["glmocr[selfhosted]>=0.1.5"]
 refinery = "paper_refinery.cli:main"                 # one PDF
 refinery-batch = "paper_refinery.cli:main_many"      # many PDFs, parallel (OCR-gated)
 refinery-export-citations = "paper_refinery.cli:main_export_citations"  # -> papis citations: YAML
+refinery-typeset = "paper_refinery.cli:main_typeset"  # PDF or .md -> clean typeset PDF (TOC, images)
 
 [build-system]
 requires = ["hatchling"]
