@@ -65,13 +65,18 @@ _ABANDON_LABELS = {
     "header",
     "footer",
     "number",  # printed page number -- we inject our own <page_number> markers instead
-    "footnote",
     "aside_text",
     "footer_image",
     "header_image",
 }
 _DOC_TITLE_LABEL = "doc_title"
 _PARAGRAPH_TITLE_LABEL = "paragraph_title"
+_FOOTNOTE_LABEL = "footnote"  # kept, not abandoned: often real content (a citation, a
+#   clarifying aside) worth keeping in both the RAG chunk stream and a typeset reading
+#   copy; a footnote region's reading-order position rarely lines up with its in-text
+#   marker (OCR gives us no reliable way to re-anchor it there), so rather than guess a
+#   splice point it's rendered as its own clearly-marked block right where the region
+#   falls in reading order -- distinguishable from surrounding body prose, not blended in
 _FIGURE_TITLE_LABEL = "figure_title"  # a "FIGURE N. ..." caption line -- plain body text,
 #   named explicitly rather than relying on the unknown-label fallback, since enrich.py's
 #   caption regex depends on this text actually landing in the body markdown
@@ -160,6 +165,10 @@ def _wrap_formula(content: str) -> str:
 _REGION_HANDLERS: dict[str, Callable[[str], tuple[str, str]]] = {
     _DOC_TITLE_LABEL: lambda c: ("body", f"# {_strip_heading_prefix(c)}"),
     _PARAGRAPH_TITLE_LABEL: lambda c: ("body", f"## {_strip_heading_prefix(c)}"),
+    # blockquote-with-label, same visual convention enrich.py already uses for a spliced
+    # figure description ("> **Figure description (auto):** ...") -- distinguishes this
+    # from surrounding body prose without trying to re-anchor it at its in-text marker
+    _FOOTNOTE_LABEL: lambda c: ("body", f"> **Footnote:** {c}") if c else ("abandon", ""),
     # kept in the body markdown like plain text, but ALSO surfaced as a known caption
     # (ParseResult.figure_captions) so enrich.py can anchor on layout-model ground truth
     # instead of guessing captions from body text by regex alone

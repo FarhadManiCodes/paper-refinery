@@ -40,10 +40,25 @@ def _region(label: str, content: str = "", **extra) -> dict:
 
 @pytest.mark.parametrize(
     "label",
-    ["header", "footer", "number", "footnote", "aside_text", "footer_image", "header_image"],
+    ["header", "footer", "number", "aside_text", "footer_image", "header_image"],
 )
 def test_dispatch_abandons_boilerplate(label):
     kind, text = _dispatch_region(_region(label, "should be dropped"))
+    assert kind == "abandon"
+    assert text == ""
+
+
+def test_dispatch_footnote_kept_as_marked_blockquote():
+    # unlike other boilerplate, a footnote often carries real content (a citation, a
+    # clarifying aside) worth keeping in both the RAG chunk stream and a typeset reading
+    # copy -- kept, marked, not blended anonymously into surrounding body prose
+    kind, text = _dispatch_region(_region("footnote", "See Bliss (1) for details."))
+    assert kind == "body"
+    assert text == "> **Footnote:** See Bliss (1) for details."
+
+
+def test_dispatch_footnote_with_empty_content_is_abandoned():
+    kind, text = _dispatch_region(_region("footnote", ""))
     assert kind == "abandon"
     assert text == ""
 
