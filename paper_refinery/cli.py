@@ -47,7 +47,7 @@ from .config import ParseConfig, RefineryConfig, load_config
 from .enrich import enrich_markdown
 from .figures import describe_figure, make_client
 from .parse import ParseResult
-from .parse_cache import load_checkpoint, parse_pdf_cached
+from .parse_cache import load_checkpoint, parse_pdf_cached, pdf_sha256
 from .pdf_split import merge_parse_results, page_count, split_pdf
 from .typeset import render_pdf
 
@@ -231,9 +231,14 @@ def _parse_maybe_split(
     the only added cost is the ``page_count`` check.
 
     Each part gets its own ``work_dir/parts/part_N/`` checkpoint, so re-running an
-    unchanged book skips OCR for every part. Reuses ``backend`` across parts when given;
-    spawns and reuses its own for the duration of this call otherwise (matches
-    ``parse_pdf``'s own convention).
+    unchanged book skips OCR for every part -- keyed on the *original* PDF's hash + part
+    index, not the split part file's own bytes (``parse_cache``'s ``content_id``):
+    confirmed live that ``split_pdf`` (PyMuPDF's ``Document.save()``) produces different
+    bytes for the exact same source pages on every call, so hashing the part file
+    directly would never hit the checkpoint for any split (>100-page) book -- exactly
+    the documents (books) that need the OCR checkpoint most. Reuses ``backend`` across
+    parts when given; spawns and reuses its own for the duration of this call otherwise
+    (matches ``parse_pdf``'s own convention).
     """
     if page_count(pdf) <= cfg.parse.max_pages_per_part:
         if backend is not None:
@@ -249,6 +254,7 @@ def _parse_maybe_split(
         cfg.parse.max_pages_per_part,
         len(parts),
     )
+    original_hash = pdf_sha256(pdf)
 
     def _parse_parts(active_backend: OcrBackend) -> ParseResult:
         results = [
@@ -258,6 +264,7 @@ def _parse_maybe_split(
                 cfg.parse,
                 backend=active_backend,
                 force=force_parse,
+                content_id=f"{original_hash}:part{i}:{cfg.parse.max_pages_per_part}",
             )
             for i, (part_path, _n) in enumerate(parts)
         ]

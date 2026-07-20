@@ -38,6 +38,13 @@ def split_pdf(pdf_path: Path, out_dir: Path, max_pages: int) -> list[tuple[Path,
 
     Returns ``[(part_path, page_count), ...]``. When the PDF is already within
     ``max_pages``, returns ``[(pdf_path, page_count)]`` unchanged -- no copy, no new file.
+
+    Each part is written with ``no_new_id=True`` so splitting the same source pages twice
+    produces byte-identical output. Without it, MuPDF stamps a fresh random ``/ID`` into
+    the trailer on every save -- confirmed live: the exact same source pages hashed
+    differently each run. parse_cache keys its checkpoint on the *original* PDF's hash +
+    part index (not the part file's own bytes) so correctness never depended on this, but
+    a reproducible split is worth having anyway (diffable parts, defense in depth).
     """
     import fitz  # PyMuPDF; already present transitively via glmocr
 
@@ -53,7 +60,7 @@ def split_pdf(pdf_path: Path, out_dir: Path, max_pages: int) -> list[tuple[Path,
             part_path = out_dir / f"part_{i}.pdf"
             with fitz.open() as part:
                 part.insert_pdf(doc, from_page=start, to_page=end)
-                part.save(part_path)
+                part.save(part_path, no_new_id=True)
             parts.append((part_path, end - start + 1))
         return parts
 

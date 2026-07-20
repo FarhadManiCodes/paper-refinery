@@ -91,6 +91,32 @@ def test_pdf_content_change_invalidates(tmp_path):
     assert parser.calls == 2
 
 
+def test_content_id_overrides_pdf_hash_and_survives_pdf_byte_changes(tmp_path):
+    # confirmed live: pdf_split.py's split_pdf (PyMuPDF's Document.save()) produces
+    # DIFFERENT bytes for the exact same source pages on every call -- a caller passing
+    # a stable content_id (cli._parse_maybe_split does, keyed on the *original* pdf's
+    # hash + part index) must not have its checkpoint broken by that instability
+    pdf = _pdf(tmp_path)
+    backend, parser = _backend(_PAGES)
+    cfg = ParseConfig()
+
+    parse_pdf_cached(pdf, tmp_path, cfg, backend=backend, content_id="stable-id")
+    assert parser.calls == 1
+    pdf.write_bytes(b"%PDF-1.4 DIFFERENT BYTES, SAME LOGICAL CONTENT")
+    parse_pdf_cached(pdf, tmp_path, cfg, backend=backend, content_id="stable-id")
+    assert parser.calls == 1  # still a hit -- content_id didn't change, only the file did
+
+
+def test_content_id_change_invalidates_even_with_identical_pdf_bytes(tmp_path):
+    pdf = _pdf(tmp_path)
+    backend, parser = _backend(_PAGES)
+    cfg = ParseConfig()
+
+    parse_pdf_cached(pdf, tmp_path, cfg, backend=backend, content_id="id-1")
+    parse_pdf_cached(pdf, tmp_path, cfg, backend=backend, content_id="id-2")
+    assert parser.calls == 2  # different logical identity -- must not reuse id-1's cache
+
+
 def test_output_affecting_config_change_invalidates(tmp_path):
     pdf = _pdf(tmp_path)
     backend, parser = _backend(_PAGES)

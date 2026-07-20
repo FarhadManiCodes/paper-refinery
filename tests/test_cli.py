@@ -498,9 +498,11 @@ def test_main_splits_long_pdf_into_parts_and_glues_before_chunking(tmp_path, mon
     monkeypatch.setattr(cli, "ocr_backend", fake_ocr_backend)
 
     seen_parse_calls = []
+    seen_content_ids = []
 
-    def fake_parse(p, d, c, backend=None, force=False):
+    def fake_parse(p, d, c, backend=None, force=False, content_id=None):
         seen_parse_calls.append(p)
+        seen_content_ids.append(content_id)
         idx = part_paths.index(p)
         return ParseResult(markdown=f"<page_number>1</page_number>\n\npart{idx}")
 
@@ -523,6 +525,64 @@ def test_main_splits_long_pdf_into_parts_and_glues_before_chunking(tmp_path, mon
     assert "<page_number>1</page_number>" in md  # part 0, unshifted
     assert "<page_number>101</page_number>" in md  # part 1, offset by part 0's 100 pages
     assert "part0" in md and "part1" in md
+    # each part's checkpoint is keyed off the *original* pdf's hash + part index, not
+    # the split part file's own bytes -- see test_pdf_split_part_hash_instability_does_not_
+    # break_the_checkpoint for why that distinction matters
+    assert all(cid is not None for cid in seen_content_ids)
+    assert len(set(seen_content_ids)) == 2  # distinct per part
+    assert all(str(pdf) not in cid for cid in seen_content_ids)  # not the part files' own hash
+
+
+def test_parse_maybe_split_content_id_survives_unstable_part_bytes(tmp_path, monkeypatch):
+    # regression: pdf_split.py's split_pdf (PyMuPDF's Document.save()) was confirmed live
+    # to produce DIFFERENT bytes for the exact same source pages on every call -- hashing
+    # the part file itself as the checkpoint key means a split (>100-page) book's
+    # checkpoint never hits, defeating the OCR cache for exactly the documents that need
+    # it most. The fix: key each part's checkpoint on the original pdf's hash + part
+    # index (cli._parse_maybe_split's content_id), not the part file's own bytes.
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.4 original content")
+
+    call_count = 0
+
+    def unstable_split(pdf_path, out_dir, max_pages):
+        # simulates split_pdf writing DIFFERENT bytes each call, same source pages
+        nonlocal call_count
+        call_count += 1
+        part_path = out_dir / "part_0.pdf"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        part_path.write_bytes(f"%PDF-1.4 part bytes, call {call_count}".encode())
+        return [(part_path, 150)]
+
+    monkeypatch.setattr(cli, "load_config", lambda: RefineryConfig())
+    monkeypatch.setattr(cli, "page_count", lambda p: 150)
+    monkeypatch.setattr(cli, "split_pdf", unstable_split)
+
+    cfg = RefineryConfig()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    class FakeBackend:
+        pass
+
+    parsed = ParseResult(markdown="<page_number>1</page_number>\n\nreal content")
+    real_parse_calls = 0
+
+    def fake_parse_pdf(pdf_path, wd, cfg, backend=None):
+        nonlocal real_parse_calls
+        real_parse_calls += 1
+        return parsed
+
+    monkeypatch.setattr("paper_refinery.parse_cache.parse_pdf", fake_parse_pdf)
+
+    cli._parse_maybe_split(pdf, work_dir, cfg, backend=FakeBackend())
+    assert real_parse_calls == 1  # first call: cold, real OCR ("parse_pdf") runs once
+
+    # second call: split_pdf produces DIFFERENT part bytes (call_count now 2), but the
+    # checkpoint must still hit because content_id only depends on the original pdf
+    cli._parse_maybe_split(pdf, work_dir, cfg, backend=FakeBackend())
+    assert real_parse_calls == 1  # still 1 -- no re-OCR despite the part file changing
+    assert call_count == 2  # split_pdf really was called again (and did produce new bytes)
 
 
 def test_from_chunk_rechunks_refinery_md_without_running_upstream(tmp_path, monkeypatch):

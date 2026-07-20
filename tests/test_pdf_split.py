@@ -58,6 +58,22 @@ def test_split_pdf_single_page_over_threshold_by_one(tmp_path):
     assert [n for _, n in parts] == [100, 1]
 
 
+def test_split_pdf_is_byte_deterministic(tmp_path):
+    # MuPDF stamps a fresh random trailer /ID on every save unless no_new_id=True, so the
+    # same source pages otherwise hash differently each run -- which (before the fix) made
+    # parse_cache's checkpoint never hit for any split (>100-page) book. See split_pdf.
+    import hashlib
+
+    pdf = tmp_path / "p.pdf"
+    _make_pdf(pdf, 150)
+
+    def part_hashes(out_dir):
+        parts = split_pdf(pdf, out_dir, max_pages=100)
+        return [hashlib.sha256(p.read_bytes()).hexdigest() for p, _ in parts]
+
+    assert part_hashes(tmp_path / "run_a") == part_hashes(tmp_path / "run_b")
+
+
 def _crop(tmp_path, name):
     path = tmp_path / name
     path.write_bytes(b"fake-png")

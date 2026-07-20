@@ -41,13 +41,13 @@ from .parse import (
     parse_pdf,
 )
 
-CHECKPOINT_VERSION = 1  # bump when parse logic changes in a way that alters output
+CHECKPOINT_VERSION = 2  # bump when parse logic changes in a way that alters output
 _CHECKPOINT_DIRNAME = "parse_cache"
 _CHECKPOINT_FILE = "parse.json"
 _CROPS_SUBDIR = "crops"
 
 
-def _pdf_sha256(pdf: Path) -> str:
+def pdf_sha256(pdf: Path) -> str:
     h = hashlib.sha256()
     with pdf.open("rb") as f:
         for block in iter(lambda: f.read(1 << 20), b""):
@@ -73,10 +73,23 @@ def _parse_signature(cfg: ParseConfig) -> dict:
     }
 
 
-def _manifest(pdf: Path, cfg: ParseConfig) -> dict:
+def _manifest(pdf: Path, cfg: ParseConfig, content_id: str | None = None) -> dict:
+    """``content_id`` overrides the default whole-file hash -- for a caller whose
+    ``pdf`` is an unstable intermediate artifact (a ``pdf_split.py`` part file) rather
+    than the actual source document. Confirmed live: PyMuPDF's ``Document.save()``
+    embeds something non-deterministic (its trailer ``/ID``, most likely), so splitting
+    the exact same source pages twice produces two part files with different content
+    hashes -- hashing the part file itself as the checkpoint key means the checkpoint
+    for a split (>100-page) book *never* hits, defeating the whole point of caching the
+    OCR pass for exactly the documents (books) that need it most. Passing a stable
+    ``content_id`` (the *original* PDF's hash + which part this is) sidesteps the
+    instability entirely rather than trying to make ``split_pdf`` byte-deterministic,
+    which would depend on PyMuPDF internals that aren't this project's to guarantee.
+    Callers with a real, stable file (the normal, unsplit path) leave this None.
+    """
     return {
         "version": CHECKPOINT_VERSION,
-        "pdf_sha256": _pdf_sha256(pdf),
+        "content_id": content_id if content_id is not None else pdf_sha256(pdf),
         "parse_signature": _parse_signature(cfg),
     }
 
@@ -135,10 +148,16 @@ def _deserialize(data: dict, figures_dir: Path) -> ParseResult:
     )
 
 
-def save_checkpoint(work_dir: Path, pdf: Path, cfg: ParseConfig, result: ParseResult) -> None:
+def save_checkpoint(
+    work_dir: Path,
+    pdf: Path,
+    cfg: ParseConfig,
+    result: ParseResult,
+    content_id: str | None = None,
+) -> None:
     """Snapshot a fresh parse result: write parse.json and copy the RAW crops (as produced
     by parse_pdf, before enrich renames them) into the checkpoint. Call immediately after
-    parse_pdf, before enrich."""
+    parse_pdf, before enrich. ``content_id``: see ``_manifest``."""
     ckpt = work_dir / _CHECKPOINT_DIRNAME
     crops_dir = ckpt / _CROPS_SUBDIR
     crops_dir.mkdir(parents=True, exist_ok=True)
@@ -148,20 +167,22 @@ def save_checkpoint(work_dir: Path, pdf: Path, cfg: ParseConfig, result: ParseRe
         for cr in crops:
             if cr.path.exists():
                 shutil.copy2(cr.path, crops_dir / cr.path.name)
-    payload = {"manifest": _manifest(pdf, cfg), "result": _serialize(result)}
+    payload = {"manifest": _manifest(pdf, cfg, content_id), "result": _serialize(result)}
     write_json(ckpt / _CHECKPOINT_FILE, payload)  # atomic (temp + os.replace), written last
 
 
-def load_checkpoint(work_dir: Path, pdf: Path, cfg: ParseConfig) -> ParseResult | None:
+def load_checkpoint(
+    work_dir: Path, pdf: Path, cfg: ParseConfig, content_id: str | None = None
+) -> ParseResult | None:
     """The cached ParseResult if a valid checkpoint matches the current pdf+config, with its
     raw crops restored into figures/ (replacing any enrich-renamed leftovers). None on a
-    miss (absent / manifest mismatch / corrupt)."""
+    miss (absent / manifest mismatch / corrupt). ``content_id``: see ``_manifest``."""
     ckpt = work_dir / _CHECKPOINT_DIRNAME
     try:
         payload = json.loads((ckpt / _CHECKPOINT_FILE).read_text())
     except (OSError, ValueError):
         return None
-    if payload.get("manifest") != _manifest(pdf, cfg):
+    if payload.get("manifest") != _manifest(pdf, cfg, content_id):
         return None
     figures_dir = work_dir / cfg.figures_dir_name
     figures_dir.mkdir(parents=True, exist_ok=True)
@@ -177,16 +198,22 @@ def parse_pdf_cached(
     cfg: ParseConfig,
     backend: OcrBackend | None = None,
     force: bool = False,
+    content_id: str | None = None,
 ) -> ParseResult:
     """``parse_pdf`` with a persistent checkpoint. On a hit (matching pdf+config and not
     ``force``) reuse the saved result and restore its raw crops WITHOUT running OCR; on a
     miss run parse_pdf and save a fresh checkpoint. Either way ``figures/`` ends up holding
-    the raw crops, ready for enrich."""
+    the raw crops, ready for enrich.
+
+    Pass ``content_id`` when ``pdf_path`` doesn't have stable, reusable-across-runs bytes
+    of its own (a ``pdf_split.py`` part file) -- see ``_manifest`` for why hashing such a
+    file directly defeats the checkpoint. Leave it None for a real, stable PDF.
+    """
     pdf_path, work_dir = Path(pdf_path), Path(work_dir)
     if not force:
-        cached = load_checkpoint(work_dir, pdf_path, cfg)
+        cached = load_checkpoint(work_dir, pdf_path, cfg, content_id)
         if cached is not None:
             return cached
     result = parse_pdf(pdf_path, work_dir, cfg, backend)
-    save_checkpoint(work_dir, pdf_path, cfg, result)
+    save_checkpoint(work_dir, pdf_path, cfg, result, content_id)
     return result
