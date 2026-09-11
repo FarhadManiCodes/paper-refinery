@@ -37,6 +37,10 @@ htmlcov/
 .idea/
 *.swp
 .DS_Store
+Session.vim
+
+# ---- this is a plain venv, no uv.lock ----
+uv.lock
 
 # ---- paper-refinery local outputs (parsed markdown, extracted images, manifests) ----
 # generated artifacts from local runs; real outputs go into the papis library, not here
