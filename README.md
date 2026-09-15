@@ -214,9 +214,11 @@ unverified entries.
 
 `refinery-typeset` re-typesets a scanned PDF into a clean, reflowed PDF with a table of
 contents and inline images — no figure-description or citation-verification stages, so it
-needs no API keys by default. Point it at a PDF (parsed fresh, reusing the OCR checkpoint) or
-at an already-parsed markdown file (e.g. a previous run's `<pdf>.refinery/refinery.md` or
-`parsed.md`) to skip OCR entirely. `--title`/`--author` set an optional title page;
+only uses the configured OCR backend for PDF input: the default `maas` mode needs
+`ZHIPU_API_KEY` and network access, while `selfhosted` mode runs locally. Point it at an
+already-parsed markdown file (e.g. a previous run's `<pdf>.refinery/refinery.md` or
+`parsed.md`) to skip OCR and its API/backend requirements entirely. `--title`/`--author`
+set an optional title page;
 `--out`/`--work-dir`/`--force-parse` mirror the single-PDF flags below. Typography (font,
 size, line spacing) is tuned for reading rather than LaTeX defaults — see `TypesetConfig` in
 `config.toml` to override. `--clean-toc` adds a few Gemini calls (needs `GOOGLE_API_KEY`) beyond the always-on

@@ -1024,7 +1024,9 @@ def main_typeset(
 
     INPUT_PATH is either a PDF (parsed fresh, reusing the OCR checkpoint like `refinery`
     does) or an already-parsed markdown file (e.g. a previous run's <pdf>.refinery/parsed.md
-    or refinery.md) -- typeset only, no OCR. No network calls unless --clean-toc is given.
+    or refinery.md) -- typeset only, no OCR. PDF input uses the configured OCR backend:
+    default ``maas`` mode needs ZHIPU_API_KEY/network access, while ``selfhosted`` runs
+    locally. Markdown input needs neither. ``--clean-toc`` additionally uses Gemini.
 
     Needs ``pandoc`` and ``xelatex`` on PATH (system binaries, not pip dependencies -- see
     README's "Development setup").
