@@ -149,29 +149,38 @@ def _align_by_line(rows: list[ExtractedReference], raw_texts: list[str]) -> list
     Padding a short response at the end is not alignment: confirmed live (2026-09-23,
     four of 33 papers) the model sometimes skips one line of a 50-line batch, and
     end-padding then shifted every later entry onto its neighbour's reference -- 13-22
-    wrong titles per paper, silently. Each row carries the ``line`` it came from, so a
-    skipped line only leaves its own slot empty. Rows without a usable line number are
-    trusted by position only when the counts agree (nothing can have been skipped).
-    Either way a row is kept only if it fits that line's raw text (``_row_fits``), which
-    also catches a model that numbers its own rows instead of echoing the input's.
+    wrong titles per paper, silently. Each row tries, in order: the ``line`` it names,
+    the slot printing the same number as its ``citation_key``, and -- only when the
+    counts agree, so nothing can have been skipped -- its own position. It takes the
+    first free candidate it fits (``_row_fits``), so a skipped line leaves only its own
+    slot empty, and a row that fits none of them is dropped, never shifted.
     """
     n = len(raw_texts)
     out: list[dict] = [{} for _ in range(n)]
-    numbered = [r for r in rows if r.line is not None and 1 <= r.line <= n]
-    if numbered:
-        placed = [(r.line - 1, r) for r in numbered]
-    elif len(rows) == n:
-        placed = list(enumerate(rows))
-    else:
-        return out
+    # Printed head number -> slot. The model has been seen (dong-2024, 2026-09-23)
+    # echoing a reference's printed number ("[57]") as `line` despite the LN: labels,
+    # which put every row of a batch out of range; its own key still pins it down.
+    printed_slots: dict[str, int] = {}
+    for slot, raw in enumerate(raw_texts):
+        head = leading_number(raw)
+        if head is not None:
+            printed_slots.setdefault(head, slot)
     rejected = 0
-    for slot, row in placed:
-        if out[slot]:
-            continue  # first claim wins; a duplicate never overwrites
-        if not _row_fits(row, raw_texts[slot]):
+    for position, row in enumerate(rows):
+        candidates = []
+        if row.line is not None and 1 <= row.line <= n:
+            candidates.append(row.line - 1)
+        marker = _NUMERIC_KEY_RE.fullmatch((row.citation_key or "").strip())
+        if marker and marker.group(1) in printed_slots:
+            candidates.append(printed_slots[marker.group(1)])
+        if len(rows) == n:  # position only means something when nothing was skipped
+            candidates.append(position)
+        for slot in dict.fromkeys(candidates):  # first free slot the row fits wins
+            if not out[slot] and _row_fits(row, raw_texts[slot]):
+                out[slot] = row.model_dump(exclude_none=True, exclude={"line"})
+                break
+        else:
             rejected += 1
-            continue
-        out[slot] = row.model_dump(exclude_none=True, exclude={"line"})
     if rejected:
         logger.warning("extract_references: dropped %d row(s) that do not fit their line", rejected)
     return out

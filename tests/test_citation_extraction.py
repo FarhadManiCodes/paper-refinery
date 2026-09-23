@@ -393,7 +393,7 @@ def test_self_numbered_rows_after_a_skip_are_caught_by_the_title_check():
     ]
 
 
-def test_zero_based_line_numbers_cannot_shift_rows():
+def test_zero_based_line_numbers_are_recovered_by_citation_key():
     from paper_refinery.citation_extraction import _align_by_line
 
     raws = ["[1] Alpha networks.", "[2] Beta filters.", "[3] Gamma control."]
@@ -402,9 +402,33 @@ def test_zero_based_line_numbers_cannot_shift_rows():
         ExtractedReference(line=1, title="Beta filters", citation_key="[2]"),
         ExtractedReference(line=2, title="Gamma control", citation_key="[3]"),
     ]
-    # line 0 is out of range and dropped; lines 1 and 2 point one slot early and fail
-    # both the key and the title check -- nothing lands on a neighbour's line
-    assert _align_by_line(rows, raws) == [{}, {}, {}]
+    # every declared line is one slot early (or out of range); the printed key places
+    # each row on its own line instead, and nothing lands on a neighbour
+    assert [i.get("title") for i in _align_by_line(rows, raws)] == [
+        "Alpha networks",
+        "Beta filters",
+        "Gamma control",
+    ]
+
+
+def test_printed_numbers_echoed_as_lines_still_align():
+    # the live dong-2024 batch 2: lines 1-50 print [50]-[99], and the model echoed the
+    # printed numbers as `line` -- all out of range but one -- here with a skip too
+    from paper_refinery.citation_extraction import _align_by_line
+
+    titles = ["Alpha nets", "Beta filters", "Gamma control", "Delta flows"]
+    raws = [f"[{50 + i}] {t}." for i, t in enumerate(titles)]
+    rows = [  # "Beta filters" skipped, so position is meaningless too
+        ExtractedReference(line=50, title="Alpha nets", citation_key="[50]"),
+        ExtractedReference(line=52, title="Gamma control", citation_key="[52]"),
+        ExtractedReference(line=53, title="Delta flows", citation_key="[53]"),
+    ]
+    assert [i.get("title") for i in _align_by_line(rows, raws)] == [
+        "Alpha nets",
+        None,
+        "Gamma control",
+        "Delta flows",
+    ]
 
 
 def test_numeric_key_mismatch_rejects_a_row_whose_title_happens_to_fit():
