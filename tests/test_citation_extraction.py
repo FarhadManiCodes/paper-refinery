@@ -99,7 +99,7 @@ def _numbered_client(skip: set[str], calls: list[list[str]], fail_retry: bool = 
     on the first call only (the live failure: one line dropped from a 50-line batch)."""
     import re as _re
 
-    ref_line = _re.compile(r"^(\d+)\. (ref \d+)$")
+    ref_line = _re.compile(r"^L(\d+): (ref \d+)$")
 
     class FakeClient:
         class models:
@@ -225,7 +225,7 @@ def test_extract_references_batches_and_concatenates_in_order():
     seen_batches = []
     # only the appended reference-listing lines ("N. ref M"), never _PROMPT's own
     # numbered instruction lines
-    ref_line = _re.compile(r"^\d+\. (ref \d+)$")
+    ref_line = _re.compile(r"^L\d+: (ref \d+)$")
 
     class FakeClient:
         class models:
@@ -247,7 +247,7 @@ def test_extract_references_batches_and_concatenates_in_order():
 def test_extract_references_batch_failure_degrades_that_batch_only():
     import re as _re
 
-    ref_line = _re.compile(r"^\d+\. (ref \d+)$")
+    ref_line = _re.compile(r"^L\d+: (ref \d+)$")
 
     # one bad batch (unparseable response) must pad to {} for its slots without
     # misaligning the good batches around it
@@ -280,7 +280,7 @@ def test_extract_references_batch_that_raises_degrades_that_batch_only(caplog):
     # "one bad unit never fails the whole" pattern as enrich.py.
     import re as _re
 
-    ref_line = _re.compile(r"^\d+\. (ref \d+)$")
+    ref_line = _re.compile(r"^L\d+: (ref \d+)$")
 
     class FakeAuthError(Exception):
         code = 401  # non-retryable per retry.py
@@ -391,3 +391,65 @@ def test_self_numbered_rows_after_a_skip_are_caught_by_the_title_check():
         "Gamma control",
         "Delta flows",
     ]
+
+
+def test_zero_based_line_numbers_cannot_shift_rows():
+    from paper_refinery.citation_extraction import _align_by_line
+
+    raws = ["[1] Alpha networks.", "[2] Beta filters.", "[3] Gamma control."]
+    rows = [
+        ExtractedReference(line=0, title="Alpha networks", citation_key="[1]"),
+        ExtractedReference(line=1, title="Beta filters", citation_key="[2]"),
+        ExtractedReference(line=2, title="Gamma control", citation_key="[3]"),
+    ]
+    # line 0 is out of range and dropped; lines 1 and 2 point one slot early and fail
+    # both the key and the title check -- nothing lands on a neighbour's line
+    assert _align_by_line(rows, raws) == [{}, {}, {}]
+
+
+def test_numeric_key_mismatch_rejects_a_row_whose_title_happens_to_fit():
+    from paper_refinery.citation_extraction import _row_fits
+
+    raw = "[12] Mean field games and applications."
+    assert _row_fits(ExtractedReference(title="Mean field games", citation_key="[12]"), raw)
+    assert not _row_fits(ExtractedReference(title="Mean field games", citation_key="[13]"), raw)
+
+
+def test_untitled_row_falls_back_to_the_first_author():
+    from paper_refinery.citation_extraction import _row_fits
+
+    raw = "[3] A. Jones, Phys. Rev. Lett. 12, 345 (2001)."
+    jones = ExtractedReference(title="", authors=[Author(family="Jones", given="A.")])
+    wu = ExtractedReference(title="", authors=[Author(family="Wu", given="B.")])
+    assert _row_fits(jones, raw)
+    assert not _row_fits(wu, raw)
+
+
+def test_equal_count_without_lines_and_a_duplicate_row_does_not_shift():
+    from paper_refinery.citation_extraction import _align_by_line
+
+    raws = ["[1] Alpha networks.", "[2] Beta filters.", "[3] Gamma control."]
+    rows = [  # Beta skipped, Alpha duplicated: counts still agree
+        ExtractedReference(title="Alpha networks"),
+        ExtractedReference(title="Alpha networks"),
+        ExtractedReference(title="Gamma control"),
+    ]
+    assert [i.get("title") for i in _align_by_line(rows, raws)] == [
+        "Alpha networks",
+        None,
+        "Gamma control",
+    ]
+
+
+def test_listing_labels_lines_so_printed_numbers_are_not_confused():
+    seen = {}
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                seen["prompt"] = contents
+                return type("R", (), {"parsed": [ExtractedReference(line=1, title="Paper A")]})()
+
+    extract_references(["[51] Paper A, 2020."], CitationConfig(), client=FakeClient())
+    assert "L1: [51] Paper A, 2020." in seen["prompt"]

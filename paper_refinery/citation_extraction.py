@@ -43,8 +43,8 @@ class ExtractedReference(BaseModel):
 
     line: int | None = Field(
         default=None,
-        description="The number N of the input line (listed as 'N. ...') this entry was "
-        "extracted from.",
+        description="The number N of the input line this entry was extracted from, from its "
+        "'LN:' prefix (for 'L7: [12] Smith ...' this is 7, never the printed 12).",
     )
     citation_key: str | None = Field(
         default=None,
@@ -90,13 +90,14 @@ _PROMPT = (
     '"Attention is all you need").\n'
     "4. Author formatting: keep the author list exactly as it appears. Do not abbreviate "
     'to "et al." unless that is literally printed in the text.\n'
-    "5. One entry per line: each numbered line below is meant to be one bibliography "
+    "5. One entry per line: each input line below is meant to be one bibliography "
     "entry, but OCR noise occasionally blurs two entries together. If a line visibly "
     "contains more than one distinct entry (e.g. two citation markers), extract only the "
     "first one faithfully -- never merge fields from two different entries into one "
     "corrupted record.\n\n"
     "Return one JSON object per input line, in the same order, matching the schema "
-    "exactly, and set each object's `line` to the number of the input line it came from."
+    "exactly, and set each object's `line` to N from the input line's 'LN:' prefix. That "
+    "prefix only labels the input; it is not part of the reference or its citation key."
 )
 
 
@@ -118,16 +119,28 @@ def _words(text: str) -> list[str]:
     return re.sub(r"[^a-z0-9]+", " ", unicodedata.normalize("NFKD", text).lower()).split()
 
 
-def _title_in_raw(title: str, raw: str) -> bool:
-    """Whether an extracted title plausibly came from this raw reference: most of its
-    first few significant words are printed in it. Titles are extracted "exactly as
-    printed", so a row placed on the wrong line fails this. Checked live over ~1,400
-    correctly aligned references (20 papers) with no false rejection."""
-    words = [w for w in _words(title) if len(w) > 3][:6] or _words(title)[:3]
-    if not words:
-        return True  # nothing to check against; don't reject on an empty title
+def _row_fits(row: ExtractedReference, raw: str) -> bool:
+    """Whether an extracted row plausibly came from this raw reference.
+
+    - A numeric citation key must equal the number printed at the head of the raw text
+      (when there is one): in a numbered bibliography this alone pins the row down.
+    - Most of the title's first few significant words must be printed in it. Titles are
+      extracted "exactly as printed"; checked live over ~1,400 correctly aligned
+      references with no false rejection. Not sufficient on its own: same-topic
+      neighbours ("Mean field games ...") can pass for each other.
+    - A title with nothing to check (empty, or non-Latin so nothing survives NFKD) falls
+      back to the first author's surname.
+    """
+    marker = _NUMERIC_KEY_RE.fullmatch((row.citation_key or "").strip())
+    head = leading_number(raw)
+    if marker and head is not None and marker.group(1) != head:
+        return False
     printed = set(_words(raw))
-    return sum(w in printed for w in words) >= max(1, 0.6 * len(words))
+    words = [w for w in _words(row.title) if len(w) > 3][:6] or _words(row.title)[:3]
+    if words:
+        return sum(w in printed for w in words) >= max(1, 0.6 * len(words))
+    surname = _words(row.authors[0].family) if row.authors else []
+    return all(w in printed for w in surname)  # nothing checkable at all: accept
 
 
 def _align_by_line(rows: list[ExtractedReference], raw_texts: list[str]) -> list[dict]:
@@ -139,7 +152,7 @@ def _align_by_line(rows: list[ExtractedReference], raw_texts: list[str]) -> list
     wrong titles per paper, silently. Each row carries the ``line`` it came from, so a
     skipped line only leaves its own slot empty. Rows without a usable line number are
     trusted by position only when the counts agree (nothing can have been skipped).
-    Either way a row is kept only if its title is printed in that line's raw text, which
+    Either way a row is kept only if it fits that line's raw text (``_row_fits``), which
     also catches a model that numbers its own rows instead of echoing the input's.
     """
     n = len(raw_texts)
@@ -155,14 +168,12 @@ def _align_by_line(rows: list[ExtractedReference], raw_texts: list[str]) -> list
     for slot, row in placed:
         if out[slot]:
             continue  # first claim wins; a duplicate never overwrites
-        if not _title_in_raw(row.title, raw_texts[slot]):
+        if not _row_fits(row, raw_texts[slot]):
             rejected += 1
             continue
         out[slot] = row.model_dump(exclude_none=True, exclude={"line"})
     if rejected:
-        logger.warning(
-            "extract_references: dropped %d row(s) whose title is not in their line", rejected
-        )
+        logger.warning("extract_references: dropped %d row(s) that do not fit their line", rejected)
     return out
 
 
@@ -177,7 +188,9 @@ def _extract_batch(
     never misaligns the batches around it."""
     from google.genai import types
 
-    listing = "\n\n".join(f"{i + 1}. {t}" for i, t in enumerate(raw_texts))
+    # "LN:" rather than "N.": in batch 2+ (and in retries) a plain "1. [51] ..." invites
+    # echoing the printed 51, and small printed numbers would land on a wrong valid slot
+    listing = "\n\n".join(f"L{i + 1}: {t}" for i, t in enumerate(raw_texts))
     prompt = f"{_PROMPT}\n\n{listing}"
     config = types.GenerateContentConfig(
         response_mime_type="application/json",
@@ -209,14 +222,17 @@ def _extract_batch(
     if not missing:
         return items
     logger.warning(
-        "extract_references: got %d items for %d input lines in a batch; %d line(s) unmatched%s",
+        "extract_references: %sgot %d items for %d input lines in a batch; %d line(s) unmatched%s",
+        "" if retry_missing else "retry: ",
         len(rows),
         len(raw_texts),
         len(missing),
         " -- retrying them once" if retry_missing else "",
     )
     # A wholly unusable response (e.g. parsed is None) is retried too: it is the same
-    # one extra call, and the retry is on the lines that are actually missing.
+    # one extra call, and the retry is on the lines that are actually missing. Worst
+    # case is a response truncated at the output-token cap: the retry resends the same
+    # lines and may truncate again -- bounded at 2x calls, and those lines stay {}.
     if retry_missing:
         try:
             again = _extract_batch([raw_texts[i] for i in missing], cfg, client, False)
@@ -293,7 +309,7 @@ def _sanitize_citation_keys(raw_texts: list[str], items: list[dict]) -> list[dic
     deterministic and one-sided: genuine "[6] "/"3. "/"2 " heads keep their key,
     anything unconfirmed loses it (linking treats a missing key positionally).
     """
-    for raw, item in zip(raw_texts, items, strict=True):  # items padded to len(raw_texts)
+    for raw, item in zip(raw_texts, items, strict=True):  # items aligned to len(raw_texts)
         key = item.get("citation_key") or ""
         marker = _NUMERIC_KEY_RE.fullmatch(key.strip())
         if marker is None:
