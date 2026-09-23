@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -40,6 +41,11 @@ class ExtractedReference(BaseModel):
     prompting -- Google's own guidance for structured extraction: prefer schema
     descriptions over duplicating the schema in prose."""
 
+    line: int | None = Field(
+        default=None,
+        description="The number N of the input line (listed as 'N. ...') this entry was "
+        "extracted from.",
+    )
     citation_key: str | None = Field(
         default=None,
         description="The exact citation marker printed for this entry, if any "
@@ -90,7 +96,7 @@ _PROMPT = (
     "first one faithfully -- never merge fields from two different entries into one "
     "corrupted record.\n\n"
     "Return one JSON object per input line, in the same order, matching the schema "
-    "exactly."
+    "exactly, and set each object's `line` to the number of the input line it came from."
 )
 
 
@@ -108,11 +114,67 @@ def make_client(cfg: CitationConfig) -> Client:
     return genai.Client(api_key=api_key)
 
 
-def _extract_batch(raw_texts: list[str], cfg: CitationConfig, client: Client) -> list[dict]:
-    """One extraction Gemini call over a batch of reference strings. Order-preserving and
-    padded/truncated to exactly ``len(raw_texts)``; a batch the model returns nothing
-    usable for degrades to all-``{}`` for that batch, never crashes and never misaligns
-    the batches around it."""
+def _words(text: str) -> list[str]:
+    return re.sub(r"[^a-z0-9]+", " ", unicodedata.normalize("NFKD", text).lower()).split()
+
+
+def _title_in_raw(title: str, raw: str) -> bool:
+    """Whether an extracted title plausibly came from this raw reference: most of its
+    first few significant words are printed in it. Titles are extracted "exactly as
+    printed", so a row placed on the wrong line fails this. Checked live over ~1,400
+    correctly aligned references (20 papers) with no false rejection."""
+    words = [w for w in _words(title) if len(w) > 3][:6] or _words(title)[:3]
+    if not words:
+        return True  # nothing to check against; don't reject on an empty title
+    printed = set(_words(raw))
+    return sum(w in printed for w in words) >= max(1, 0.6 * len(words))
+
+
+def _align_by_line(rows: list[ExtractedReference], raw_texts: list[str]) -> list[dict]:
+    """Place each extracted row at the input line it names, ``{}`` where none does.
+
+    Padding a short response at the end is not alignment: confirmed live (2026-09-23,
+    four of 33 papers) the model sometimes skips one line of a 50-line batch, and
+    end-padding then shifted every later entry onto its neighbour's reference -- 13-22
+    wrong titles per paper, silently. Each row carries the ``line`` it came from, so a
+    skipped line only leaves its own slot empty. Rows without a usable line number are
+    trusted by position only when the counts agree (nothing can have been skipped).
+    Either way a row is kept only if its title is printed in that line's raw text, which
+    also catches a model that numbers its own rows instead of echoing the input's.
+    """
+    n = len(raw_texts)
+    out: list[dict] = [{} for _ in range(n)]
+    numbered = [r for r in rows if r.line is not None and 1 <= r.line <= n]
+    if numbered:
+        placed = [(r.line - 1, r) for r in numbered]
+    elif len(rows) == n:
+        placed = list(enumerate(rows))
+    else:
+        return out
+    rejected = 0
+    for slot, row in placed:
+        if out[slot]:
+            continue  # first claim wins; a duplicate never overwrites
+        if not _title_in_raw(row.title, raw_texts[slot]):
+            rejected += 1
+            continue
+        out[slot] = row.model_dump(exclude_none=True, exclude={"line"})
+    if rejected:
+        logger.warning(
+            "extract_references: dropped %d row(s) whose title is not in their line", rejected
+        )
+    return out
+
+
+def _extract_batch(
+    raw_texts: list[str], cfg: CitationConfig, client: Client, retry_missing: bool = True
+) -> list[dict]:
+    """One extraction Gemini call over a batch of reference strings, aligned to the input
+    by each row's ``line`` (see ``_align_by_line``) to exactly ``len(raw_texts)`` items.
+    Lines the model skipped get one retry call of their own; any still missing stay
+    ``{}`` -- an unextracted reference is harmless, a shifted one mislinks citations. A
+    batch the model returns nothing usable for degrades to all-``{}``, never crashes and
+    never misaligns the batches around it."""
     from google.genai import types
 
     listing = "\n\n".join(f"{i + 1}. {t}" for i, t in enumerate(raw_texts))
@@ -137,18 +199,33 @@ def _extract_batch(raw_texts: list[str], cfg: CitationConfig, client: Client) ->
     )
 
     # response.parsed is None -- or, defensively, any non-list shape -- when the model's
-    # JSON couldn't be coerced to the schema; degrade to the pad-with-{} path, never crash
+    # JSON couldn't be coerced to the schema; degrade to all-{} (then one retry), never crash
     parsed = response.parsed
-    rows = parsed if isinstance(parsed, list) else []
-    items = [r.model_dump(exclude_none=True) for r in rows if isinstance(r, ExtractedReference)]
-    if len(items) != len(raw_texts):
-        logger.warning(
-            "extract_references: got %d items for %d input lines in a batch; "
-            "padding/truncating to align by position",
-            len(items),
-            len(raw_texts),
-        )
-    return (items + [{}] * len(raw_texts))[: len(raw_texts)]
+    rows = [
+        r for r in (parsed if isinstance(parsed, list) else []) if isinstance(r, ExtractedReference)
+    ]
+    items = _align_by_line(rows, raw_texts)
+    missing = [i for i, item in enumerate(items) if not item]
+    if not missing:
+        return items
+    logger.warning(
+        "extract_references: got %d items for %d input lines in a batch; %d line(s) unmatched%s",
+        len(rows),
+        len(raw_texts),
+        len(missing),
+        " -- retrying them once" if retry_missing else "",
+    )
+    # A wholly unusable response (e.g. parsed is None) is retried too: it is the same
+    # one extra call, and the retry is on the lines that are actually missing.
+    if retry_missing:
+        try:
+            again = _extract_batch([raw_texts[i] for i in missing], cfg, client, False)
+        except Exception as exc:  # keep this batch's good rows; the retry was a bonus
+            logger.warning("extract_references: retry of %d line(s) failed (%r)", len(missing), exc)
+            return items
+        for i, item in zip(missing, again, strict=True):
+            items[i] = item
+    return items
 
 
 def extract_references(

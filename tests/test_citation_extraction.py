@@ -69,14 +69,17 @@ def test_extract_references_uses_response_parsed():
             def generate_content(model, contents, config):
                 return type("R", (), {"parsed": parsed})()
 
-    out = extract_references(["ref one", "ref two"], CitationConfig(), client=FakeClient())
+    raws = ["[1] J. Smith, Paper A, 2019.", "[2] Paper B, 2020."]
+    out = extract_references(raws, CitationConfig(), client=FakeClient())
     assert out == [
         {"title": "Paper A", "authors": [{"family": "Smith", "given": "J."}]},
         {"title": "Paper B", "authors": [], "year": 2020},
     ]
 
 
-def test_extract_references_pads_when_model_returns_fewer_items(caplog):
+def test_extract_references_never_guesses_position_for_a_short_unnumbered_response(caplog):
+    # 1 row for 2 lines and no line numbers: which line it belongs to is unknowable, so
+    # both slots stay empty rather than risk attaching it to the wrong reference
     parsed = [ExtractedReference(title="Only One")]
 
     class FakeClient:
@@ -88,7 +91,74 @@ def test_extract_references_pads_when_model_returns_fewer_items(caplog):
     with caplog.at_level(logging.WARNING):
         out = extract_references(["ref one", "ref two"], CitationConfig(), client=FakeClient())
     assert "got 1 items for 2 input" in caplog.text
-    assert out == [{"title": "Only One", "authors": []}, {}]
+    assert out == [{}, {}]
+
+
+def _numbered_client(skip: set[str], calls: list[list[str]], fail_retry: bool = False):
+    """Fake Gemini that numbers its rows like the real one and skips titles in *skip*
+    on the first call only (the live failure: one line dropped from a 50-line batch)."""
+    import re as _re
+
+    ref_line = _re.compile(r"^(\d+)\. (ref \d+)$")
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                lines = [
+                    (int(m.group(1)), m.group(2))
+                    for ln in contents.splitlines()
+                    if (m := ref_line.match(ln))
+                ]
+                calls.append([t for _, t in lines])
+                if len(calls) > 1 and fail_retry:
+                    raise ValueError("retry broke")
+                rows = [
+                    ExtractedReference(line=n, title=t)
+                    for n, t in lines
+                    if len(calls) > 1 or t not in skip
+                ]
+                return type("R", (), {"parsed": rows})()
+
+    return FakeClient()
+
+
+def test_skipped_line_does_not_shift_later_references_and_is_retried():
+    calls: list[list[str]] = []
+    raws = [f"ref {i}" for i in range(5)]
+    out = extract_references(raws, CitationConfig(), client=_numbered_client({"ref 1"}, calls))
+
+    assert [item.get("title") for item in out] == raws  # nothing shifted
+    assert calls == [raws, ["ref 1"]]  # the retry asked for the skipped line only
+    assert all("line" not in item for item in out)  # alignment detail never leaks out
+
+
+def test_failed_retry_keeps_the_batch_and_leaves_only_the_skipped_line_empty(caplog):
+    calls: list[list[str]] = []
+    raws = [f"ref {i}" for i in range(4)]
+    with caplog.at_level(logging.WARNING):
+        out = extract_references(
+            raws, CitationConfig(), client=_numbered_client({"ref 2"}, calls, fail_retry=True)
+        )
+
+    assert [item.get("title") for item in out] == ["ref 0", "ref 1", None, "ref 3"]
+    assert "retry of 1 line(s) failed" in caplog.text
+
+
+def test_align_by_line_ignores_out_of_range_and_duplicate_lines():
+    from paper_refinery.citation_extraction import _align_by_line
+
+    rows = [
+        ExtractedReference(line=2, title="B"),
+        ExtractedReference(line=2, title="B again"),
+        ExtractedReference(line=9, title="nowhere"),
+        ExtractedReference(line=1, title="A"),
+    ]
+    assert [item.get("title") for item in _align_by_line(rows, ["A a", "B b", "C c"])] == [
+        "A",
+        "B",
+        None,
+    ]
 
 
 def test_extract_references_retries_transient_then_succeeds():
@@ -105,7 +175,7 @@ def test_extract_references_retries_transient_then_succeeds():
                 return type("R", (), {"parsed": parsed})()
 
     cfg = CitationConfig(retry_attempts=4, retry_base_delay=0.0)
-    out = extract_references(["ref one"], cfg, client=FakeClient())
+    out = extract_references(["[1] Paper A, 2020."], cfg, client=FakeClient())
     assert out == [{"title": "Paper A", "authors": []}]
     assert len(calls) == 3
 
@@ -288,3 +358,36 @@ def test_sanitize_leaves_absent_and_non_numeric_keys_alone():
     items = [{}, {"citation_key": "Jones2021"}]
     out = _sanitize_citation_keys(raws, items)
     assert out[0] == {} and out[1]["citation_key"] == "Jones2021"
+
+
+def test_self_numbered_rows_after_a_skip_are_caught_by_the_title_check():
+    # the model skips "Beta" but numbers its rows 1,2,3 by its own count, so line
+    # numbers alone would shift Gamma and Delta; the title check drops those two and
+    # the retry of the three empty lines fills them correctly
+    raws = ["[1] Alpha networks.", "[2] Beta filters.", "[3] Gamma control.", "[4] Delta flows."]
+    responses = [
+        [
+            ExtractedReference(line=1, title="Alpha networks"),
+            ExtractedReference(line=2, title="Gamma control"),
+            ExtractedReference(line=3, title="Delta flows"),
+        ],
+        [
+            ExtractedReference(line=1, title="Beta filters"),
+            ExtractedReference(line=2, title="Gamma control"),
+            ExtractedReference(line=3, title="Delta flows"),
+        ],
+    ]
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                return type("R", (), {"parsed": responses.pop(0)})()
+
+    out = extract_references(raws, CitationConfig(), client=FakeClient())
+    assert [item.get("title") for item in out] == [
+        "Alpha networks",
+        "Beta filters",
+        "Gamma control",
+        "Delta flows",
+    ]
