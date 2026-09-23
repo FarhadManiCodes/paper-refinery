@@ -412,8 +412,8 @@ def test_zero_based_line_numbers_are_recovered_by_citation_key():
 
 
 def test_printed_numbers_echoed_as_lines_still_align():
-    # the live dong-2024 batch 2: lines 1-50 print [50]-[99], and the model echoed the
-    # printed numbers as `line` -- all out of range but one -- here with a skip too
+    # the live dong-2024 batch 2 in miniature: lines print [50]-[53] and the model
+    # echoed the printed numbers as `line` (all out of range here), with a skip too
     from paper_refinery.citation_extraction import _align_by_line
 
     titles = ["Alpha nets", "Beta filters", "Gamma control", "Delta flows"]
@@ -477,3 +477,42 @@ def test_listing_labels_lines_so_printed_numbers_are_not_confused():
 
     extract_references(["[51] Paper A, 2020."], CitationConfig(), client=FakeClient())
     assert "L1: [51] Paper A, 2020." in seen["prompt"]
+
+
+def test_echoed_printed_number_inside_the_range_cannot_take_the_wrong_slot():
+    # with a real 50-line batch printing [2]-[51], an echoed "[5]" is a *valid* line 5
+    # -- which prints [6]; the key check rejects that slot and the key places it on 4
+    from paper_refinery.citation_extraction import _align_by_line
+
+    raws = [f"[{i + 2}] Topic{i} study." for i in range(50)]
+    rows = [
+        ExtractedReference(line=i + 2, title=f"Topic{i} study", citation_key=f"[{i + 2}]")
+        for i in range(50)
+    ]
+    out = _align_by_line(rows, raws)
+    assert [o.get("title") for o in out] == [f"Topic{i} study" for i in range(50)]
+
+
+def test_duplicate_row_cannot_fall_through_to_a_skipped_neighbours_position():
+    # author-year list (no keys): line 3 skipped, line 2 emitted twice, so the counts
+    # agree; the duplicate must not land on line 3 even though its title nearly fits
+    from paper_refinery.citation_extraction import _align_by_line
+
+    raws = [
+        "Adams, A. (2020). Alpha networks.",
+        "Brown, B. (2021). Constitutional classifiers.",
+        "Clark, C. (2022). Constitutional classifiers plus plus.",
+        "Davis, D. (2023). Delta flows.",
+    ]
+    rows = [
+        ExtractedReference(line=1, title="Alpha networks"),
+        ExtractedReference(line=2, title="Constitutional classifiers"),
+        ExtractedReference(line=2, title="Constitutional classifiers"),
+        ExtractedReference(line=4, title="Delta flows"),
+    ]
+    assert [o.get("title") for o in _align_by_line(rows, raws)] == [
+        "Alpha networks",
+        "Constitutional classifiers",
+        None,
+        "Delta flows",
+    ]

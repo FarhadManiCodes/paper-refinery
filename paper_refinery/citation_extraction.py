@@ -151,7 +151,8 @@ def _align_by_line(rows: list[ExtractedReference], raw_texts: list[str]) -> list
     end-padding then shifted every later entry onto its neighbour's reference -- 13-22
     wrong titles per paper, silently. Each row tries, in order: the ``line`` it names,
     the slot printing the same number as its ``citation_key``, and -- only when the
-    counts agree, so nothing can have been skipped -- its own position. It takes the
+    counts agree and no line repeats, so nothing can have been skipped -- its own
+    position. It takes the
     first free candidate it fits (``_row_fits``), so a skipped line leaves only its own
     slot empty, and a row that fits none of them is dropped, never shifted.
     """
@@ -165,6 +166,11 @@ def _align_by_line(rows: list[ExtractedReference], raw_texts: list[str]) -> list
         head = leading_number(raw)
         if head is not None:
             printed_slots.setdefault(head, slot)
+    # Position only means something when nothing was skipped. Equal counts are not
+    # enough: a skipped line plus a duplicated row also balance, and the duplicate would
+    # fall through to the skipped neighbour's slot, where only the title check guards it.
+    lines = [r.line for r in rows if r.line is not None and 1 <= r.line <= n]
+    positional = len(rows) == n and len(lines) == len(set(lines))
     rejected = 0
     for position, row in enumerate(rows):
         candidates = []
@@ -173,7 +179,7 @@ def _align_by_line(rows: list[ExtractedReference], raw_texts: list[str]) -> list
         marker = _NUMERIC_KEY_RE.fullmatch((row.citation_key or "").strip())
         if marker and marker.group(1) in printed_slots:
             candidates.append(printed_slots[marker.group(1)])
-        if len(rows) == n:  # position only means something when nothing was skipped
+        if positional:
             candidates.append(position)
         for slot in dict.fromkeys(candidates):  # first free slot the row fits wins
             if not out[slot] and _row_fits(row, raw_texts[slot]):
