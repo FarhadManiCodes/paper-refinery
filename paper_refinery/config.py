@@ -7,7 +7,7 @@ import os
 import stat
 import tomllib
 import types
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Union, get_args, get_origin, get_type_hints
 
@@ -404,7 +404,7 @@ def load_config(path: Path | None = None) -> RefineryConfig:
         data = tomllib.load(f)
     for section, values in data.items():
         sub = getattr(cfg, section, None)
-        if sub is None:
+        if sub is None or not is_dataclass(sub):
             raise ValueError(f"{path}: unknown config section [{section}]")
         hints = get_type_hints(type(sub))
         for key, value in values.items():

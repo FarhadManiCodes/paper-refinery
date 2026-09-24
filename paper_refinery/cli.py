@@ -127,7 +127,7 @@ def _write_readonly(path: Path, text: str) -> None:
     file's own permission bits and fails loudly instead of corrupting it.
     """
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
+    tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
     path.chmod(0o444)
 
@@ -145,7 +145,7 @@ def _sha256(data: bytes) -> str:
 
 def _record_md_checksum(work_dir: Path, text: str) -> None:
     """Remember what this run wrote to refinery.md, so a later run can tell a hand edit."""
-    (work_dir / _MD_CHECKSUM).write_text(_sha256(text.encode()) + "\n")
+    (work_dir / _MD_CHECKSUM).write_text(_sha256(text.encode("utf-8")) + "\n")
 
 
 def _backup_once(md: Path, kind: str) -> Path:
@@ -155,7 +155,8 @@ def _backup_once(md: Path, kind: str) -> Path:
     for earlier in sorted(md.parent.glob(f"refinery.md.{kind}-*")):
         if earlier.read_bytes() == content:
             return earlier
-    backup = md.with_name(f"refinery.md.{kind}-{time.strftime('%Y%m%d-%H%M%S')}")
+    stamp = time.strftime("%Y%m%d-%H%M%S") + f".{time.time_ns() // 1000 % 1_000_000:06d}"
+    backup = md.with_name(f"refinery.md.{kind}-{stamp}")
     shutil.copy2(md, backup)
     return backup
 
@@ -739,6 +740,7 @@ def _parse_for_batch(
     batch) not to be worth the extra bookkeeping to avoid.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
+    _guard_hand_edits(work_dir, cfg)  # before any paid work; a refusal skips this paper
     if not force_parse:
         cached = load_checkpoint(work_dir, pdf, cfg.parse)
         if cached is not None:

@@ -75,3 +75,21 @@ def test_repeated_refusals_keep_a_single_backup(tmp_path):
         with pytest.raises(cli.HandEditedMarkdown):
             cli._guard_hand_edits(work, RefineryConfig())
     assert len(_backups(work, "hand-edited")) == 1
+
+
+def test_the_selfhosted_batch_path_is_guarded_too(tmp_path, monkeypatch):
+    work = tmp_path / "w"
+    _written_by_refinery(work)
+    (work / "refinery.md").write_text("edited\n")
+    monkeypatch.setattr(cli, "load_checkpoint", lambda *a, **k: pytest.fail("parse started"))
+    with pytest.raises(cli.HandEditedMarkdown):
+        cli._parse_for_batch(tmp_path / "p.pdf", work, RefineryConfig(), None, False)
+
+
+def test_a_top_level_scalar_in_config_toml_is_a_clean_error(tmp_path):
+    from paper_refinery.config import load_config
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("overwrite_edits = true\n")
+    with pytest.raises(ValueError, match="unknown config section"):
+        load_config(cfg)
