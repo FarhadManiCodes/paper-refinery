@@ -538,24 +538,71 @@ def _counting_client(calls, skip_title=None):
 def test_a_rerun_of_the_same_references_makes_no_extraction_calls(tmp_path):
     # extraction was the costly part of re-refining (2026-09-24): an unchanged document
     # must not pay for it twice
-    from paper_refinery import citation_extraction as ce
+    from collections import Counter
 
     cfg = CitationConfig(extract_batch_size=3, max_workers=2, extraction_cache_dir=str(tmp_path))
     raws = [f"ref {i}" for i in range(7)]
     calls: list = []
-    first = extract_references(raws, cfg, client=_counting_client(calls))
-    assert len(calls) == 3
-    before = ce.extraction_stats()
-    again = extract_references(raws, cfg, client=_counting_client(calls))
+    first_stats: Counter = Counter()
+    first = extract_references(raws, cfg, client=_counting_client(calls), stats=first_stats)
+    assert len(calls) == 3 and first_stats == Counter(extracted=3)
+    again_stats: Counter = Counter()
+    again = extract_references(raws, cfg, client=_counting_client(calls), stats=again_stats)
     assert len(calls) == 3  # every batch from the cache
     assert again == first
-    assert (ce.extraction_stats() - before)["cached"] == 3
+    assert again_stats == Counter(cached=3)
 
     other_model = CitationConfig(
         extract_batch_size=3, max_workers=2, extraction_cache_dir=str(tmp_path), model="other"
     )
     extract_references(raws, other_model, client=_counting_client(calls))
     assert len(calls) == 6  # a different model re-extracts
+
+
+def test_a_cache_version_bump_invalidates_old_entries(tmp_path, monkeypatch):
+    from paper_refinery import citation_extraction as ce
+
+    cfg = CitationConfig(extract_batch_size=3, extraction_cache_dir=str(tmp_path))
+    calls: list = []
+    extract_references(["ref 0"], cfg, client=_counting_client(calls))
+    monkeypatch.setattr(ce, "_EXTRACTION_CACHE_VERSION", ce._EXTRACTION_CACHE_VERSION + 1)
+    extract_references(["ref 0"], cfg, client=_counting_client(calls))
+    assert len(calls) == 2
+
+
+def test_a_corrupt_cache_entry_falls_through_to_a_fresh_call(tmp_path):
+    import json
+
+    from paper_refinery import citation_extraction as ce
+
+    cfg = CitationConfig(extract_batch_size=3, extraction_cache_dir=str(tmp_path))
+    ce._batch_cache_path(["ref 0"], cfg).parent.mkdir(parents=True, exist_ok=True)
+    ce._batch_cache_path(["ref 0"], cfg).write_text(json.dumps({"items": ["not a dict"]}))
+    calls: list = []
+    out = extract_references(["ref 0"], cfg, client=_counting_client(calls))
+    assert len(calls) == 1 and out[0]["title"] == "ref 0"
+
+
+def test_an_empty_cache_dir_disables_the_cache(tmp_path):
+    cfg = CitationConfig(extract_batch_size=3, extraction_cache_dir="")
+    calls: list = []
+    extract_references(["ref 0"], cfg, client=_counting_client(calls))
+    extract_references(["ref 0"], cfg, client=_counting_client(calls))
+    assert len(calls) == 2
+
+
+def test_concurrent_documents_count_their_own_batches(tmp_path):
+    from collections import Counter
+    from concurrent.futures import ThreadPoolExecutor
+
+    cfg = CitationConfig(extract_batch_size=2, max_workers=2, extraction_cache_dir=str(tmp_path))
+    calls: list = []
+    docs = {"a": [f"ref {i}" for i in range(6)], "b": [f"ref {i}" for i in range(10, 12)]}
+    stats = {name: Counter() for name in docs}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for name, raws in docs.items():
+            pool.submit(extract_references, raws, cfg, _counting_client(calls), stats[name])
+    assert stats["a"] == Counter(extracted=3) and stats["b"] == Counter(extracted=1)
 
 
 def test_a_batch_with_an_unextracted_line_is_not_cached(tmp_path):
@@ -568,3 +615,5 @@ def test_a_batch_with_an_unextracted_line_is_not_cached(tmp_path):
     n = len(calls)  # the batch plus its retry of the skipped line
     extract_references(raws, cfg, client=_counting_client(calls))
     assert len(calls) == n + 1  # asked again, not frozen with the gap
+    extract_references(raws, cfg, client=_counting_client(calls))
+    assert len(calls) == n + 1  # and once complete, cached
