@@ -767,12 +767,13 @@ def test_format_lookups_lists_answers_then_failed_attempts():
             ("openalex", "cached"): 400,
             ("openalex", "failed"): 3,
             ("openalex", "429"): 5,
+            ("openalex", "missing"): 2,
             ("semanticscholar", "timeout"): 2,
             ("crossref", "ok"): 0,
         }
     )
     assert cr.format_lookups(counts) == (
-        "openalex 610 ok, 400 cached, 3 failed [429x5]; semanticscholar 0 ok [timeoutx2]"
+        "openalex 610 ok, 400 cached, 2 missing, 3 failed [429x5]; semanticscholar 0 ok [timeoutx2]"
     )
     assert cr.format_lookups(Counter()) == "none"
 

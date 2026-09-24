@@ -577,12 +577,14 @@ def _source_references(
 
 def format_lookups(counts: Counter[tuple[str, str]]) -> str:
     """``openalex 610 ok, 400 cached, 3 failed [429x5]; crossref 90 ok`` from a
-    ``ProviderStats`` diff: answers per provider, then failed attempts by class."""
+    ``ProviderStats`` diff: answers per provider (``missing`` is a 404: not in that
+    database), then failed attempts by class."""
     parts = []
     for provider in sorted({p for p, _ in counts}):
         got = {o: n for (p, o), n in counts.items() if p == provider and n > 0}
-        answers = [f"{got[o]} {o}" for o in ("ok", "cached", "failed") if o in got]
-        errors = [f"{o}x{n}" for o, n in sorted(got.items()) if o not in ("ok", "cached", "failed")]
+        kinds = ("ok", "cached", "missing", "failed")
+        answers = [f"{got[o]} {o}" for o in kinds if o in got]
+        errors = [f"{o}x{n}" for o, n in sorted(got.items()) if o not in kinds]
         if answers or errors:
             parts.append(
                 f"{provider} {', '.join(answers) or '0 ok'}"

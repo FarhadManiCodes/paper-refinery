@@ -296,10 +296,13 @@ def test_non_retryable_list_failure_keeps_patience(tmp_path, monkeypatch, patien
 
 
 @pytest.fixture
-def fresh_stats(monkeypatch):
-    monkeypatch.setattr(cp, "PROVIDER_STATS", cp.ProviderStats())
-    monkeypatch.setattr(cp, "_ERROR_CLASSES_WARNED", set())
-    return cp
+def fresh_stats():
+    # reset in place: citation_resolution holds the same PROVIDER_STATS object
+    cp.PROVIDER_STATS.reset()
+    cp._ERROR_CLASSES_WARNED.clear()
+    yield cp
+    cp.PROVIDER_STATS.reset()
+    cp._ERROR_CLASSES_WARNED.clear()
 
 
 def _http_error(url, code, body=b""):
@@ -335,6 +338,47 @@ def test_openalex_budget_exhaustion_is_named(fresh_stats, caplog):
     assert msg.startswith("OpenAlex budget exhausted (HTTP 429: ")
     assert "Insufficient budget" in msg
     assert "example.org" not in msg  # the contact address never reaches a log line
+
+
+def test_a_404_is_counted_as_missing_not_as_a_failure(tmp_path, monkeypatch, fresh_stats, caplog):
+    # an unknown (often OCR-mangled) DOI is S2's answer, not a provider problem
+    caplog.set_level("WARNING", logger=cp.__name__)
+    cfg = _cfg(api_cache_dir=str(tmp_path), api_retry_attempts=3, api_retry_base_delay=0.0)
+    url = f"{cfg.s2_api_base}/paper/DOI:10.1/nope"
+
+    def not_found(req, timeout=None):
+        raise _http_error(url, 404, b'{"error": "Paper with id DOI:10.1/nope not found"}')
+
+    monkeypatch.setattr(cp.urllib.request, "urlopen", not_found)
+    assert cp._get_json(url, cfg) is None
+    counts = cp.PROVIDER_STATS.snapshot()
+    assert counts[("semanticscholar", "missing")] == 1  # not retried, not failed
+    assert counts[("semanticscholar", "failed")] == 0
+    assert caplog.records == []
+
+
+def test_error_warning_masks_contact_address_and_keys(fresh_stats, monkeypatch, caplog):
+    caplog.set_level("WARNING", logger=cp.__name__)
+    monkeypatch.setenv("OPENALEX_API_KEY", "secret-key-123")
+    cfg = _cfg(mailto="me@example.org")
+    url = f"{cfg.crossref_api_base}/works?query=x&mailto=me%40example.org"
+    echo = b"<html>502 for /works?query=x&mailto=me%40example.org from me@example.org "
+    echo += b"secret-key-123</html>"
+    cp._note_failed_attempt(url, _http_error(url, 502, echo), cfg)
+    (msg,) = [r.getMessage() for r in caplog.records]
+    assert "crossref lookup failed (HTTP 502" in msg
+    assert "example.org" not in msg and "secret-key-123" not in msg
+    assert "***" in msg
+
+
+def test_rejected_openalex_key_warns_once_not_twice(fresh_stats, monkeypatch, caplog):
+    caplog.set_level("WARNING", logger=cp.__name__)
+    monkeypatch.setenv("OPENALEX_API_KEY", "bad")
+    cfg = _cfg()
+    url = f"{cfg.openalex_api_base}/works?search=x"
+    cp._note_failed_attempt(url, _http_error(url, 401), cfg)
+    assert caplog.records == []  # left to _warn_once_if_key_rejected
+    assert cp.PROVIDER_STATS.snapshot()[("openalex", "4xx")] == 1
 
 
 def test_get_json_counts_ok_cached_and_failed(tmp_path, monkeypatch, fresh_stats):

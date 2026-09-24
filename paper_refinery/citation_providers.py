@@ -140,6 +140,7 @@ def _provider_label(url: str, cfg: CitationConfig) -> str:
 
 class ProviderStats:
     """Process-wide, thread-safe lookup counts per provider: ``ok`` and ``cached`` answers,
+    ``missing`` (a 404: the provider does not know that id -- an answer, not a failure),
     ``failed`` lookups (retries exhausted), and each failed *attempt* by class (``429``,
     ``5xx``, ``4xx``, ``timeout``, ``error``). Callers diff two ``snapshot()``s to report
     one document; documents refined concurrently share the counts."""
@@ -156,6 +157,10 @@ class ProviderStats:
         with self._lock:
             return Counter(self._counts)
 
+    def reset(self) -> None:
+        with self._lock:
+            self._counts.clear()
+
 
 PROVIDER_STATS = ProviderStats()
 _ERROR_CLASSES_WARNED: set[tuple[str, str]] = set()
@@ -165,6 +170,8 @@ _ERROR_WARN_LOCK = threading.Lock()
 def _error_class(exc: BaseException) -> str:
     code = getattr(exc, "code", None)
     if isinstance(code, int):
+        if code == 404:
+            return "missing"
         return "429" if code == 429 else "5xx" if code >= 500 else "4xx"
     reason = getattr(exc, "reason", exc)
     if isinstance(exc, TimeoutError) or isinstance(reason, TimeoutError):
@@ -172,9 +179,26 @@ def _error_class(exc: BaseException) -> str:
     return "error"
 
 
-def _error_detail(exc: BaseException) -> str:
+def _secret_values(cfg: CitationConfig) -> list[str]:
+    values = [cfg.mailto, os.environ.get(cfg.mailto_env or "", "")]
+    values += [os.environ.get(cfg.openalex_api_key_env or "", "")]
+    values += [os.environ.get(cfg.s2_api_key_env or "", "")]
+    out = []
+    for v in values:
+        if v and len(v) >= 4:
+            out += [v, urllib.parse.quote(v), urllib.parse.quote(v, safe="")]
+    return sorted(set(out), key=len, reverse=True)
+
+
+def _scrub(text: str, cfg: CitationConfig) -> str:
+    for value in _secret_values(cfg):
+        text = text.replace(value, "***")
+    return text
+
+
+def _error_detail(exc: BaseException, cfg: CitationConfig) -> str:
     """Status plus the provider's own message (OpenAlex's "Insufficient budget"), short.
-    The key travels in a header, so neither the URL nor the body can carry it."""
+    An error page may echo the request, so the contact address and keys are masked."""
     code = getattr(exc, "code", None)
     body = ""
     if code is not None and hasattr(exc, "read"):
@@ -184,7 +208,7 @@ def _error_detail(exc: BaseException) -> str:
             body = ""
     body = " ".join(body.split())[:160]
     head = f"HTTP {code}" if code is not None else type(exc).__name__
-    return f"{head}: {body}" if body else f"{head} ({exc})"
+    return _scrub(f"{head}: {body}" if body else f"{head} ({exc})", cfg)
 
 
 def _note_failed_attempt(url: str, exc: BaseException, cfg: CitationConfig) -> None:
@@ -192,11 +216,15 @@ def _note_failed_attempt(url: str, exc: BaseException, cfg: CitationConfig) -> N
     in this process -- rate limits and exhausted budgets used to show only at DEBUG."""
     provider, cls = _provider_label(url, cfg), _error_class(exc)
     PROVIDER_STATS.add(provider, cls)
+    if cls == "missing":
+        return  # a 404 is the provider's answer ("no such id"), not a failure
+    if provider == "openalex" and cls == "4xx" and getattr(exc, "code", None) in (401, 403):
+        return  # _warn_once_if_key_rejected names this one
     with _ERROR_WARN_LOCK:
         if (provider, cls) in _ERROR_CLASSES_WARNED:
             return
         _ERROR_CLASSES_WARNED.add((provider, cls))
-    detail = _error_detail(exc)
+    detail = _error_detail(exc, cfg)
     if provider == "openalex" and cls == "429" and "budget" in detail.lower():
         logger.warning(
             "OpenAlex budget exhausted (%s): its lookups fail until the daily budget resets "
@@ -205,11 +233,11 @@ def _note_failed_attempt(url: str, exc: BaseException, cfg: CitationConfig) -> N
         )
         return
     logger.warning(
-        "%s lookup failed (%s) for %s; retried up to the budget, and later %s failures "
-        "from %s are counted in the progress lines",
+        "%s lookup failed (%s) for %s; retryable errors are retried, and later %s "
+        "failures from %s are counted in the progress lines",
         provider,
         detail,
-        _without_mailto(url),
+        _scrub(_without_mailto(url), cfg),
         cls,
         provider,
     )
@@ -229,6 +257,23 @@ _BULK_PATIENCE.set()
 
 def _list_attempts(cfg: CitationConfig) -> int:
     return cfg.bulk_retry_attempts if _BULK_PATIENCE.is_set() else cfg.api_retry_attempts
+
+
+def _record_failure(url: str, exc: Exception, cfg: CitationConfig, attempts: int | None) -> None:
+    """Book-keeping for a lookup whose retries are exhausted: counts, the key-rejected
+    warning, and tripping the list-call breaker."""
+    if _error_class(exc) != "missing":  # a 404 was already counted as an answer
+        PROVIDER_STATS.add(_provider_label(url, cfg), "failed")
+    _warn_once_if_key_rejected(url, exc, cfg)
+    logger.debug("provider fetch failed for %s: %r", _without_mailto(url), exc)
+    if attempts and attempts > cfg.api_retry_attempts and is_retryable(exc):
+        _BULK_PATIENCE.clear()
+        logger.warning(
+            "%s kept failing after %d attempts; reference-list calls use the ordinary "
+            "retry budget until one succeeds",
+            _provider_label(url, cfg),
+            attempts,
+        )
 
 
 def _get_json(
@@ -276,17 +321,7 @@ def _get_json(
             fetch, attempts or cfg.api_retry_attempts, cfg.api_retry_base_delay
         )
     except Exception as exc:
-        PROVIDER_STATS.add(_provider_label(url, cfg), "failed")
-        _warn_once_if_key_rejected(url, exc, cfg)
-        logger.debug("provider fetch failed for %s: %r", _without_mailto(url), exc)
-        if attempts and attempts > cfg.api_retry_attempts and is_retryable(exc):
-            _BULK_PATIENCE.clear()
-            logger.warning(
-                "%s kept failing after %d attempts; reference-list calls use the ordinary "
-                "retry budget until one succeeds",
-                _provider_label(url, cfg),
-                attempts,
-            )
+        _record_failure(url, exc, cfg, attempts)
         return None
     PROVIDER_STATS.add(_provider_label(url, cfg), "ok")
     if attempts is not None:  # a list call succeeded, whatever its budget
