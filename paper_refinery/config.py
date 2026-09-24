@@ -241,6 +241,9 @@ class RefineryConfig:
     figure: FigureConfig = field(default_factory=FigureConfig)
     citation: CitationConfig = field(default_factory=CitationConfig)
     typeset: TypesetConfig = field(default_factory=TypesetConfig)
+    overwrite_edits: bool = False
+    #   a full run refuses to replace a hand-edited refinery.md (see cli._guard_hand_edits)
+    #   unless this is set, e.g. by --overwrite-edits; the edited copy is backed up either way
 
 
 def _xdg_config_home() -> Path:

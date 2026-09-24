@@ -235,8 +235,16 @@ Single-PDF options (all optional; outputs default next to the PDF):
 | `--doi DOI` | Source paper DOI — enables the citation fast-path (one bulk reference fetch instead of a per-reference provider search). Without it the OCR'd title is tried. |
 | `--force-parse` | Re-run OCR, bypassing the parse checkpoint in `<pdf>.refinery/parse_cache/`. |
 | `--from chunk` | Re-chunk the saved `refinery.md` only (instant); for tuning chunk policy without re-running the expensive upstream stages. |
+| `--describe-uncaptioned` | Also describe images with no "FIGURE N" caption (one Gemini call each, cached); for visual books. |
+| `--overwrite-edits` | Replace a hand-edited `refinery.md` instead of stopping (a copy is kept either way). |
 | `--out` / `--citations-out` / `--work-dir` | Override the individual output locations. |
 | `--model-path` / `--mmproj-path` | Override the GLM-OCR GGUF paths from `config.toml`. |
+
+**Hand edits to `refinery.md` are protected.** Each full run records a checksum of the
+`refinery.md` it writes (`refinery.md.sha256`). If a later full run finds the file changed,
+it stops before any OCR or API call, saves a `refinery.md.hand-edited-<time>` copy, and
+points to `--from chunk`, which re-chunks the edited file as it is. A file from before
+checksums existed is copied to `refinery.md.before-<time>` and then replaced.
 
 ### Programmatic API (what papis-ask integrates against)
 

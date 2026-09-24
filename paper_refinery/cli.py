@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import hashlib
 import json
 import logging
 import os
 import queue
 import re
+import shutil
 import threading
+import time
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -127,6 +130,65 @@ def _write_readonly(path: Path, text: str) -> None:
     tmp.write_text(text)
     os.replace(tmp, path)
     path.chmod(0o444)
+
+
+_MD_CHECKSUM = "refinery.md.sha256"
+
+
+class HandEditedMarkdown(click.ClickException):
+    """A full run would replace a refinery.md that was edited by hand."""
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _record_md_checksum(work_dir: Path, text: str) -> None:
+    """Remember what this run wrote to refinery.md, so a later run can tell a hand edit."""
+    (work_dir / _MD_CHECKSUM).write_text(_sha256(text.encode()) + "\n")
+
+
+def _backup_once(md: Path, kind: str) -> Path:
+    """Copy ``md`` to ``refinery.md.<kind>-<timestamp>``, reusing an identical earlier copy
+    so repeated refused runs do not pile up duplicates."""
+    content = md.read_bytes()
+    for earlier in sorted(md.parent.glob(f"refinery.md.{kind}-*")):
+        if earlier.read_bytes() == content:
+            return earlier
+    backup = md.with_name(f"refinery.md.{kind}-{time.strftime('%Y%m%d-%H%M%S')}")
+    shutil.copy2(md, backup)
+    return backup
+
+
+def _guard_hand_edits(work_dir: Path, cfg: RefineryConfig) -> None:
+    """Before a full run starts, make sure it cannot silently destroy hand edits.
+
+    refinery.md is read-only, but an editor can still force a write (confirmed live: a
+    kalman-1960 math cleanup made in July was lost to a September re-run). If the file no
+    longer matches the checksum recorded when refinery wrote it, the run stops unless
+    ``cfg.overwrite_edits``, and the edited file is backed up either way. A file from before
+    checksums existed cannot be judged, so it is backed up and the run proceeds.
+    """
+    md = work_dir / "refinery.md"
+    if not md.exists():
+        return
+    recorded = work_dir / _MD_CHECKSUM
+    if recorded.exists():
+        if recorded.read_text().strip() == _sha256(md.read_bytes()):
+            return  # exactly what refinery wrote: safe to replace
+        backup = _backup_once(md, "hand-edited")
+        if not cfg.overwrite_edits:
+            raise HandEditedMarkdown(
+                f"{md} was edited by hand (saved a copy as {backup.name}). A full run would "
+                "replace it. Re-chunk your edits with `--from chunk`, or re-run with "
+                "--overwrite-edits to discard them."
+            )
+        logger.warning("%s was edited by hand; overwriting (copy: %s)", md, backup.name)
+        return
+    backup = _backup_once(md, "before")
+    logger.warning(
+        "%s predates edit tracking; kept a copy as %s before replacing it", md, backup.name
+    )
 
 
 def write_chunks(chunks: list[Chunk], docname: str, source_pdf: str, out_path: Path) -> None:
@@ -331,6 +393,7 @@ def _refine(
     next paper OCRs.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
+    _guard_hand_edits(work_dir, cfg)  # before any paid work
     parsed = _parse_maybe_split(pdf, work_dir, cfg, force_parse=force_parse)
     return _refine_parsed(parsed, pdf, out, citations_out, work_dir, cfg, source)
 
@@ -427,6 +490,7 @@ def _refine_parsed(
         # original run did.
         md_out = work_dir / "refinery.md"
         _write_readonly(md_out, enriched)
+        _record_md_checksum(work_dir, enriched)
         summary.append(f"enriched markdown -> {md_out}")
 
         # separate, human-review-only copy next to the PDF, never read back by
@@ -581,6 +645,7 @@ def _refine_one(
     """
     out, citations_out, work_dir = _default_outputs(pdf, None, None, None)
     work_dir.mkdir(parents=True, exist_ok=True)
+    _guard_hand_edits(work_dir, cfg)  # before any paid work; a refusal skips this paper
     logger.info("%s: refine start", pdf.name)
     with ocr_gate:
         parsed = _parse_maybe_split(pdf, work_dir, cfg, force_parse=force_parse)
@@ -838,6 +903,11 @@ def _setup_logging() -> None:
     help="Also describe images with no 'FIGURE N' caption (one Gemini call each, cached). "
     "For visual books whose images carry the content; off by default.",
 )
+@click.option(
+    "--overwrite-edits",
+    is_flag=True,
+    help="Replace a hand-edited refinery.md instead of stopping (a copy is kept either way).",
+)
 def main(
     pdf: Path,
     out: Path | None,
@@ -849,10 +919,12 @@ def main(
     doi: str | None,
     from_stage: str | None,
     describe_uncaptioned: bool,
+    overwrite_edits: bool,
 ) -> None:
     """Parse, figure-enrich, citation-verify, and chunk PDF for papis-ask."""
     _setup_logging()
     cfg = load_config()
+    cfg.overwrite_edits = overwrite_edits
     if describe_uncaptioned:
         cfg.figure.describe_uncaptioned = True
     if model_path is not None:
@@ -923,6 +995,11 @@ def main(
     help="Also describe images with no 'FIGURE N' caption (one Gemini call each, cached). "
     "For visual books whose images carry the content; off by default.",
 )
+@click.option(
+    "--overwrite-edits",
+    is_flag=True,
+    help="Replace a hand-edited refinery.md instead of stopping (a copy is kept either way).",
+)
 def main_many(
     pdfs: tuple[Path, ...],
     force_parse: bool,
@@ -931,6 +1008,7 @@ def main_many(
     meta_map: Path | None,
     from_stage: str | None,
     describe_uncaptioned: bool,
+    overwrite_edits: bool,
 ) -> None:
     """Refine many PDFs concurrently, writing each <pdf>.chunks.json / .citations.json.
 
@@ -947,6 +1025,7 @@ def main_many(
     """
     _setup_logging()
     cfg = load_config()
+    cfg.overwrite_edits = overwrite_edits
     if describe_uncaptioned:
         cfg.figure.describe_uncaptioned = True
     if from_stage == "chunk":
