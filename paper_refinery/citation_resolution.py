@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -606,6 +608,8 @@ def resolve_references(
     raw_references: list[RawReference],
     cfg: CitationConfig,
     source: SourcePaper | None = None,
+    label: str = "references",
+    progress_every: int = 50,
 ) -> list[dict]:
     """Resolve a whole bibliography: layer-1 output positionally merged with parse.py's raw
     ``[{page, number, text}]`` list, each entry verified concurrently.
@@ -637,6 +641,29 @@ def resolve_references(
         [] if all(caller_hits) else (_source_references(source, cfg, len(raw_references)) or [])
     )
 
+    # a 937-reference book resolved for 3+ hours with no sign of how far it was (2026-09-24):
+    # say how many are done every ``progress_every`` and at the end
+    total = len(raw_references)
+    started = time.monotonic()
+    done = verified = 0
+    progress_lock = threading.Lock()
+    logger.info("%s: resolving %d references", label, total)
+
+    def report_progress(entry: dict) -> None:
+        nonlocal done, verified
+        with progress_lock:
+            done += 1
+            verified += bool(entry.get("verified"))
+            if done % progress_every == 0 or done == total:
+                logger.info(
+                    "%s: resolved %d/%d references (%d verified), %.0f min",
+                    label,
+                    done,
+                    total,
+                    verified,
+                    (time.monotonic() - started) / 60,
+                )
+
     def resolve_one(i: int) -> dict:
         raw = raw_references[i]
         resolved = caller_hits[i]
@@ -651,6 +678,7 @@ def resolve_references(
             **resolved,
         }
         entry["type"] = infer_type(entry, raw["text"])
+        report_progress(entry)
         return entry
 
     with ThreadPoolExecutor(max_workers=cfg.max_workers) as pool:

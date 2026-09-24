@@ -729,6 +729,27 @@ def test_resolve_references_fastpath_matches_bulk_without_per_entry_search(monke
     assert out[0]["number"] == "1"  # printed number preserved (from OCR, not S2)
 
 
+def test_resolve_references_logs_progress(monkeypatch, caplog):
+    # a long bibliography must say how far it is, not only when it finishes
+    caplog.set_level("INFO", logger=cr.__name__)
+    monkeypatch.setattr(
+        cr,
+        "verify_and_resolve",
+        lambda extracted, raw_text, cfg: {"verified": raw_text != "3", "match": None},
+    )
+    raw = [{"page": 1, "number": str(i), "text": str(i)} for i in range(1, 6)]
+    cr.resolve_references([{}] * 5, raw, _cfg(), label="hastie", progress_every=2)
+    lines = [r.getMessage() for r in caplog.records]
+    assert "hastie: resolving 5 references" in lines
+    progress = [m for m in lines if m.startswith("hastie: resolved")]
+    assert [m.split(" references")[0] for m in progress] == [
+        "hastie: resolved 2/5",
+        "hastie: resolved 4/5",
+        "hastie: resolved 5/5",
+    ]
+    assert progress[-1].startswith("hastie: resolved 5/5 references (4 verified), ")
+
+
 def test_resolve_references_fastpath_falls_back_for_unmatched(monkeypatch):
     bulk = [cr.normalize_s2({"title": "Totally Unrelated Work", "year": 1900, "externalIds": {}})]
     monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "Src"}))

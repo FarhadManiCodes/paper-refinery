@@ -232,7 +232,13 @@ def _run_citations(
     """
     extracted = extract_references([r["text"] for r in parsed.references], cfg.citation)
     source_paper = source_from_meta(source, fallback_title=_source_title(parsed.markdown))
-    resolved = resolve_references(extracted, parsed.references, cfg.citation, source=source_paper)
+    resolved = resolve_references(
+        extracted,
+        parsed.references,
+        cfg.citation,
+        source=source_paper,
+        label=work_dir.name.removesuffix(".refinery"),
+    )
     report = format_resolution_report(extracted, resolved)
     (work_dir / "resolution_report.txt").write_text(report + "\n")
     return extracted, resolved
