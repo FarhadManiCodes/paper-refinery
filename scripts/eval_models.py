@@ -60,25 +60,31 @@ def _digits(text: str) -> str:
     return re.sub(r"\D", "", text)
 
 
+def _fold(text: str) -> str:
+    """fold_name plus the typography it keeps: curly apostrophes, soft line-break hyphens."""
+    text = re.sub(r"(\w)- (\w)", r"\1\2", text.replace("\u2019", "'").replace("\u2018", "'"))
+    return fold_name(text)
+
+
 def invented_fields(item: dict, raw: str) -> list[str]:
     """Extracted fields whose value is not printed in the raw reference -- the
     hallucination signal. Lenient on formatting (case, accents, punctuation), strict on
     substance: a year, DOI, volume/page digits, surname or most of a title must appear."""
-    printed = fold_name(raw)
+    printed = _fold(raw)
     bad = []
     if item.get("year") and str(item["year"]) not in raw:
         bad.append("year")
-    doi = fold_name(str(item.get("doi") or "")).replace("https://doi.org/", "")
+    doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", _fold(str(item.get("doi") or "")))
     if doi and doi not in printed:
         bad.append("doi")
     for field in ("volume", "page"):
         digits = _digits(str(item.get(field) or ""))[:4]
         if digits and digits not in _digits(raw):
             bad.append(field)
-    families = [fold_name(a.get("family") or "") for a in item.get("authors") or []]
+    families = [_fold(a.get("family") or "") for a in item.get("authors") or []]
     if any(len(f) > 2 and f.split()[-1] not in printed for f in families):
         bad.append("author")
-    words = re.findall(r"[a-z]{4,}", fold_name(item.get("title") or ""))[:6]
+    words = re.findall(r"[a-z]{4,}", _fold(item.get("title") or ""))[:6]
     if words and sum(w in printed for w in words) < 0.6 * len(words):
         bad.append("title")
     return bad
@@ -129,7 +135,11 @@ def run_extraction(models: list[str], library: Path, seed: int, size: int) -> No
         invented: Counter = Counter()
         per_doc = []
         for doc, raws in batches:
-            out = _extract_batch(raws, cfg, client, retry_missing=False)
+            try:
+                out = _extract_batch(raws, cfg, client, retry_missing=False)
+            except Exception as exc:  # one failed batch should not end the comparison
+                print(f"{model}: batch {doc} failed ({exc!r:.120}); counted as unplaced")
+                out = [{}] * len(raws)
             empty = sum(not item for item in out)
             total, unplaced = total + len(raws), unplaced + empty
             invented.update(

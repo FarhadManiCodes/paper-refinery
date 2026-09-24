@@ -55,3 +55,14 @@ def test_figure_picks_file_is_well_formed():
 
     picks = json.loads(em.FIGURE_PICKS.read_text())
     assert len(picks) == 10 and all({"doc", "figure", "kind"} <= set(p) for p in picks)
+
+
+def test_typography_is_not_counted_as_invention():
+    raw = "[3] C. O\u2019Neil. Weapons of math destruc- tion. Crown, 2016. doi:10.5555/3002861"
+    item = {
+        "title": "Weapons of math destruction",
+        "year": 2016,
+        "doi": "10.5555/3002861",
+        "authors": [{"family": "O'Neil"}],
+    }
+    assert em.invented_fields(item, raw) == []

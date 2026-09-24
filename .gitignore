@@ -53,3 +53,6 @@ images/
 
 # ---- sample PDFs for local parser testing (copyrighted papers; don't commit) ----
 samples/
+
+# scripts/eval_models.py figures report
+figure-eval.md
