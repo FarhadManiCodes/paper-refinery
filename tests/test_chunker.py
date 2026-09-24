@@ -153,3 +153,49 @@ def test_back_matter_dropping_can_be_turned_off():
     kept = " ".join(c.text for c in chunk_markdown(md, ChunkConfig(drop_back_matter=False)))
     dropped = " ".join(c.text for c in chunk_markdown(md))
     assert "Smith" in kept and "Smith" not in dropped
+
+
+def test_numbered_subsection_titled_references_is_body_text():
+    # live: gottschling-2021's "1.8.4 References" is about C++ references
+    md = (
+        "## 1.8.4 References\n\nThe following code introduces a reference.\n\n"
+        "```cpp\nint& r = i;\n```\n\n## 1.8.5 Comparison"
+    )
+    assert _drop_back_matter(md) == md
+
+
+def test_section_titled_index_but_holding_prose_is_kept():
+    md = "## Index\n\nA B-tree index speeds up lookups by key.\n\nIt costs extra writes."
+    assert _drop_back_matter(md) == md
+
+
+def test_dropped_index_hands_its_last_page_to_the_next_section_only():
+    index = "\n\n".join(f"<page_number>{p}</page_number>\n\nTerm{p}, {p}" for p in range(300, 305))
+    md = f"Body on page 299.\n\n## Index\n\n{index}\n\n## About the Author\n\nBio."
+    out = _drop_back_matter(md)
+    before, after = out.split("## About the Author")
+    assert "<page_number>" not in before  # the text before the index is not re-dated
+    assert after.strip().startswith("<page_number>304</page_number>") and "Bio." in after
+    assert "<page_number>" not in _drop_back_matter(f"Body.\n\n## Index\n\n{index}")
+
+
+def test_numeric_headings_continue_an_index():
+    md = "## Index\n\n## 1\n\n1-D arrays, 12\n\n## A\n\nalias, 63\n\n## About the Author\n\nBio."
+    out = _drop_back_matter(md)
+    assert "arrays" not in out and "alias" not in out and "Bio." in out
+
+
+def test_prose_paragraphs_with_years_are_not_a_reference_run():
+    prose = "\n\n".join(
+        f"In {1990 + i}, Researchers extended the method to setting {i}, as discussed in the "
+        "previous section, which motivates the approach taken throughout this chapter."
+        for i in range(12)
+    )
+    assert _drop_unheaded_runs(prose) == prose
+
+
+def test_a_heading_ends_an_index_run():
+    entries = "\n\n".join(f"Term{i}, {i + 10}" for i in range(25))
+    md = f"{entries}\n\n## Papers and reviews\n\nReal prose follows here."
+    out = _drop_unheaded_runs(md)
+    assert "Term3, 13" not in out and "## Papers and reviews" in out and "Real prose" in out

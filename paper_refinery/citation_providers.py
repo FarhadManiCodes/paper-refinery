@@ -68,7 +68,10 @@ def _s2_throttle(cfg: CitationConfig) -> None:
 _MAILTO_PARAM_RE = re.compile(r"&mailto=[^&]*")
 
 
-def _mailto(cfg: CitationConfig) -> str:
+def _mailto(cfg: CitationConfig, provider: str) -> str:
+    """The contact for ``provider`` ("crossref" or "openalex"), or "" if it gets none."""
+    if provider not in cfg.mailto_providers:
+        return ""
     return cfg.mailto or os.environ.get(cfg.mailto_env or "", "")
 
 
@@ -77,8 +80,12 @@ def _without_mailto(url: str) -> str:
     return _MAILTO_PARAM_RE.sub("", url)
 
 
-def _polite(url: str, cfg: CitationConfig) -> bool:
-    return url.startswith((cfg.crossref_api_base, cfg.openalex_api_base))
+def _provider_of(url: str, cfg: CitationConfig) -> str | None:
+    if url.startswith(cfg.crossref_api_base):
+        return "crossref"
+    if url.startswith(cfg.openalex_api_base):
+        return "openalex"
+    return None
 
 
 def _cache_path(url: str, cfg: CitationConfig) -> Path | None:
@@ -127,7 +134,7 @@ def _get_json(
 
 def _user_agent(cfg: CitationConfig, url: str) -> str:
     ua = "paper-refinery/0.1"
-    if (mailto := _mailto(cfg)) and _polite(url, cfg):
+    if (provider := _provider_of(url, cfg)) and (mailto := _mailto(cfg, provider)):
         ua += f" (mailto:{mailto})"  # CrossRef/OpenAlex polite pool only
     return ua
 
@@ -242,7 +249,7 @@ def crossref_search_more(title: str, cfg: CitationConfig, n: int) -> list[dict]:
     """Top ``n`` hits, best first; ``n=1`` reproduces ``crossref_search``'s cached URL."""
     q = urllib.parse.quote(title)
     url = f"{cfg.crossref_api_base}/works?query.bibliographic={q}&rows={n}"
-    if mailto := _mailto(cfg):
+    if mailto := _mailto(cfg, "crossref"):
         url += f"&mailto={urllib.parse.quote(mailto)}"
     data = _get_json(url, cfg)
     return ((data or {}).get("message") or {}).get("items") or []
@@ -256,7 +263,7 @@ def crossref_search(title: str, cfg: CitationConfig) -> dict | None:
 def openalex_search_more(title: str, cfg: CitationConfig, n: int) -> list[dict]:
     """Top ``n`` hits, best first; ``n=1`` reproduces ``openalex_search``'s cached URL."""
     url = f"{cfg.openalex_api_base}/works?search={urllib.parse.quote(title)}&per-page={n}"
-    if mailto := _mailto(cfg):
+    if mailto := _mailto(cfg, "openalex"):
         url += f"&mailto={urllib.parse.quote(mailto)}"
     data = _get_json(url, cfg)
     return (data or {}).get("results") or []
@@ -290,7 +297,7 @@ def openalex_references(doi: str, cfg: CitationConfig) -> list[dict] | None:
             f"{cfg.openalex_api_base}/works?filter=openalex_id:{batch}"
             f"&per-page=100&select={_OPENALEX_FIELDS}"
         )
-        if mailto := _mailto(cfg):
+        if mailto := _mailto(cfg, "openalex"):
             url += f"&mailto={urllib.parse.quote(mailto)}"
         data = _get_json(url, cfg)
         for work in (data or {}).get("results") or []:

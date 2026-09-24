@@ -111,8 +111,10 @@ def _page_range(text: str) -> tuple[int | None, int | None]:
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
+# at most a single top-level number: "5 References" is back matter, "1.8.4 References" (a
+# C++ textbook section on references, live in gottschling-2021) is not
 _BACK_MATTER_RE = re.compile(
-    r"(?i)^(?:\d+(?:\.\d+)*\.?\s*)?(?:references|bibliography|works cited|literature cited"
+    r"(?i)^(?:\d+\.?\s*)?(?:references|bibliography|works cited|literature cited"
     r"|reference list|(?:subject |author |name |general )?index)$"
 )
 # figure blocks survive inside dropped back matter: a figure can sit on a reference page
@@ -120,61 +122,130 @@ _BACK_MATTER_RE = re.compile(
 _FIGURE_LINE_RE = re.compile(
     r"^(?:!\[FIGURE|> \*\*Figure description|\**\s*(?:FIGURE|Fig\.?)\s*\d)"
 )
-_INDEX_LETTER_RE = re.compile(r"(?i)^(?:[a-z]|symbols?|numbers?|numerals?|[a-z]\s*[-–]\s*[a-z])$")
-
-
-def _drop_back_matter(markdown: str) -> str:
-    """Remove reference-list and back-of-book-index sections, keeping page markers.
-
-    A section starts at a heading such as "References", "Bibliography" or "Index" and runs
-    to the next heading of the same or a higher level; an index also swallows the
-    single-letter headings ("A", "B", ..., "Symbols") that follow it at its own level.
-    Page markers inside a dropped section are kept, so text after it keeps its pages.
-    """
-    out: list[str] = []
-    dropping_level: int | None = None
-    in_index = False
-    for line in markdown.split("\n"):
-        heading = _HEADING_RE.match(line)
-        if heading:
-            level, title = len(heading.group(1)), heading.group(2).strip("*_ ")
-            if dropping_level is not None and level <= dropping_level:
-                if in_index and level == dropping_level and _INDEX_LETTER_RE.match(title):
-                    continue  # still inside the index's A-Z run
-                dropping_level, in_index = None, False
-            if dropping_level is None and _BACK_MATTER_RE.match(title):
-                dropping_level, in_index = level, title.lower().endswith("index")
-                continue
-        if dropping_level is not None:
-            if PAGE_MARKER_RE.search(line):
-                out.append(PAGE_MARKER_RE.search(line).group(0))
-            elif _FIGURE_LINE_RE.match(line.strip()):
-                out += ["", line, ""]
-            continue
-        out.append(line)
-    return "\n".join(out)
-
-
+_INDEX_LETTER_RE = re.compile(
+    r"(?i)^(?:[a-z]|\d+|symbols?|numbers?|numerals?|[a-z0-9]\s*[-–]\s*[a-z0-9])$"
+)
 _INDEX_ENTRY_RE = re.compile(
     r"^[^\n]{2,90}?,\s*\d{1,4}(?:\s*[-–]\s*\d{1,4})?(?:\s*,\s*\d{1,4}(?:\s*[-–]\s*\d{1,4})?)*\.?$"
 )
-_REFERENCE_ENTRY_RE = re.compile(
-    r"^(?:\[\d{1,4}\]|\(\d{1,4}\)|\d{1,4}\.)?\s*[A-Z][^\n]{10,}\b(?:1[89]|20)\d{2}[a-z]?\b"
+# a citation's opening: "[12] ", "(3) ", "7. " or "Surname, J." / "Surname, Name"
+_REFERENCE_START_RE = re.compile(
+    r"^(?:(?:\[\d{1,4}\]|\(\d{1,4}\)|\d{1,4}\.)\s*\S|[A-Z][\w'’-]+,\s*(?:[A-Z]\.|[A-Z][a-z]+))"
 )
+_YEAR_RE = re.compile(r"\b(?:1[89]|20)\d{2}[a-z]?\b")
+_MAX_REFERENCE_CHARS = 600  # unheaded runs only: prose with a year is not a citation
+
+
+def _is_back_matter_paragraph(s: str) -> bool:
+    """Inside a headed References/Index section: does this paragraph look like an entry?
+    No length cap here -- OCR often joins several references into one paragraph."""
+    return bool(_INDEX_ENTRY_RE.match(s) or _REFERENCE_START_RE.match(s))
+
+
+def _kept_from_dropped(lines: list[str]) -> tuple[list[str], str | None]:
+    """What survives a dropped stretch: its figure blocks, and its last page marker, which
+    the caller places in front of the next kept content -- left in place it would date the
+    text *before* the stretch and stretch that chunk's page range across the whole index."""
+    figures: list[str] = []
+    for line in lines:
+        if _FIGURE_LINE_RE.match(line.strip()):
+            figures += ["", line, ""]
+    markers = [m.group(0) for line in lines if (m := PAGE_MARKER_RE.search(line))]
+    return figures, (markers[-1] if markers else None)
+
+
+def _emit(out: list[str], item: str, pending: str | None, lines: bool = True) -> str | None:
+    """Append ``item`` (a line, or a paragraph when ``lines`` is False); a pending page
+    marker goes in front of the first real content -- after it when that content is a
+    heading, so the heading's section owns the page."""
+    if pending is None or not item.strip():
+        out.append(item)
+        return pending
+    gap = [""] if lines else []
+    first_line = item.strip().split("\n", 1)[0]
+    if _HEADING_RE.match(first_line):
+        head, _, rest = item.partition("\n")
+        out += [head, *gap, pending, *gap] + ([rest] if rest else [])
+    else:
+        out += [pending, *gap, item]
+    return None
+
+
+def _section_is_back_matter(lines: list[str]) -> bool:
+    """Drop a headed section only if its content agrees with its heading: at least half of
+    its entry-sized paragraphs look like references or index entries (or it is nearly
+    empty). A section merely *titled* "References" or "Index" keeps its prose."""
+    paragraphs = [p.strip() for p in "\n".join(lines).split("\n\n")]
+    body = [
+        p
+        for p in paragraphs
+        if p
+        and not PAGE_MARKER_RE.fullmatch(p)
+        and not _FIGURE_LINE_RE.match(p)
+        and not (_HEADING_RE.match(p) and _INDEX_LETTER_RE.match(_HEADING_RE.match(p).group(2)))
+    ]
+    if len(body) <= 1:
+        return True
+    return sum(_is_back_matter_paragraph(p) for p in body) * 2 >= len(body)
+
+
+def _drop_back_matter(markdown: str) -> str:
+    """Remove reference-list and back-of-book-index sections whose content confirms them.
+
+    A section starts at a heading such as "References", "Bibliography" or "Index" and runs
+    to the next heading of the same or a higher level; an index also swallows the letter
+    headings ("A", ..., "Z", "Symbols", "1") that follow it at its own level.
+    """
+    lines = markdown.split("\n")
+    out: list[str] = []
+    pending: str | None = None
+    i = 0
+    while i < len(lines):
+        heading = _HEADING_RE.match(lines[i])
+        title = heading.group(2).strip("*_ ") if heading else ""
+        if not heading or not _BACK_MATTER_RE.match(title):
+            pending = _emit(out, lines[i], pending)
+            i += 1
+            continue
+        level, is_index = len(heading.group(1)), title.lower().endswith("index")
+        j = i + 1
+        while j < len(lines):
+            nxt = _HEADING_RE.match(lines[j])
+            if nxt and len(nxt.group(1)) <= level:
+                letter = len(nxt.group(1)) == level and _INDEX_LETTER_RE.match(
+                    nxt.group(2).strip("*_ ")
+                )
+                if not (is_index and letter):
+                    break
+            j += 1
+        section = lines[i + 1 : j]
+        if _section_is_back_matter(section):
+            figures, marker = _kept_from_dropped(section)
+            out += figures
+            pending = marker or pending
+        else:
+            for line in lines[i:j]:
+                pending = _emit(out, line, pending)
+        i = j
+    return "\n".join(out)  # a marker still pending had no content after it: dropped
+
+
 _MIN_INDEX_RUN, _MIN_REFERENCE_RUN = 20, 10
 # inside a run, tolerate this many consecutive short non-matching paragraphs: live index
 # entries also read "PRIM, see Patient rule induction method" or "Spline, 186 additive,
-# 297-299 ..." (Hastie), which a strict entry pattern misses
+# 297-299 ..." (Hastie), which a strict entry pattern misses. Headings never bridge.
 _RUN_GAP, _GAP_MAX_CHARS = 2, 200
 
 
 def _paragraph_kind(paragraph: str) -> str:
     s = paragraph.strip()
     if not s or PAGE_MARKER_RE.fullmatch(s) or _FIGURE_LINE_RE.match(s):
-        return "neutral"  # kept, and does not end a run
+        return "neutral"  # kept (see _kept_from_dropped), and does not end a run
+    if _HEADING_RE.match(s):
+        return "heading"
     if _INDEX_ENTRY_RE.match(s):
         return "index"
-    if _REFERENCE_ENTRY_RE.match(s):
+    if len(s) <= _MAX_REFERENCE_CHARS and _REFERENCE_START_RE.match(s) and _YEAR_RE.search(s):
         return "reference"
     return "body"
 
@@ -188,7 +259,7 @@ def _run_end(paragraphs: list[str], kinds: list[str], start: int) -> tuple[int, 
             count, gap, end = count + 1, 0, j + 1
         elif kinds[j] == "neutral":
             continue
-        elif gap < _RUN_GAP and len(paragraphs[j].strip()) <= _GAP_MAX_CHARS:
+        elif kinds[j] != "heading" and gap < _RUN_GAP and len(paragraphs[j]) <= _GAP_MAX_CHARS:
             gap += 1
         else:
             break
@@ -201,18 +272,24 @@ def _drop_unheaded_runs(markdown: str) -> str:
     never holds 10+ consecutive citation-shaped or 20+ index-shaped paragraphs."""
     paragraphs = markdown.split("\n\n")
     kinds = [_paragraph_kind(p) for p in paragraphs]
-    drop = [False] * len(paragraphs)
+    out: list[str] = []
+    pending: str | None = None
     i = 0
     while i < len(paragraphs):
         if kinds[i] not in ("index", "reference"):
+            pending = _emit(out, paragraphs[i], pending, lines=False)
             i += 1
             continue
         end, count = _run_end(paragraphs, kinds, i)
         if count >= (_MIN_INDEX_RUN if kinds[i] == "index" else _MIN_REFERENCE_RUN):
-            for k in range(i, end):
-                drop[k] = kinds[k] != "neutral"  # page markers and figures stay
+            figures, marker = _kept_from_dropped(paragraphs[i:end])
+            out += [f for f in figures if f]  # figure lines, as their own paragraphs
+            pending = marker or pending
+        else:
+            for para in paragraphs[i:end]:
+                pending = _emit(out, para, pending, lines=False)
         i = max(end, i + 1)
-    return "\n\n".join(p for p, d in zip(paragraphs, drop, strict=True) if not d)
+    return "\n\n".join(out)
 
 
 def chunk_markdown(markdown: str, cfg: ChunkConfig | None = None) -> list[Chunk]:

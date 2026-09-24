@@ -335,8 +335,23 @@ def test_config_mailto_wins_over_the_environment(monkeypatch):
     from paper_refinery.config import CitationConfig
 
     monkeypatch.setenv("REFINERY_MAILTO", "env@example.org")
-    assert cp._mailto(CitationConfig(mailto="cfg@example.org")) == "cfg@example.org"
-    assert cp._mailto(CitationConfig()) == "env@example.org"
+    assert cp._mailto(CitationConfig(mailto="cfg@example.org"), "openalex") == "cfg@example.org"
+    assert cp._mailto(CitationConfig(), "openalex") == "env@example.org"
+
+
+def test_mailto_can_be_limited_to_openalex(monkeypatch):
+    from paper_refinery import citation_providers as cp
+    from paper_refinery.config import CitationConfig
+
+    monkeypatch.setenv("REFINERY_MAILTO", "me@example.org")
+    urls = []
+    monkeypatch.setattr(cp, "_get_json", lambda url, cfg, **kw: urls.append(url) or None)
+    cfg = CitationConfig(mailto_providers=["openalex"])
+    cp.crossref_search("A title", cfg), cp.openalex_search("A title", cfg)
+    crossref, openalex = urls
+    assert "mailto" not in crossref and "me@example.org" not in cp._user_agent(cfg, crossref)
+    assert openalex.endswith("&mailto=me%40example.org")
+    assert "me@example.org" in cp._user_agent(cfg, openalex)
 
 
 def test_mailto_is_not_part_of_the_cache_key():

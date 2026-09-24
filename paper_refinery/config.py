@@ -162,6 +162,8 @@ class CitationConfig:
     #   contact email for CrossRef/OpenAlex "polite pool" (better rate limits & support);
     #   optional but recommended -- set it in config.toml, not here
     mailto_env: str = "REFINERY_MAILTO"
+    mailto_providers: list[str] = field(default_factory=lambda: ["crossref", "openalex"])
+    #   which polite-pool providers receive it; e.g. ["openalex"] to keep it from CrossRef
     #   or keep it out of config files: a secrets *.env setting this variable is used
     #   when mailto is empty. Either way it is sent to CrossRef and OpenAlex only, never
     #   to Semantic Scholar, and kept out of cache keys and logs
