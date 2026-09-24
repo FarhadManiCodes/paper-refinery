@@ -320,11 +320,11 @@ source: SourceMeta = {
   covers the printed count; printed DOIs and abstracts of CrossRef matches go to OpenAlex or
   S2 in that order; and references are searched one by one in that order. List calls retry
   longer (`[citation] bulk_retry_attempts`). Books rarely have a list anywhere, so their
-  references are searched one by one. With an OpenAlex key, OpenAlex first and S2 last
-  with `s2_retry_attempts = 1` (one request, no backoff) keeps keyless S2's few extra hits
-  without making a run wait; leaving it out of the order drops it entirely. A provider whose
-  lookups end in 429 three times in a row
-  is skipped for `[citation] provider_cooldown_s` (default 10 min).
+  references are searched one by one. With an OpenAlex key, OpenAlex first and S2 last with
+  `s2_retry_attempts = 1` (one request, no backoff, reference lists included) keeps keyless
+  S2's few extra hits without making a run wait; leaving it out of the order drops it
+  entirely. A provider whose lookups end in 429 three times in a row is skipped for
+  `[citation] provider_cooldown_s` (default 10 min).
 - The log (stderr, timestamped) tells each document's story: parts from the OCR checkpoint
   (the OCR backend starts only for a missing part), figures from cache vs described,
   citation extraction start and finish, each reference-list step (`reference list: openalex

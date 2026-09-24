@@ -201,7 +201,8 @@ class CitationConfig:
     #   default, ~4 min at 4.0. After one exhausts its retries, later list calls use
     #   api_retry_attempts until one succeeds; keyless OpenAlex never gets the long wait
     s2_retry_attempts: int = 0
-    #   attempts for an ordinary Semantic Scholar lookup (0: api_retry_attempts). Keyless S2
+    #   attempts for every Semantic Scholar call, its reference-list lookups included
+    #   (0: api_retry_attempts for lookups, bulk_retry_attempts for lists). Keyless S2
     #   429s under load; 1 asks it once, no backoff, so it can sit last in the order
     #   without making a run wait
     provider_cooldown_s: float = 600.0
