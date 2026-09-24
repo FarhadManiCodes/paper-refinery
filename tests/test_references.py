@@ -429,12 +429,29 @@ def test_back_of_book_index_lines_are_recognised():
         assert not is_index_entry(reference), reference
 
 
-def test_drop_index_entries_counts_what_it_drops():
+def _raw(text):
+    return {"page": 1, "number": None, "text": text}
+
+
+def test_only_a_run_of_index_lines_is_dropped():
     from paper_refinery.references import drop_index_entries
 
-    refs = [
-        {"page": 1, "number": None, "text": "Hastie, T. (2009). The Elements, Springer."},
-        {"page": 2, "number": None, "text": "Hastie, T. 3, 49, 73"},
+    real = [_raw("Hastie, T. (2009). The Elements, Springer.")]
+    index = [_raw(f"{name}, A. {i + 1}, {i + 10}") for i, name in enumerate("VWXYZ")]
+    kept, dropped = drop_index_entries(real + index + real)
+    assert kept == real + real and dropped == 5
+    # isolated index-like lines, e.g. short references without a year, all stay
+    lone = [
+        _raw("Knuth, D. The Art of Computer Programming, Vol. 1."),
+        _raw("Smith, J. A title. Journal of Foo, 12, 34-56."),
+        _raw("IEEE Standard for Floating-Point Arithmetic, IEEE Std 754"),
+        _raw("Salojärvi, J."),
     ]
-    kept, dropped = drop_index_entries(refs)
-    assert kept == refs[:1] and dropped == 1
+    mixed = [lone[0], *real, lone[1], *real, lone[2], lone[3]]
+    assert drop_index_entries(mixed) == (mixed, 0)
+
+
+def test_a_suffixed_year_counts_as_a_year():
+    from paper_refinery.references import is_index_entry
+
+    assert not is_index_entry("Rosset, S. 2004a, 12")

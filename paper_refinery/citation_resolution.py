@@ -328,9 +328,10 @@ def _by_doi(doi: str, cfg: CitationConfig) -> dict | None:
 
 
 def _searchable(title: str | None) -> bool:
-    """Worth a title search: at least four letters. A "title" of page numbers ("94", from
-    an index line) once matched some record exactly and was accepted (2026-09-24)."""
-    return sum(ch.isalpha() for ch in title or "") >= 4
+    """Worth a title search: at least one letter. A "title" of page numbers ("94", from an
+    index line) once matched some record exactly and was accepted (2026-09-24); short real
+    titles ("C5.0", "Top 500", "R") must still be searched."""
+    return any(ch.isalpha() for ch in title or "")
 
 
 def _resolve_by_doi(raw_text: str, cfg: CitationConfig) -> tuple[dict, str] | None:

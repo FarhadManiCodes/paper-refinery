@@ -187,7 +187,7 @@ def _is_reference_boilerplate(text: str) -> bool:
     return any(signal in lowered for signal in _REFERENCE_BOILERPLATE_SIGNALS)
 
 
-_PLAUSIBLE_YEAR_RE = re.compile(r"\b(?:1[5-9]\d\d|20\d\d)\b")
+_PLAUSIBLE_YEAR_RE = re.compile(r"(?<!\d)(?:1[5-9]\d\d|20\d\d)(?!\d)")  # "1996a" too
 # page numbers and ranges, separated by commas or by the spaces a line break leaves
 _PAGES = r"\d{1,4}(?:\s*[-–]\s*\d{1,4})?(?:[\s,]+\d{1,4}(?:\s*[-–]\s*\d{1,4})?)*"
 # "Buja, A. 110, 297, 441" (author index), "Ambroise, C.247", "Lasso, 68, 86-93" (subject
@@ -200,18 +200,38 @@ _BARE_NAME_RE = re.compile(r"^[^\W\d_][\w'’-]*(?:[\s-][\w'’-]+)*,(?:\s*[^\W\
 def is_index_entry(text: str) -> bool:
     """A back-of-book index line mistaken for a bibliography entry: a name or term and
     page numbers, a bare name, or page numbers alone -- with no plausible year, which
-    every real reference has. Hastie (2009) carried 537 of them after its 400
-    references (2026-09-24), each searched for in vain and one matched wrongly."""
+    nearly every real reference has. Hastie (2009) carried 538 of them after its ~400
+    references (2026-09-24), each searched for in vain and 30 matched wrongly. Only
+    ever used on runs of lines (``drop_index_entries``): alone, a short reference
+    without a year can match too."""
     s = " ".join(text.split())
     if not s or _PLAUSIBLE_YEAR_RE.search(s):
         return False
     return bool(_INDEX_LINE_RE.match(s) or _BARE_NAME_RE.match(s))
 
 
+_MIN_INDEX_RUN = 5
+
+
 def drop_index_entries(references: list[RawReference]) -> tuple[list[RawReference], int]:
-    """The references without index lines, and how many were dropped. Applied at the
-    citation stage, so it also cleans parses restored from an OCR checkpoint."""
-    kept = [r for r in references if not is_index_entry(r["text"])]
+    """The references without back-of-book index blocks, and how many were dropped.
+
+    Only a run of at least ``_MIN_INDEX_RUN`` consecutive index-like entries goes: an
+    index is a long block (Hastie's was 538 lines), while a lone short reference without
+    a year ("Knuth, D. The Art of Computer Programming, Vol. 1.") can look like an index
+    line and must stay. Applied at the citation stage, so it also cleans parses restored
+    from an OCR checkpoint."""
+    flags = [is_index_entry(r["text"]) for r in references]
+    drop = [False] * len(flags)
+    start = 0
+    while start < len(flags):
+        end = start
+        while end < len(flags) and flags[end]:
+            end += 1
+        if end - start >= _MIN_INDEX_RUN:
+            drop[start:end] = [True] * (end - start)
+        start = end + 1
+    kept = [r for r, d in zip(references, drop, strict=True) if not d]
     return kept, len(references) - len(kept)
 
 

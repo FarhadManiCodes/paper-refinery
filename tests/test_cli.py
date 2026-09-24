@@ -875,3 +875,33 @@ def test_refine_many_rejects_mismatched_dois_eagerly(tmp_path):
     # raises at the call, before any iteration -- not deferred to the first next()
     with pytest.raises(ValueError):
         cli.refine_many([pdf], RefineryConfig(), dois=[])
+
+
+def test_citation_stage_drops_an_index_block_and_stays_aligned(tmp_path, monkeypatch):
+    # an author index after the bibliography (Hastie, 2026-09-24) must not reach
+    # extraction or resolution, and what comes back must line up with what was kept
+    real = [
+        {"page": 1, "number": None, "text": "Abu-Mostafa, Y. (1995). Hints, Neural Computation."},
+        {"page": 1, "number": None, "text": "Zou, H. (2007). On the degrees of freedom, AoS."},
+    ]
+    index = [
+        {"page": 2, "number": None, "text": f"{n}, A. {i + 1}, {i + 20}"}
+        for i, n in enumerate(["Ahn", "Bach", "Cover", "Duda", "Efron", "Fan"])
+    ]
+    parsed = ParseResult(markdown="MD", references=[real[0], *index, real[1]])
+    seen = {}
+
+    def fake_extract(texts, cfg, **kw):
+        seen["texts"] = texts
+        return [{"title": t.split(". ")[1]} for t in texts]
+
+    def fake_resolve(extracted, refs, cfg, **kw):
+        seen["refs"] = refs
+        return [{**e, "verified": True, "match": "crossref"} for e in extracted]
+
+    monkeypatch.setattr(cli, "extract_references", fake_extract)
+    monkeypatch.setattr(cli, "resolve_references", fake_resolve)
+    extracted, resolved = cli._run_citations(parsed, RefineryConfig(), tmp_path, label="b.pdf")
+    assert seen["texts"] == [r["text"] for r in real]
+    assert seen["refs"] == real
+    assert len(extracted) == len(resolved) == 2

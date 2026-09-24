@@ -904,7 +904,9 @@ def test_a_title_of_page_numbers_is_never_searched(monkeypatch):
     monkeypatch.setattr(cr, "_resolve_by_title", lambda *a: pytest.fail("not searchable"))
     out = cr.verify_and_resolve({"title": "94"}, "Weisberg, S. 94", _cfg())
     assert out["verified"] is False
-    assert cr._searchable("Hints")  # a real one-word title still is
+    for title in ("Hints", "C5.0", "Top 500", "R"):  # real short titles still are
+        assert cr._searchable(title), title
+    assert not cr._searchable("58(9):2426-2431,2013")
 
 
 def test_resolve_references_fastpath_falls_back_for_unmatched(monkeypatch):
