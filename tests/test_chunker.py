@@ -1,6 +1,12 @@
 """Tests for the section-aware, soft-overlap chunker (deterministic, no network)."""
 
-from paper_refinery.chunker import Chunk, _overlap_before, chunk_markdown
+from paper_refinery.chunker import (
+    Chunk,
+    _drop_back_matter,
+    _drop_unheaded_runs,
+    _overlap_before,
+    chunk_markdown,
+)
 from paper_refinery.config import ChunkConfig
 
 
@@ -92,3 +98,58 @@ def test_name_for_formats_page_range():
     assert Chunk("t", 0, 1, 2).name_for("doc") == "doc pages 1-2"
     assert Chunk("t", 0, 4, 4).name_for("doc") == "doc pages 4"
     assert Chunk("t", 3, None, None).name_for("doc") == "doc chunk 3"
+
+
+# ---------------------------------------------------------------------------
+# back matter (reference lists, back-of-book indexes)
+# ---------------------------------------------------------------------------
+
+
+def test_headed_reference_list_is_dropped_but_its_page_markers_stay():
+    md = (
+        "## 5. Conclusion\n\nWe conclude.\n\n## References\n\n[1] A. Smith. Paper. 2020.\n\n"
+        "<page_number>9</page_number>\n\n[2] B. Jones. Other. 2021.\n\n## Appendix A\n\nProof."
+    )
+    out = _drop_back_matter(md)
+    assert "Smith" not in out and "Jones" not in out
+    assert "<page_number>9</page_number>" in out and "## Appendix A" in out and "Proof." in out
+
+
+def test_book_index_with_letter_headings_is_dropped_up_to_the_next_section():
+    md = (
+        "## Index\n\nA\n\nalias templates, 63\n\n## B\n\nbraced init, 52\n\n## Z\n\nzero, 58\n\n"
+        "## About the Author\n\nScott Meyers."
+    )
+    out = _drop_back_matter(md)
+    assert "alias templates" not in out and "zero, 58" not in out and "## B" not in out
+    assert "## About the Author" in out and "Scott Meyers." in out
+
+
+def test_a_figure_on_a_reference_page_survives():
+    md = (
+        "## REFERENCES\n\n[1] A. Smith. Paper. 2020.\n\n![FIGURE 11](figures/fig_11.png)\n\n"
+        "> **Figure description (auto, block diagram):** Two pipelines."
+    )
+    out = _drop_back_matter(md)
+    assert "![FIGURE 11]" in out and "Two pipelines." in out and "Smith" not in out
+
+
+def test_index_terms_heading_is_body_text():
+    md = "## Index Terms\n\nsteering, control"
+    assert _drop_back_matter(md) == md
+
+
+def test_unheaded_index_run_is_dropped_short_runs_are_kept():
+    entries = "\n\n".join(f"Term{i}, {i + 10}" for i in range(25))
+    md = f"Body paragraph about lasso.\n\n{entries}\n\nPRIM, see Patient rule\n\nLast, 99"
+    out = _drop_unheaded_runs(md)
+    assert out.startswith("Body paragraph") and "Term3, 13" not in out and "Last, 99" not in out
+    short = "\n\n".join(f"Term{i}, {i}" for i in range(5))
+    assert _drop_unheaded_runs(short) == short
+
+
+def test_back_matter_dropping_can_be_turned_off():
+    md = "## Intro\n\n" + "Body. " * 300 + "\n\n## References\n\n[1] A. Smith. Paper. 2020."
+    kept = " ".join(c.text for c in chunk_markdown(md, ChunkConfig(drop_back_matter=False)))
+    dropped = " ".join(c.text for c in chunk_markdown(md))
+    assert "Smith" in kept and "Smith" not in dropped

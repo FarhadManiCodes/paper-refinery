@@ -110,9 +110,116 @@ def _page_range(text: str) -> tuple[int | None, int | None]:
     return (min(nums), max(nums)) if nums else (None, None)
 
 
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
+_BACK_MATTER_RE = re.compile(
+    r"(?i)^(?:\d+(?:\.\d+)*\.?\s*)?(?:references|bibliography|works cited|literature cited"
+    r"|reference list|(?:subject |author |name |general )?index)$"
+)
+# figure blocks survive inside dropped back matter: a figure can sit on a reference page
+# (live: dong-2024's Figure 11 follows its REFERENCES heading)
+_FIGURE_LINE_RE = re.compile(
+    r"^(?:!\[FIGURE|> \*\*Figure description|\**\s*(?:FIGURE|Fig\.?)\s*\d)"
+)
+_INDEX_LETTER_RE = re.compile(r"(?i)^(?:[a-z]|symbols?|numbers?|numerals?|[a-z]\s*[-–]\s*[a-z])$")
+
+
+def _drop_back_matter(markdown: str) -> str:
+    """Remove reference-list and back-of-book-index sections, keeping page markers.
+
+    A section starts at a heading such as "References", "Bibliography" or "Index" and runs
+    to the next heading of the same or a higher level; an index also swallows the
+    single-letter headings ("A", "B", ..., "Symbols") that follow it at its own level.
+    Page markers inside a dropped section are kept, so text after it keeps its pages.
+    """
+    out: list[str] = []
+    dropping_level: int | None = None
+    in_index = False
+    for line in markdown.split("\n"):
+        heading = _HEADING_RE.match(line)
+        if heading:
+            level, title = len(heading.group(1)), heading.group(2).strip("*_ ")
+            if dropping_level is not None and level <= dropping_level:
+                if in_index and level == dropping_level and _INDEX_LETTER_RE.match(title):
+                    continue  # still inside the index's A-Z run
+                dropping_level, in_index = None, False
+            if dropping_level is None and _BACK_MATTER_RE.match(title):
+                dropping_level, in_index = level, title.lower().endswith("index")
+                continue
+        if dropping_level is not None:
+            if PAGE_MARKER_RE.search(line):
+                out.append(PAGE_MARKER_RE.search(line).group(0))
+            elif _FIGURE_LINE_RE.match(line.strip()):
+                out += ["", line, ""]
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+_INDEX_ENTRY_RE = re.compile(
+    r"^[^\n]{2,90}?,\s*\d{1,4}(?:\s*[-–]\s*\d{1,4})?(?:\s*,\s*\d{1,4}(?:\s*[-–]\s*\d{1,4})?)*\.?$"
+)
+_REFERENCE_ENTRY_RE = re.compile(
+    r"^(?:\[\d{1,4}\]|\(\d{1,4}\)|\d{1,4}\.)?\s*[A-Z][^\n]{10,}\b(?:1[89]|20)\d{2}[a-z]?\b"
+)
+_MIN_INDEX_RUN, _MIN_REFERENCE_RUN = 20, 10
+# inside a run, tolerate this many consecutive short non-matching paragraphs: live index
+# entries also read "PRIM, see Patient rule induction method" or "Spline, 186 additive,
+# 297-299 ..." (Hastie), which a strict entry pattern misses
+_RUN_GAP, _GAP_MAX_CHARS = 2, 200
+
+
+def _paragraph_kind(paragraph: str) -> str:
+    s = paragraph.strip()
+    if not s or PAGE_MARKER_RE.fullmatch(s) or _FIGURE_LINE_RE.match(s):
+        return "neutral"  # kept, and does not end a run
+    if _INDEX_ENTRY_RE.match(s):
+        return "index"
+    if _REFERENCE_ENTRY_RE.match(s):
+        return "reference"
+    return "body"
+
+
+def _run_end(paragraphs: list[str], kinds: list[str], start: int) -> tuple[int, int]:
+    """(end, matches) of the run of ``kinds[start]`` beginning at ``start``: it may bridge
+    up to ``_RUN_GAP`` short non-matching paragraphs, and ends at its last match."""
+    kind, count, end, gap = kinds[start], 0, start, 0
+    for j in range(start, len(paragraphs)):
+        if kinds[j] == kind:
+            count, gap, end = count + 1, 0, j + 1
+        elif kinds[j] == "neutral":
+            continue
+        elif gap < _RUN_GAP and len(paragraphs[j].strip()) <= _GAP_MAX_CHARS:
+            gap += 1
+        else:
+            break
+    return end, count
+
+
+def _drop_unheaded_runs(markdown: str) -> str:
+    """Drop long unbroken runs of index entries ("Lasso, 68, 86-93") or reference entries,
+    which some books print with no heading at all. Short runs are left alone: body text
+    never holds 10+ consecutive citation-shaped or 20+ index-shaped paragraphs."""
+    paragraphs = markdown.split("\n\n")
+    kinds = [_paragraph_kind(p) for p in paragraphs]
+    drop = [False] * len(paragraphs)
+    i = 0
+    while i < len(paragraphs):
+        if kinds[i] not in ("index", "reference"):
+            i += 1
+            continue
+        end, count = _run_end(paragraphs, kinds, i)
+        if count >= (_MIN_INDEX_RUN if kinds[i] == "index" else _MIN_REFERENCE_RUN):
+            for k in range(i, end):
+                drop[k] = kinds[k] != "neutral"  # page markers and figures stay
+        i = max(end, i + 1)
+    return "\n\n".join(p for p, d in zip(paragraphs, drop, strict=True) if not d)
+
+
 def chunk_markdown(markdown: str, cfg: ChunkConfig | None = None) -> list[Chunk]:
     """Split page-marked markdown into section-aware, overlapping chunks."""
     cfg = cfg or ChunkConfig()
+    if cfg.drop_back_matter:
+        markdown = _drop_unheaded_runs(_drop_back_matter(markdown))
 
     # 1-3: structure (section split -> sub-split big -> merge small)
     pieces: list[str] = []

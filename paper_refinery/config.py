@@ -23,6 +23,10 @@ class ChunkConfig:
     overlap_lo: int = 300  # soft overlap window: minimum size
     overlap_hi: int = 700  # soft overlap window: maximum size
     overlap_ideal: int = 500  # preferred overlap size within the window
+    drop_back_matter: bool = True
+    #   leave reference lists and back-of-book indexes out of the chunks: they are not body
+    #   text (references are kept in citations.json), and on 2026-09-24 index pages and
+    #   bibliographies were being retrieved and cited as evidence
 
 
 @dataclass(slots=True)
