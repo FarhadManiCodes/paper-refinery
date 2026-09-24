@@ -327,6 +327,12 @@ def _by_doi(doi: str, cfg: CitationConfig) -> dict | None:
     return None
 
 
+def _searchable(title: str | None) -> bool:
+    """Worth a title search: at least four letters. A "title" of page numbers ("94", from
+    an index line) once matched some record exactly and was accepted (2026-09-24)."""
+    return sum(ch.isalpha() for ch in title or "") >= 4
+
+
 def _resolve_by_doi(raw_text: str, cfg: CitationConfig) -> tuple[dict, str] | None:
     """DOI-first exact lookup: a DOI printed in the raw OCR text is definitionally correct,
     so its record is accepted with no similarity check. None when there's no usable hit."""
@@ -429,7 +435,7 @@ def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> d
     doi_hit = _resolve_by_doi(raw_text, cfg)
     if doi_hit is not None:
         candidate, match, near_miss = doi_hit[0], doi_hit[1], None
-    elif out.get("title"):
+    elif _searchable(out.get("title")):
         candidate, match, near_miss = _resolve_by_title(out, cfg)
     else:
         candidate, match, near_miss = None, None, None

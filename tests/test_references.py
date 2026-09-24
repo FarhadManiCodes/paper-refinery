@@ -402,3 +402,39 @@ def test_repair_references_runs_merge_then_sort():
     out = repair_references(refs)
     assert [r["text"][:2] for r in out] == ["1.", "2."]
     assert "https://journals.example.org/x doi: 10.1/abc" in out[0]["text"]
+
+
+def test_back_of_book_index_lines_are_recognised():
+    # Hastie (2009): 538 author-index lines followed its ~400 references (2026-09-24)
+    from paper_refinery.references import is_index_entry
+
+    for line in [
+        "Buja, A. 110, 297, 441, 446, 451, 455, 565, 574, 576, 578",
+        "Ambroise, C.247",
+        "Donoho, D. 68, 86, 91, 94, 179 181, 554, 613",
+        "Zou, H. 72, 78, 92, 349, 385, 550,",
+        "de Boor, C.181",
+        "Lasso, 68, 86-93",
+        "662,693",
+        "Salojärvi, J.",
+    ]:
+        assert is_index_entry(line), line
+    for reference in [
+        "Abu-Mostafa, Y. (1995). Hints, Neural Computation 7: 639-671.",
+        "Agresti, A. (2002). Categorical Data Analysis (2nd Ed.), Wiley, New York.",
+        "[12] J. Smith. A title. Journal 3:45-67, 2004.",
+        "Kalman, R. E. 1960. A new approach to linear filtering.",
+        "Knuth, D. The Art of Computer Programming, Vol. 1, Addison-Wesley.",
+    ]:
+        assert not is_index_entry(reference), reference
+
+
+def test_drop_index_entries_counts_what_it_drops():
+    from paper_refinery.references import drop_index_entries
+
+    refs = [
+        {"page": 1, "number": None, "text": "Hastie, T. (2009). The Elements, Springer."},
+        {"page": 2, "number": None, "text": "Hastie, T. 3, 49, 73"},
+    ]
+    kept, dropped = drop_index_entries(refs)
+    assert kept == refs[:1] and dropped == 1

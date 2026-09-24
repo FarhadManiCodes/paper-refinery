@@ -899,6 +899,14 @@ def test_each_reference_is_logged_with_its_outcome(monkeypatch, caplog):
     assert not any("[1/2]" in r.getMessage() for r in caplog.records)
 
 
+def test_a_title_of_page_numbers_is_never_searched(monkeypatch):
+    # an index line's "title" "94" once matched a record exactly (2026-09-24)
+    monkeypatch.setattr(cr, "_resolve_by_title", lambda *a: pytest.fail("not searchable"))
+    out = cr.verify_and_resolve({"title": "94"}, "Weisberg, S. 94", _cfg())
+    assert out["verified"] is False
+    assert cr._searchable("Hints")  # a real one-word title still is
+
+
 def test_resolve_references_fastpath_falls_back_for_unmatched(monkeypatch):
     bulk = [cr.normalize_s2({"title": "Totally Unrelated Work", "year": 1900, "externalIds": {}})]
     monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "Src"}))

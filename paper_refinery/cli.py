@@ -53,6 +53,7 @@ from .figures import describe_figure, figure_stats, make_client
 from .parse import ParseResult
 from .parse_cache import load_checkpoint, parse_pdf_cached, pdf_sha256
 from .pdf_split import merge_parse_results, page_count, split_pdf
+from .references import drop_index_entries
 from .typeset import render_pdf
 
 logger = logging.getLogger(__name__)
@@ -235,7 +236,14 @@ def _run_citations(
     -- else the OCR'd title) drives the reference-list fast-path in ``resolve_references``;
     unidentified/unmatched entries fall back to the per-entry provider search.
     """
-    texts = [r["text"] for r in parsed.references]
+    references, dropped = drop_index_entries(parsed.references)
+    if dropped:
+        logger.info(
+            "%s: citations: dropped %d back-of-book index lines from the reference list",
+            label,
+            dropped,
+        )
+    texts = [r["text"] for r in references]
     batches = -(-len(texts) // max(1, cfg.citation.extract_batch_size))
     logger.info("%s: citations: extracting %d references (%d batches)", label, len(texts), batches)
     started = time.monotonic()
@@ -254,7 +262,7 @@ def _run_citations(
     source_paper = source_from_meta(source, fallback_title=_source_title(parsed.markdown))
     resolved = resolve_references(
         extracted,
-        parsed.references,
+        references,
         cfg.citation,
         source=source_paper,
         label=label,

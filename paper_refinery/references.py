@@ -187,6 +187,34 @@ def _is_reference_boilerplate(text: str) -> bool:
     return any(signal in lowered for signal in _REFERENCE_BOILERPLATE_SIGNALS)
 
 
+_PLAUSIBLE_YEAR_RE = re.compile(r"\b(?:1[5-9]\d\d|20\d\d)\b")
+# page numbers and ranges, separated by commas or by the spaces a line break leaves
+_PAGES = r"\d{1,4}(?:\s*[-–]\s*\d{1,4})?(?:[\s,]+\d{1,4}(?:\s*[-–]\s*\d{1,4})?)*"
+# "Buja, A. 110, 297, 441" (author index), "Ambroise, C.247", "Lasso, 68, 86-93" (subject
+# index), "662,693" (a wrapped page list)
+_INDEX_LINE_RE = re.compile(rf"^(?:[^\d()\[\]]{{1,80}}?[\s,.]*)?{_PAGES}[.,]?$")
+# "Salojärvi, J." -- an author-index name whose page numbers went to the next line
+_BARE_NAME_RE = re.compile(r"^[^\W\d_][\w'’-]*(?:[\s-][\w'’-]+)*,(?:\s*[^\W\d_]{1,2}\.)+$")
+
+
+def is_index_entry(text: str) -> bool:
+    """A back-of-book index line mistaken for a bibliography entry: a name or term and
+    page numbers, a bare name, or page numbers alone -- with no plausible year, which
+    every real reference has. Hastie (2009) carried 537 of them after its 400
+    references (2026-09-24), each searched for in vain and one matched wrongly."""
+    s = " ".join(text.split())
+    if not s or _PLAUSIBLE_YEAR_RE.search(s):
+        return False
+    return bool(_INDEX_LINE_RE.match(s) or _BARE_NAME_RE.match(s))
+
+
+def drop_index_entries(references: list[RawReference]) -> tuple[list[RawReference], int]:
+    """The references without index lines, and how many were dropped. Applied at the
+    citation stage, so it also cleans parses restored from an OCR checkpoint."""
+    kept = [r for r in references if not is_index_entry(r["text"])]
+    return kept, len(references) - len(kept)
+
+
 _MAX_TRAILING_BOILERPLATE_CHECK = 3
 
 
