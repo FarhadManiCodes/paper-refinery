@@ -165,6 +165,10 @@ class CitationConfig:
     #   fallback providers exist, so hammering a saturated keyless endpoint (S2's public
     #   search pool 429s persistently under load -- confirmed live) buys nothing and
     #   isn't "mindful" use of a shared resource
+    search_candidates: int = 5
+    #   when a provider's top title-search hit is rejected, look at its next hits up to
+    #   this many before moving on: a generic title ("Two-dimensional turbulence") often
+    #   has another paper on top, which the author check correctly rejects. 1 disables.
     title_similarity_threshold: float = 0.90  # difflib ratio a title-search hit must clear
     title_similarity_relaxed: float = 0.75
     #   second acceptance tier (user: 0.90 alone is too strict for OCR-garbled titles):

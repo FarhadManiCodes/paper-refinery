@@ -26,16 +26,19 @@ from typing import TypedDict
 
 from .citation_providers import (
     crossref_search,
+    crossref_search_more,
     extract_doi,
     normalize_crossref,
     normalize_openalex,
     normalize_s2,
     openalex_references,
     openalex_search,
+    openalex_search_more,
     s2_by_doi,
     s2_paper_id,
     s2_references,
     s2_search,
+    s2_search_more,
 )
 from .config import CitationConfig
 from .references import RawReference
@@ -343,23 +346,32 @@ def _resolve_by_title(
     ``(candidate, match, near_miss)``; candidate/match are None when nothing clears the bar.
     """
     providers = (
-        ("crossref", crossref_search, normalize_crossref),
-        ("semanticscholar", s2_search, normalize_s2),
-        ("openalex", openalex_search, normalize_openalex),
+        ("crossref", crossref_search, crossref_search_more, normalize_crossref),
+        ("semanticscholar", s2_search, s2_search_more, normalize_s2),
+        ("openalex", openalex_search, openalex_search_more, normalize_openalex),
     )
     preprint_fallback: tuple[str, dict] | None = None
     near_miss: dict | None = None
-    for name, search, normalize in providers:
-        hit = normalize(search(out["title"], cfg))
-        if not hit:
+    for name, search, search_more, normalize in providers:
+        top = normalize(search(out["title"], cfg))
+        if not top:
             continue
-        if not _acceptable(out, hit, cfg):
-            near_miss = _better_near_miss(near_miss, name, out.get("title"), hit)
-            continue
-        if _is_preprint(hit):
-            preprint_fallback = preprint_fallback or (name, hit)
-            continue
-        return hit, name, near_miss
+        candidates = [top]
+        if not _acceptable(out, top, cfg) and cfg.search_candidates > 1:
+            # only a rejected top hit costs a second request (a new URL, so uncached once)
+            near_miss = _better_near_miss(near_miss, name, out.get("title"), top)
+            more = search_more(out["title"], cfg, cfg.search_candidates)[1:]
+            candidates = [normalize(h) for h in more]
+        for hit in candidates:
+            if not hit:
+                continue
+            if not _acceptable(out, hit, cfg):
+                near_miss = _better_near_miss(near_miss, name, out.get("title"), hit)
+                continue
+            if _is_preprint(hit):
+                preprint_fallback = preprint_fallback or (name, hit)
+                continue
+            return hit, name, near_miss
     if preprint_fallback is not None:
         name, hit = preprint_fallback
         return hit, name, near_miss

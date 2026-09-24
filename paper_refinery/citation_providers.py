@@ -132,13 +132,19 @@ def s2_by_doi(doi: str, cfg: CitationConfig) -> dict | None:
     return _get_json(url, cfg, headers=_s2_headers(cfg), before_fetch=lambda: _s2_throttle(cfg))
 
 
-def s2_search(title: str, cfg: CitationConfig) -> dict | None:
+def s2_search_more(title: str, cfg: CitationConfig, n: int) -> list[dict]:
+    """Top ``n`` title-search hits, best first. With ``n=1`` the URL is exactly the one
+    ``s2_search`` has always used, so its cached responses stay valid."""
     url = (
         f"{cfg.s2_api_base}/paper/search"
-        f"?query={urllib.parse.quote(title)}&fields={_S2_FIELDS}&limit=1"
+        f"?query={urllib.parse.quote(title)}&fields={_S2_FIELDS}&limit={n}"
     )
     data = _get_json(url, cfg, headers=_s2_headers(cfg), before_fetch=lambda: _s2_throttle(cfg))
-    hits = (data or {}).get("data") or []
+    return (data or {}).get("data") or []
+
+
+def s2_search(title: str, cfg: CitationConfig) -> dict | None:
+    hits = s2_search_more(title, cfg, 1)
     return hits[0] if hits else None
 
 
@@ -215,21 +221,32 @@ def s2_references(paper_id: str, cfg: CitationConfig) -> list[dict] | None:
     return candidates
 
 
-def crossref_search(title: str, cfg: CitationConfig) -> dict | None:
-    url = f"{cfg.crossref_api_base}/works?query.bibliographic={urllib.parse.quote(title)}&rows=1"
+def crossref_search_more(title: str, cfg: CitationConfig, n: int) -> list[dict]:
+    """Top ``n`` hits, best first; ``n=1`` reproduces ``crossref_search``'s cached URL."""
+    q = urllib.parse.quote(title)
+    url = f"{cfg.crossref_api_base}/works?query.bibliographic={q}&rows={n}"
     if cfg.mailto:
         url += f"&mailto={urllib.parse.quote(cfg.mailto)}"
     data = _get_json(url, cfg)
-    items = ((data or {}).get("message") or {}).get("items") or []
+    return ((data or {}).get("message") or {}).get("items") or []
+
+
+def crossref_search(title: str, cfg: CitationConfig) -> dict | None:
+    items = crossref_search_more(title, cfg, 1)
     return items[0] if items else None
 
 
-def openalex_search(title: str, cfg: CitationConfig) -> dict | None:
-    url = f"{cfg.openalex_api_base}/works?search={urllib.parse.quote(title)}&per-page=1"
+def openalex_search_more(title: str, cfg: CitationConfig, n: int) -> list[dict]:
+    """Top ``n`` hits, best first; ``n=1`` reproduces ``openalex_search``'s cached URL."""
+    url = f"{cfg.openalex_api_base}/works?search={urllib.parse.quote(title)}&per-page={n}"
     if cfg.mailto:
         url += f"&mailto={urllib.parse.quote(cfg.mailto)}"
     data = _get_json(url, cfg)
-    results = (data or {}).get("results") or []
+    return (data or {}).get("results") or []
+
+
+def openalex_search(title: str, cfg: CitationConfig) -> dict | None:
+    results = openalex_search_more(title, cfg, 1)
     return results[0] if results else None
 
 

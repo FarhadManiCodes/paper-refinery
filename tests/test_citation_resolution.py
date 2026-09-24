@@ -17,6 +17,13 @@ def _cfg(**kw) -> CitationConfig:
     return CitationConfig(**kw)
 
 
+@pytest.fixture(autouse=True)
+def _no_extra_candidates(monkeypatch):
+    """The multi-hit fallback searches are live HTTP; tests that want them patch them."""
+    for name in ("crossref_search_more", "s2_search_more", "openalex_search_more"):
+        monkeypatch.setattr(cr, name, lambda t, c, n: [])
+
+
 # ---------------------------------------------------------------------------
 # title_similarity
 # ---------------------------------------------------------------------------
@@ -720,3 +727,69 @@ def test_provider_name_suffix_is_not_the_surname():
 
     assert _split_full_name("Martin L. King Jr.") == {"family": "King", "given": "Martin L."}
     assert _split_full_name("John Smith III")["family"] == "Smith"
+
+
+# ---------------------------------------------------------------------------
+# fallback to further title-search hits
+# ---------------------------------------------------------------------------
+
+TURBULENCE = {
+    "title": "Two-dimensional turbulence",
+    "year": 2012,
+    "authors": [{"family": "Boffetta", "given": "G."}, {"family": "Ecke", "given": "R. E."}],
+}
+
+
+def _s2_hit(title, year, *families):
+    return {"title": title, "year": year, "authors": [{"name": f"A. {f}"} for f in families]}
+
+
+def test_rejected_top_hit_falls_back_to_the_next_matching_one(monkeypatch):
+    # live 2026-09-24: a generic title's top hit is someone else's paper
+    wrong = _s2_hit("Two-dimensional turbulence", 2012, "Kraichnan", "Montgomery")
+    right = _s2_hit("Two-Dimensional Turbulence", 2012, "Boffetta", "Ecke")
+    asked = []
+    monkeypatch.setattr(cr, "crossref_search", lambda t, c: None)
+    monkeypatch.setattr(cr, "openalex_search", lambda t, c: None)
+    monkeypatch.setattr(cr, "s2_search", lambda t, c: wrong)
+    monkeypatch.setattr(cr, "s2_search_more", lambda t, c, n: asked.append(n) or [wrong, right])
+    out = cr.verify_and_resolve(dict(TURBULENCE), "no doi", _cfg())
+    assert out["verified"] and asked == [5]
+    assert [a["family"] for a in out["authors"]][:2] == ["Boffetta", "Ecke"]
+
+
+def test_accepted_top_hit_never_fetches_more(monkeypatch):
+    right = _s2_hit("Two-Dimensional Turbulence", 2012, "Boffetta", "Ecke")
+    monkeypatch.setattr(cr, "crossref_search", lambda t, c: None)
+    monkeypatch.setattr(cr, "s2_search", lambda t, c: right)
+    monkeypatch.setattr(cr, "s2_search_more", lambda t, c, n: pytest.fail("no extra request"))
+    assert cr.verify_and_resolve(dict(TURBULENCE), "no doi", _cfg())["verified"]
+
+
+def test_search_candidates_one_disables_the_fallback(monkeypatch):
+    wrong = _s2_hit("Two-dimensional turbulence", 2012, "Kraichnan", "Montgomery")
+    monkeypatch.setattr(cr, "crossref_search", lambda t, c: None)
+    monkeypatch.setattr(cr, "openalex_search", lambda t, c: None)
+    monkeypatch.setattr(cr, "s2_search", lambda t, c: wrong)
+    monkeypatch.setattr(cr, "s2_search_more", lambda t, c, n: pytest.fail("disabled"))
+    assert not cr.verify_and_resolve(dict(TURBULENCE), "no doi", _cfg(search_candidates=1))[
+        "verified"
+    ]
+
+
+def test_single_hit_search_keeps_its_cached_url(monkeypatch):
+    from paper_refinery import citation_providers as cp
+
+    urls = []
+    monkeypatch.setattr(cp, "_get_json", lambda url, cfg, **kw: urls.append(url) or None)
+    cfg = _cfg(mailto="")
+    (
+        cp.s2_search("A title", cfg),
+        cp.crossref_search("A title", cfg),
+        cp.openalex_search("A title", cfg),
+    )
+    assert (
+        urls[0].endswith("&limit=1")
+        and urls[1].endswith("&rows=1")
+        and urls[2].endswith("&per-page=1")
+    )
