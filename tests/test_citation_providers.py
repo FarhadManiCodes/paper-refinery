@@ -4,6 +4,10 @@ Pure/mocked -- no live network: normalizer fixtures mirror the live-confirmed sh
 
 from __future__ import annotations
 
+import urllib.error
+
+import pytest
+
 from paper_refinery import citation_providers as cp
 from paper_refinery.config import CitationConfig
 
@@ -216,10 +220,19 @@ def test_get_json_attempts_overrides_the_retry_budget(tmp_path, monkeypatch):
     assert seen == [2, 7]
 
 
-def test_source_list_calls_use_the_bulk_retry_budget(monkeypatch):
+@pytest.fixture
+def patient(monkeypatch):
+    # the circuit breaker is process-wide; each test starts patient
+    cp._BULK_PATIENCE.set()
+    yield
+    cp._BULK_PATIENCE.set()
+
+
+def test_source_list_calls_use_the_bulk_retry_budget(monkeypatch, patient):
     # one reference-list call replaces dozens of searches, so it waits longer;
     # a single title search keeps the ordinary budget
     cfg = _cfg(bulk_retry_attempts=9)
+    monkeypatch.setenv(cfg.openalex_api_key_env, "k")
     seen = []
 
     def fake(url, cfg, headers=None, before_fetch=None, attempts=None):
@@ -235,6 +248,47 @@ def test_source_list_calls_use_the_bulk_retry_budget(monkeypatch):
     seen.clear()
     cp.crossref_search("Some Title", cfg)
     assert seen == [None]
+
+
+def test_keyless_openalex_list_gets_no_long_wait(monkeypatch, patient):
+    # without a key OpenAlex answers 429 for lack of budget; waiting never fixes that
+    cfg = _cfg(bulk_retry_attempts=9)
+    monkeypatch.delenv(cfg.openalex_api_key_env, raising=False)
+    seen = []
+    monkeypatch.setattr(
+        cp, "_get_json", lambda url, cfg, attempts=None, **kw: seen.append(attempts)
+    )
+    cp.openalex_references("10.1/x", cfg)
+    assert seen == [None]
+
+
+def test_exhausted_list_call_trips_the_breaker_until_one_succeeds(tmp_path, monkeypatch, patient):
+    cfg = _cfg(api_cache_dir=str(tmp_path), api_retry_attempts=2, bulk_retry_attempts=7)
+    throttled = urllib.error.HTTPError("https://api.semanticscholar.org/x", 429, "", {}, None)
+
+    def failing(fn, attempts, delay):
+        raise throttled
+
+    monkeypatch.setattr(cp, "call_with_backoff", failing)
+    assert cp._get_json("https://api.semanticscholar.org/a", cfg, attempts=7) is None
+    assert cp._list_attempts(cfg) is None  # later list calls: ordinary budget
+
+    monkeypatch.setattr(cp, "call_with_backoff", lambda fn, attempts, delay: {"ok": 1})
+    assert cp._get_json("https://api.semanticscholar.org/b", cfg, attempts=2) == {"ok": 1}
+    assert cp._list_attempts(cfg) == 7  # a success restores the patience
+
+
+def test_non_retryable_list_failure_keeps_patience(tmp_path, monkeypatch, patient):
+    # a 404 (paper unknown to S2) is an answer, not an outage
+    cfg = _cfg(api_cache_dir=str(tmp_path), api_retry_attempts=2, bulk_retry_attempts=7)
+    missing = urllib.error.HTTPError("https://api.semanticscholar.org/x", 404, "", {}, None)
+
+    def failing(fn, attempts, delay):
+        raise missing
+
+    monkeypatch.setattr(cp, "call_with_backoff", failing)
+    assert cp._get_json("https://api.semanticscholar.org/a", cfg, attempts=7) is None
+    assert cp._list_attempts(cfg) == 7
 
 
 def test_s2_paper_id_by_doi_returns_id_and_candidate(monkeypatch):

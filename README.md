@@ -182,6 +182,8 @@ client elsewhere), each `KEY=value` (python-dotenv), loaded automatically by `lo
   zai.env         ZHIPU_API_KEY=...      # Zhipu / z.ai cloud GLM-OCR (maas mode -- the default)
   google.env      GOOGLE_API_KEY=...     # Gemini: figure descriptions + citation extraction
   hf.env          HF_TOKEN=...           # ONLY for selfhosted mode: PP-DocLayout-V3 download
+  openalex.env    OPENALEX_API_KEY=...   # OpenAlex citation lookups (free key; sent to OpenAlex only)
+  contact.env     REFINERY_MAILTO=...    # optional: CrossRef/OpenAlex polite pool
 ```
 
 `ZHIPU_API_KEY` is the SDK's env-var name (z.ai and Zhipu/BigModel are the same provider, same
@@ -312,11 +314,12 @@ source: SourceMeta = {
 
 - `doi`/`title`/`year`/`authors` strengthen **source identification** for the S2
   bulk-references fast-path (a confidently-identified source ⇒ its whole reference list
-  resolves in one call). That call retries longer than a single lookup
-  (`[citation] bulk_retry_attempts`), and the log says whether a list was found. Books
-  rarely have one at any provider, so their references are searched one by one, in
-  `[citation] title_search_order` (default CrossRef, Semantic Scholar, OpenAlex; with an
-  OpenAlex key, `["openalex", "crossref", "semanticscholar"]` avoids keyless S2's back-off).
+  resolves in one call). Those calls retry longer than a single lookup
+  (`[citation] bulk_retry_attempts`), and the log says whether a list was found and, if
+  not, why. Books rarely have one at any provider, so their references are searched one by
+  one, in `[citation] title_search_order` (default CrossRef, Semantic Scholar, OpenAlex).
+  With an OpenAlex key, `["openalex", "crossref", "semanticscholar"]` avoids most of keyless
+  S2's back-off; S2 is still used for printed DOIs and abstracts of CrossRef matches.
 - `references` (the paper's own bibliography — refinery's `{title,doi,year,authors}` shape *or*
   CrossRef-reference keys `article-title`/`DOI`/`author`) are matched against the printed
   references **locally, before any network call** (`match="papis"`). If they cover the whole

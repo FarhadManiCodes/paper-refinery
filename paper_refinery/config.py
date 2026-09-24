@@ -188,13 +188,18 @@ class CitationConfig:
     #   providers tried, in order, for a per-reference title search. CrossRef leads by
     #   default: its date is the published record's own, where S2 blends in preprint
     #   years. With an OpenAlex key, ["openalex", "crossref", "semanticscholar"] is much
-    #   faster, since keyless S2 backs off under load. Order never loosens acceptance: an
-    #   acceptable preprint hit is kept aside and the chain goes on, so a later
-    #   provider's published record still wins.
+    #   faster, since keyless S2 backs off under load. Order never loosens acceptance (an
+    #   acceptable preprint hit is kept aside and the chain goes on), but the first
+    #   provider's record is what gets stored: OpenAlex may give a merged work's earliest
+    #   year where no year was printed, types proceedings papers "article", and splits
+    #   names on the last token. S2 is still called for printed DOIs and for abstracts of
+    #   CrossRef matches. Each name at most once.
     bulk_retry_attempts: int = 7
-    #   retries for the source's own reference list (S2/OpenAlex fast-path): one call
-    #   that replaces dozens of per-reference searches, so it waits longer than a single
-    #   lookup (exponential backoff from api_retry_base_delay: ~2 min at the default)
+    #   attempts for each call fetching the source's own reference list (S2/OpenAlex
+    #   fast-path), which replaces dozens of per-reference searches, so it waits longer
+    #   than a single lookup: exponential backoff from api_retry_base_delay, ~2 min at the
+    #   default, ~4 min at 4.0. After one exhausts its retries, later list calls use
+    #   api_retry_attempts until one succeeds; keyless OpenAlex never gets the long wait
     search_candidates: int = 5
     #   when a provider's top title-search hit is rejected, look at its next hits up to
     #   this many before moving on: a generic title ("Two-dimensional turbulence") often
@@ -438,10 +443,13 @@ def load_config(path: Path | None = None) -> RefineryConfig:
                     f"{type(value).__name__} ({value!r})"
                 ) from None
             setattr(sub, key, value)
-    unknown = set(cfg.citation.title_search_order) - set(TITLE_SEARCH_PROVIDERS)
-    if unknown or not cfg.citation.title_search_order:
+    order = cfg.citation.title_search_order
+    if not order or set(order) - set(TITLE_SEARCH_PROVIDERS) or len(set(order)) != len(order):
         raise ValueError(
-            f"{path}: [citation] title_search_order takes a non-empty list of "
-            f"{', '.join(TITLE_SEARCH_PROVIDERS)}; got {cfg.citation.title_search_order!r}"
+            f"{path}: [citation] title_search_order takes a non-empty list of distinct names "
+            f"from {', '.join(TITLE_SEARCH_PROVIDERS)}; got {order!r}"
         )
+    for key in ("api_retry_attempts", "bulk_retry_attempts"):
+        if getattr(cfg.citation, key) < 1:
+            raise ValueError(f"{path}: [citation] {key} must be at least 1")
     return cfg

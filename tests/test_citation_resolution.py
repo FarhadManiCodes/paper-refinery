@@ -227,6 +227,7 @@ def test_openalex_first_preprint_still_yields_to_a_published_record(monkeypatch)
     monkeypatch.setattr(cr, "openalex_search", lambda t, c: preprint)
     monkeypatch.setattr(cr, "crossref_search", lambda t, c: crossref_published)
     monkeypatch.setattr(cr, "s2_search", lambda t, c: pytest.fail("published hit ends the chain"))
+    monkeypatch.setattr(cr, "s2_by_doi", lambda doi, cfg: None)  # CrossRef abstract follow-up
     cfg = _cfg(title_search_order=["openalex", "crossref", "semanticscholar"])
     out = cr.verify_and_resolve(dict(EXTRACTED), "no doi", cfg)
     assert out["verified"] and out["match"] == "crossref"
@@ -587,13 +588,22 @@ def test_source_references_logs_whether_a_list_was_found(monkeypatch, caplog):
     caplog.set_level("INFO", logger=cr.__name__)
     monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "Src"}))
     monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: [{"title": "Ref A"}])
-    cr._source_references(cr.SourcePaper(arxiv="2502.00963"), _cfg(), 1)
-    assert "arXiv:2502.00963: source reference list: 1 from S2, 0 from OpenAlex" in caplog.text
+    src = cr.SourcePaper(arxiv="2502.00963")
+    cr._source_references(src, _cfg(), 1)
+    assert "arXiv:2502.00963: source reference list: 1 from S2, OpenAlex not asked" in caplog.text
+
+    # a throttled list fetch (None) must not read as "S2 has no list"
+    for s2_list, reason in ((None, "S2 list fetch failed"), ([], "S2 lists no references")):
+        caplog.clear()
+        monkeypatch.setattr(cr, "s2_references", lambda pid, cfg, r=s2_list: r)
+        assert cr._source_references(src, _cfg(), 1) is None
+        assert f"unavailable ({reason}; OpenAlex not asked)" in caplog.text
 
     caplog.clear()
     monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: None)
-    assert cr._source_references(cr.SourcePaper(arxiv="2502.00963"), _cfg(), 1) is None
-    assert "unavailable (not identified in S2)" in caplog.text
+    monkeypatch.setattr(cr, "openalex_references", lambda doi, cfg: None)
+    assert cr._source_references(cr.SourcePaper(doi="10.1/x"), _cfg(), 1) is None
+    assert "unavailable (not found in S2, or the S2 lookup failed; 0 from OpenAlex)" in caplog.text
 
 
 def test_dedup_candidates_by_doi_then_title():

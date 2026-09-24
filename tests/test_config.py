@@ -103,9 +103,17 @@ def test_load_config_title_search_order(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('[citation]\ntitle_search_order = ["openalex", "crossref"]\n')
     assert load_config(path).citation.title_search_order == ["openalex", "crossref"]
-    for bad in ('["openalex", "google"]', "[]"):
+    for bad in ('["openalex", "google"]', "[]", '["openalex", "openalex"]'):
         path.write_text(f"[citation]\ntitle_search_order = {bad}\n")
         with pytest.raises(ValueError, match="title_search_order"):
+            load_config(path)
+
+
+def test_load_config_rejects_retry_attempts_below_one(tmp_path):
+    path = tmp_path / "config.toml"
+    for key in ("api_retry_attempts", "bulk_retry_attempts"):
+        path.write_text(f"[citation]\n{key} = 0\n")
+        with pytest.raises(ValueError, match=key):
             load_config(path)
 
 

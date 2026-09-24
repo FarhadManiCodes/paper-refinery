@@ -346,8 +346,11 @@ def _resolve_by_title(
     published versions -- published DOI but the *earliest* (arXiv) year, confirmed live on 3
     hyco refs pulled back a year -- while CrossRef's ``issued`` is the published record's own
     date. Published-over-preprint: an acceptable *preprint* hit is remembered but doesn't
-    stop the chain, so a later provider's published version can still win -- which is what
-    keeps an OpenAlex-first order (faster with a key) as safe as the default. Returns
+    stop the chain, so a later provider's published version can still win. That covers
+    OpenAlex's separate preprint records, so OpenAlex first (faster with a key) is safe for
+    acceptance, but its records are not CrossRef's: a merged work may carry the earliest
+    (preprint) year, proceedings papers are typed "article", and full names are split on the
+    last token ("van der Waals" -> "Waals"). Returns
     ``(candidate, match, near_miss)``; candidate/match are None when nothing clears the bar.
     """
     by_name = {
@@ -534,26 +537,34 @@ def _source_references(
         found = s2_paper_id(cfg, title=source.title)
         if found and _source_confident(source, found[1], cfg):
             hit = found
-    s2 = (s2_references(hit[0], cfg) or []) if hit else []
-    openalex: list[dict] = []
+    s2_list = s2_references(hit[0], cfg) if hit else None  # None: the fetch itself failed
+    s2 = s2_list or []
+    openalex: list[dict] | None = None  # None: not queried, or nothing from OpenAlex
     pool = s2
-    if len(s2) < n_refs and source.doi:
-        openalex = openalex_references(source.doi, cfg) or []
-        pool = _dedup_candidates([*s2, *openalex])
+    queried_openalex = len(s2) < n_refs and bool(source.doi)
+    if queried_openalex:
+        openalex = openalex_references(source.doi, cfg)
+        pool = _dedup_candidates([*s2, *(openalex or [])])
     # the fast path failing silently cost hours (2026-09-24: 14 papers whose S2 list existed
     # were searched reference by reference after a throttled fetch), so always say which
     label = _source_label(source)
+    oa_note = f"{len(openalex or [])} from OpenAlex" if queried_openalex else "OpenAlex not asked"
     if pool:
         logger.info(
-            "%s: source reference list: %d from S2, %d from OpenAlex; matching locally",
-            label,
-            len(s2),
-            len(openalex),
+            "%s: source reference list: %d from S2, %s; matching locally", label, len(s2), oa_note
         )
     else:
-        reason = "not identified in S2" if hit is None else "no list available"
-        logger.info(
-            "%s: source reference list unavailable (%s); searching each reference", label, reason
+        if hit is None:
+            reason = "not found in S2, or the S2 lookup failed"
+        elif s2_list is None:
+            reason = "S2 list fetch failed"
+        else:
+            reason = "S2 lists no references"
+        logger.warning(
+            "%s: source reference list unavailable (%s; %s); searching each reference",
+            label,
+            reason,
+            oa_note,
         )
     return pool or None
 

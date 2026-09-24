@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .config import CitationConfig
 from .disk_cache import cache_path, read_json, write_json
-from .retry import call_with_backoff
+from .retry import call_with_backoff, is_retryable
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,17 @@ def _cache_path(url: str, cfg: CitationConfig) -> Path | None:
     return cache_path(cfg.api_cache_dir, hashlib.sha256(key.encode()).hexdigest())
 
 
+# Reference-list calls get cfg.bulk_retry_attempts, but only while the last such call did not
+# exhaust its retries on a retryable error: a sustained outage then costs one long wait per
+# process, not one per paper. Any successful list call restores the patience.
+_BULK_PATIENCE = threading.Event()
+_BULK_PATIENCE.set()
+
+
+def _list_attempts(cfg: CitationConfig) -> int | None:
+    return cfg.bulk_retry_attempts if _BULK_PATIENCE.is_set() else None
+
+
 def _get_json(
     url: str,
     cfg: CitationConfig,
@@ -176,7 +187,17 @@ def _get_json(
     except Exception as exc:
         _warn_once_if_key_rejected(url, exc, cfg)
         logger.debug("provider fetch failed for %s: %r", _without_mailto(url), exc)
+        if attempts and attempts > cfg.api_retry_attempts and is_retryable(exc):
+            _BULK_PATIENCE.clear()
+            logger.warning(
+                "%s kept failing after %d attempts; reference-list calls use the ordinary "
+                "retry budget until one succeeds",
+                _provider_of(url, cfg) or "provider",
+                attempts,
+            )
         return None
+    if attempts:
+        _BULK_PATIENCE.set()
     if cache and data is not None:
         write_json(cache, data)
     return data
@@ -252,7 +273,7 @@ def s2_paper_id(
             cfg,
             headers=_s2_headers(cfg),
             before_fetch=lambda: _s2_throttle(cfg),
-            attempts=cfg.bulk_retry_attempts,
+            attempts=_list_attempts(cfg),
         )
         cand = normalize_s2(data)
         return (data["paperId"], cand) if (data and data.get("paperId") and cand) else None
@@ -263,7 +284,7 @@ def s2_paper_id(
             cfg,
             headers=_s2_headers(cfg),
             before_fetch=lambda: _s2_throttle(cfg),
-            attempts=cfg.bulk_retry_attempts,
+            attempts=_list_attempts(cfg),
         )
         hits = (data or {}).get("data") or []
         if hits and hits[0].get("paperId"):
@@ -291,7 +312,7 @@ def s2_references(paper_id: str, cfg: CitationConfig) -> list[dict] | None:
         cfg,
         headers=_s2_headers(cfg),
         before_fetch=lambda: _s2_throttle(cfg),
-        attempts=cfg.bulk_retry_attempts,
+        attempts=_list_attempts(cfg),
     )
     if data is None:
         return None
@@ -342,10 +363,12 @@ def openalex_references(doi: str, cfg: CitationConfig) -> list[dict] | None:
     (<=100 ids/call), each ``normalize_openalex``'d (incl. reconstructed abstract). ``None``
     when the work isn't found or lists no references.
     """
+    # keyless OpenAlex answers 429 for lack of budget, which waiting never fixes
+    attempts = _list_attempts(cfg) if os.environ.get(cfg.openalex_api_key_env) else None
     src = _get_json(
         f"{cfg.openalex_api_base}/works/doi:{urllib.parse.quote(doi)}?select=referenced_works",
         cfg,
-        attempts=cfg.bulk_retry_attempts,
+        attempts=attempts,
     )
     ids = [w.rsplit("/", 1)[-1] for w in (src or {}).get("referenced_works") or []]
     if not ids:
@@ -359,7 +382,7 @@ def openalex_references(doi: str, cfg: CitationConfig) -> list[dict] | None:
         )
         if mailto := _mailto(cfg, "openalex"):
             url += f"&mailto={urllib.parse.quote(mailto)}"
-        data = _get_json(url, cfg, attempts=cfg.bulk_retry_attempts)
+        data = _get_json(url, cfg, attempts=attempts)
         for work in (data or {}).get("results") or []:
             cand = normalize_openalex(work)
             if cand:
