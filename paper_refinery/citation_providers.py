@@ -163,6 +163,56 @@ class ProviderStats:
 
 
 PROVIDER_STATS = ProviderStats()
+
+# A provider whose ordinary lookups keep ending in 429 is skipped for a while instead of
+# making every later lookup sit through its backoff (keyless S2, 2026-09-24).
+_COOLDOWN_AFTER = 3  # consecutive lookups exhausted on 429
+_cooldown_lock = threading.Lock()
+_rate_limited_streak: Counter[str] = Counter()
+_cooling_until: dict[str, float] = {}
+
+
+def _cooling_down(provider: str) -> bool:
+    with _cooldown_lock:
+        until = _cooling_until.get(provider)
+        if until is None:
+            return False
+        if time.monotonic() < until:
+            return True
+        del _cooling_until[provider]
+    logger.info("%s: cooldown over; asking it again", provider)
+    return False
+
+
+def _after_lookup(provider: str, cfg: CitationConfig, rate_limited: bool) -> None:
+    """Track consecutive 429-exhausted lookups per provider; start a cooldown at the
+    threshold. Any other outcome (success, 404, other error) resets the streak."""
+    with _cooldown_lock:
+        if not rate_limited:
+            _rate_limited_streak[provider] = 0
+            return
+        _rate_limited_streak[provider] += 1
+        if _rate_limited_streak[provider] < _COOLDOWN_AFTER or cfg.provider_cooldown_s <= 0:
+            return
+        _rate_limited_streak[provider] = 0
+        _cooling_until[provider] = time.monotonic() + cfg.provider_cooldown_s
+    logger.warning(
+        "%s: rate-limited on %d lookups in a row; skipping it for %.0f min",
+        provider,
+        _COOLDOWN_AFTER,
+        cfg.provider_cooldown_s / 60,
+    )
+
+
+def reset_provider_state() -> None:
+    """Clear counts, warnings and cooldowns (tests, and long-lived callers)."""
+    PROVIDER_STATS.reset()
+    with _cooldown_lock:
+        _rate_limited_streak.clear()
+        _cooling_until.clear()
+    _ERROR_CLASSES_WARNED.clear()
+
+
 _ERROR_CLASSES_WARNED: set[tuple[str, str]] = set()
 _ERROR_WARN_LOCK = threading.Lock()
 
@@ -274,6 +324,8 @@ def _record_failure(url: str, exc: Exception, cfg: CitationConfig, attempts: int
     warning, and tripping the list-call breaker."""
     if _error_class(exc) != "missing":  # a 404 was already counted as an answer
         PROVIDER_STATS.add(_provider_label(url, cfg), "failed")
+    if attempts is None:
+        _after_lookup(_provider_label(url, cfg), cfg, rate_limited=_error_class(exc) == "429")
     _warn_once_if_key_rejected(url, exc, cfg)
     logger.debug("provider fetch failed for %s: %r", _without_mailto(url), exc)
     if attempts and attempts > cfg.api_retry_attempts and is_retryable(exc):
@@ -311,6 +363,11 @@ def _get_json(
             PROVIDER_STATS.add(_provider_label(url, cfg), "cached")
             return cached
 
+    provider = _provider_label(url, cfg)
+    if attempts is None and _cooling_down(provider):
+        PROVIDER_STATS.add(provider, "skipped")
+        return None
+
     base_headers = {"User-Agent": _user_agent(cfg, url), **_auth_headers(url, cfg)}
     base_headers.update(headers or {})
 
@@ -333,8 +390,10 @@ def _get_json(
     except Exception as exc:
         _record_failure(url, exc, cfg, attempts)
         return None
-    PROVIDER_STATS.add(_provider_label(url, cfg), "ok")
-    if attempts is not None:  # a list call succeeded, whatever its budget
+    PROVIDER_STATS.add(provider, "ok")
+    if attempts is None:
+        _after_lookup(provider, cfg, rate_limited=False)
+    else:  # a list call succeeded, whatever its budget
         _BULK_PATIENCE.set()
     if cache and data is not None:
         write_json(cache, data)
@@ -358,6 +417,14 @@ def _s2_headers(cfg: CitationConfig) -> dict:
 # ---------------------------------------------------------------------------
 
 _S2_FIELDS = "title,year,abstract,authors,externalIds,publicationTypes"
+
+
+def openalex_by_doi(doi: str, cfg: CitationConfig) -> dict | None:
+    """One OpenAlex work by DOI (an exact lookup), in ``normalize_openalex``'s input shape."""
+    url = f"{cfg.openalex_api_base}/works/doi:{urllib.parse.quote(doi)}?select={_OPENALEX_FIELDS}"
+    if mailto := _mailto(cfg, "openalex"):
+        url += f"&mailto={urllib.parse.quote(mailto)}"
+    return _get_json(url, cfg)
 
 
 def s2_by_doi(doi: str, cfg: CitationConfig) -> dict | None:
@@ -422,7 +489,6 @@ def s2_paper_id(
             cfg,
             headers=_s2_headers(cfg),
             before_fetch=lambda: _s2_throttle(cfg),
-            attempts=_list_attempts(cfg),
         )
         hits = (data or {}).get("data") or []
         if hits and hits[0].get("paperId"):
@@ -494,25 +560,47 @@ def openalex_search(title: str, cfg: CitationConfig) -> dict | None:
 _OPENALEX_FIELDS = "id,display_name,publication_year,authorships,doi,abstract_inverted_index,type"
 
 
-def openalex_references(doi: str, cfg: CitationConfig) -> list[dict] | None:
-    """The source paper's references from OpenAlex (``referenced_works``, hydrated) as
-    normalized candidates -- a second bulk source for when S2's list is publisher-elided
-    (ASME/IEEE...) or sparse. One call for the id list, then batched hydration
-    (<=100 ids/call), each ``normalize_openalex``'d (incl. reconstructed abstract). ``None``
-    when the work isn't found or lists no references.
-    """
+_OPENALEX_SOURCE_FIELDS = "id,display_name,publication_year,authorships,doi,type,referenced_works"
+
+
+def openalex_source(
+    cfg: CitationConfig, doi: str | None = None, title: str | None = None
+) -> tuple[dict, list[str]] | None:
+    """Identify a SOURCE work in OpenAlex -- exactly by ``doi``, else by its top ``title``
+    search hit (the caller corroborates that one) -- and return ``(candidate, ids)``: the
+    normalized record and the OpenAlex ids of the works it cites. ``None`` on a miss or a
+    failed fetch."""
     # keyless OpenAlex answers 429 for lack of budget, which waiting never fixes
     attempts = _list_attempts(cfg) if os.environ.get(cfg.openalex_api_key_env or "") else None
-    src = _get_json(
-        f"{cfg.openalex_api_base}/works/doi:{urllib.parse.quote(doi)}?select=referenced_works",
-        cfg,
-        attempts=attempts,
-    )
-    ids = [w.rsplit("/", 1)[-1] for w in (src or {}).get("referenced_works") or []]
-    if not ids:
+    if doi:
+        url = (
+            f"{cfg.openalex_api_base}/works/doi:{urllib.parse.quote(doi)}"
+            f"?select={_OPENALEX_SOURCE_FIELDS}"
+        )
+    elif title:
+        url = (
+            f"{cfg.openalex_api_base}/works?search={urllib.parse.quote(title)}"
+            f"&per-page=1&select={_OPENALEX_SOURCE_FIELDS}"
+        )
+    else:
         return None
+    if mailto := _mailto(cfg, "openalex"):
+        url += f"&mailto={urllib.parse.quote(mailto)}"
+    data = _get_json(url, cfg, attempts=attempts)
+    work = data if doi else ((data or {}).get("results") or [None])[0]
+    cand = normalize_openalex(work)
+    if not cand:
+        return None
+    ids = [w.rsplit("/", 1)[-1] for w in (work or {}).get("referenced_works") or []]
+    return cand, ids
+
+
+def openalex_hydrate(ids: list[str], cfg: CitationConfig) -> list[dict]:
+    """The works behind OpenAlex ``ids`` as normalized candidates, in batched calls
+    (<=100 ids each, OpenAlex's OR-filter cap), abstracts reconstructed."""
+    attempts = _list_attempts(cfg) if os.environ.get(cfg.openalex_api_key_env or "") else None
     candidates: list[dict] = []
-    for id_batch in itertools.batched(ids, 100):  # OpenAlex caps the OR-filter at 100 ids
+    for id_batch in itertools.batched(ids, 100):
         batch = "|".join(id_batch)
         url = (
             f"{cfg.openalex_api_base}/works?filter=openalex_id:{batch}"
@@ -525,7 +613,16 @@ def openalex_references(doi: str, cfg: CitationConfig) -> list[dict] | None:
             cand = normalize_openalex(work)
             if cand:
                 candidates.append(cand)
-    return candidates or None
+    return candidates
+
+
+def openalex_references(doi: str, cfg: CitationConfig) -> list[dict] | None:
+    """The source paper's references from OpenAlex (``referenced_works``, hydrated) as
+    normalized candidates -- a bulk source for when S2's list is publisher-elided
+    (ASME/IEEE...) or sparse. ``None`` when the work isn't found or lists no references.
+    """
+    found = openalex_source(cfg, doi=doi)
+    return (openalex_hydrate(found[1], cfg) or None) if found and found[1] else None
 
 
 # ---------------------------------------------------------------------------

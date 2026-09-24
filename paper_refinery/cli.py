@@ -48,7 +48,7 @@ from .citation_resolution import (
 )
 from .config import ParseConfig, RefineryConfig, load_config
 from .enrich import enrich_markdown
-from .figures import describe_figure, make_client
+from .figures import describe_figure, figure_stats, make_client
 from .parse import ParseResult
 from .parse_cache import load_checkpoint, parse_pdf_cached, pdf_sha256
 from .pdf_split import merge_parse_results, page_count, split_pdf
@@ -234,7 +234,18 @@ def _run_citations(
     -- else the OCR'd title) drives the S2 bulk-references fast-path in ``resolve_references``;
     unidentified/unmatched entries fall back to the per-entry provider search.
     """
-    extracted = extract_references([r["text"] for r in parsed.references], cfg.citation)
+    texts = [r["text"] for r in parsed.references]
+    batches = -(-len(texts) // max(1, cfg.citation.extract_batch_size))
+    logger.info("%s: citations: extracting %d references (%d batches)", label, len(texts), batches)
+    started = time.monotonic()
+    extracted = extract_references(texts, cfg.citation)
+    logger.info(
+        "%s: citations: extracted %d references in %.1f min (%d without a title)",
+        label,
+        len(extracted),
+        (time.monotonic() - started) / 60,
+        sum(1 for e in extracted if not (e or {}).get("title")),
+    )
     source_paper = source_from_meta(source, fallback_title=_source_title(parsed.markdown))
     resolved = resolve_references(
         extracted,
@@ -329,26 +340,49 @@ def _parse_maybe_split(
     )
     original_hash = pdf_sha256(pdf)
 
-    def _parse_parts(active_backend: OcrBackend) -> ParseResult:
-        results = [
-            parse_pdf_cached(
-                part_path,
+    def content_id(i: int) -> str:
+        return f"{original_hash}:part{i}:{cfg.parse.max_pages_per_part}"
+
+    # checkpoints first: the OCR backend (and its "initialized" chatter) is only started
+    # when a part really needs OCR
+    results: list[ParseResult | None] = [
+        None
+        if force_parse
+        else load_checkpoint(parts_dir / f"part_{i}", part_path, cfg.parse, content_id(i))
+        for i, (part_path, _n) in enumerate(parts)
+    ]
+    missing = [i for i, r in enumerate(results) if r is None]
+    logger.info(
+        "%s: %d/%d parts from checkpoint%s",
+        pdf.name,
+        len(parts) - len(missing),
+        len(parts),
+        f"; OCR for part(s) {', '.join(str(i + 1) for i in missing)}" if missing else " (no OCR)",
+    )
+
+    def _ocr_missing(active_backend: OcrBackend) -> None:
+        for i in missing:
+            logger.info("%s: OCR part %d/%d", pdf.name, i + 1, len(parts))
+            results[i] = parse_pdf_cached(
+                parts[i][0],
                 parts_dir / f"part_{i}",
                 cfg.parse,
                 backend=active_backend,
                 force=force_parse,
-                content_id=f"{original_hash}:part{i}:{cfg.parse.max_pages_per_part}",
+                content_id=content_id(i),
             )
-            for i, (part_path, _n) in enumerate(parts)
-        ]
-        return merge_parse_results(
-            results, [n for _, n in parts], work_dir / cfg.parse.figures_dir_name
-        )
 
-    if backend is not None:
-        return _parse_parts(backend)
-    with ocr_backend(cfg.parse) as own:
-        return _parse_parts(own)
+    if missing:
+        if backend is not None:
+            _ocr_missing(backend)
+        else:
+            with ocr_backend(cfg.parse) as own:
+                _ocr_missing(own)
+    return merge_parse_results(
+        [r for r in results if r is not None],
+        [n for _, n in parts],
+        work_dir / cfg.parse.figures_dir_name,
+    )
 
 
 def _typeset(
@@ -450,7 +484,16 @@ def _refine_parsed(
         if parsed.figure_crops:
             client = make_client(cfg.figure)
             describe = functools.partial(describe_figure, client=client)
+        figures_before = figure_stats()
         enriched = enrich_markdown(parsed, cfg.figure, describe=describe)
+        if parsed.figure_crops:
+            got = figure_stats() - figures_before
+            logger.info(
+                "%s: figures: %d from cache, %d described",
+                pdf.name,
+                got["cached"],
+                got["described"],
+            )
         enriched = _relativize_image_links(enriched, work_dir)
 
         if citations_future is not None:
@@ -849,7 +892,9 @@ def _setup_logging() -> None:
     pkg_logger = logging.getLogger("paper_refinery")
     if not pkg_logger.handlers:
         handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S")
+        )
         pkg_logger.addHandler(handler)
     pkg_logger.setLevel(logging.INFO)
 

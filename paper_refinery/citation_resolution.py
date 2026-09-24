@@ -36,9 +36,11 @@ from .citation_providers import (
     normalize_crossref,
     normalize_openalex,
     normalize_s2,
-    openalex_references,
+    openalex_by_doi,
+    openalex_hydrate,
     openalex_search,
     openalex_search_more,
+    openalex_source,
     s2_by_doi,
     s2_paper_id,
     s2_references,
@@ -312,16 +314,27 @@ def _merge_candidate(out: dict, candidate: dict, match: str) -> dict:
     return {**out, "verified": True, "match": match}
 
 
+def _by_doi(doi: str, cfg: CitationConfig) -> dict | None:
+    """One exact DOI lookup, asking the DOI-capable providers (OpenAlex, S2) in
+    ``title_search_order`` order; the first record with a title wins."""
+    lookups = {
+        "openalex": lambda: normalize_openalex(openalex_by_doi(doi, cfg)),
+        "semanticscholar": lambda: normalize_s2(s2_by_doi(doi, cfg)),
+    }
+    for name in cfg.title_search_order:
+        if name in lookups and (candidate := lookups[name]()) and candidate.get("title"):
+            return candidate
+    return None
+
+
 def _resolve_by_doi(raw_text: str, cfg: CitationConfig) -> tuple[dict, str] | None:
     """DOI-first exact lookup: a DOI printed in the raw OCR text is definitionally correct,
-    so its S2 record is accepted with no similarity check. None when there's no usable hit."""
+    so its record is accepted with no similarity check. None when there's no usable hit."""
     doi = extract_doi(raw_text)
     if not doi:
         return None
-    candidate = normalize_s2(s2_by_doi(doi, cfg))
-    if candidate and candidate.get("title"):
-        return candidate, "doi"
-    return None
+    candidate = _by_doi(doi, cfg)
+    return (candidate, "doi") if candidate else None
 
 
 def _better_near_miss(
@@ -394,9 +407,9 @@ def _resolve_by_title(
 
 
 def _fill_crossref_abstract(candidate: dict, match: str, cfg: CitationConfig) -> None:
-    """CrossRef rarely carries an abstract -- one S2-by-DOI follow-up just for that field."""
+    """CrossRef rarely carries an abstract -- one DOI follow-up just for that field."""
     if match == "crossref" and not candidate.get("abstract") and candidate.get("doi"):
-        followup = normalize_s2(s2_by_doi(candidate["doi"], cfg))
+        followup = _by_doi(candidate["doi"], cfg)
         if followup and followup.get("abstract"):
             candidate["abstract"] = followup["abstract"]
 
@@ -521,58 +534,107 @@ def _normalize_caller_references(entries: list[dict]) -> list[dict]:
 
 
 def _source_references(
-    source: SourcePaper | None, cfg: CitationConfig, n_refs: int
+    source: SourcePaper | None, cfg: CitationConfig, n_refs: int, label: str | None = None
 ) -> list[dict] | None:
-    """The source paper's references as a bulk candidate pool, or None when the fast-path is
-    off / the source can't be identified confidently.
+    """The source paper's own reference list as a bulk candidate pool, or None when the
+    fast-path is off or no provider has one.
 
-    S2 first (an external id is trusted; a title match is gated by ``_source_confident`` so we
-    never pull the wrong paper's refs). S2 returns >= the printed count when it truly has the
-    references, so a short list means the publisher elided them (ASME/IEEE...) or coverage is
-    partial -- fill from OpenAlex (a different licensing regime) when a DOI is known, and dedup
-    the combined pool.
+    The list-capable providers (OpenAlex, S2) are asked in ``title_search_order`` order
+    until the pool covers the printed count: each identifies the source exactly by DOI (S2
+    also by arXiv id), else by title, and a title hit must pass ``_source_confident`` so
+    we never pull the wrong work's references. Every step is logged: the fast path
+    failing silently cost hours on 2026-09-24.
     """
     if not cfg.s2_bulk_references or source is None:
         return None
-    hit = None
-    if source.doi or source.arxiv:
-        hit = s2_paper_id(cfg, doi=source.doi, arxiv=source.arxiv)  # exact -> trusted
-    elif source.title:
-        found = s2_paper_id(cfg, title=source.title)
-        if found and _source_confident(source, found[1], cfg):
-            hit = found
-    s2_list = s2_references(hit[0], cfg) if hit else None  # None: the fetch itself failed
-    s2 = s2_list or []
-    openalex: list[dict] | None = None  # None: not queried, or nothing from OpenAlex
-    pool = s2
-    queried_openalex = len(s2) < n_refs and bool(source.doi)
-    if queried_openalex:
-        openalex = openalex_references(source.doi, cfg)
-        pool = _dedup_candidates([*s2, *(openalex or [])])
-    # the fast path failing silently cost hours (2026-09-24: 14 papers whose S2 list existed
-    # were searched reference by reference after a throttled fetch), so always say which
-    label = _source_label(source)
-    oa_note = f"{len(openalex or [])} from OpenAlex" if queried_openalex else "OpenAlex not asked"
+    label = label or _source_label(source)
+    steps = {"openalex": _openalex_list, "semanticscholar": _s2_list}
+    pool: list[dict] = []
+    for name in cfg.title_search_order:
+        if name not in steps or len(pool) >= n_refs:
+            continue
+        found, note, failed = steps[name](source, cfg)
+        (logger.warning if failed else logger.info)("%s: reference list: %s", label, note)
+        if found:
+            pool = _dedup_candidates([*pool, *found])
+    order = ", ".join(cfg.title_search_order)
     if pool:
         logger.info(
-            "%s: source reference list: %d from S2, %s; matching locally", label, len(s2), oa_note
+            "%s: reference list: %d candidates; matching locally, then searching the rest "
+            "(order: %s)",
+            label,
+            len(pool),
+            order,
         )
     else:
-        if hit is None:
-            reason = "not found in S2, or the S2 lookup failed"
-        elif s2_list is None:
-            reason = "S2 list fetch failed"
-        else:
-            reason = "S2 lists no references"
-        # books rarely have a list anywhere: only a failed fetch deserves a warning
-        log = logger.warning if hit is not None and s2_list is None else logger.info
-        log(
-            "%s: source reference list unavailable (%s; %s); searching each reference",
+        logger.info(
+            "%s: reference list: none available; searching each of %d references (order: %s)",
             label,
-            reason,
-            oa_note,
+            n_refs,
+            order,
         )
     return pool or None
+
+
+def _openalex_list(source: SourcePaper, cfg: CitationConfig) -> tuple[list[dict], str, bool]:
+    how = "by DOI" if source.doi else "by title"
+    if not (source.doi or source.title):
+        return [], "openalex: no DOI or title to look up", False
+    found = openalex_source(cfg, doi=source.doi, title=None if source.doi else source.title)
+    if found is None:
+        return [], f"openalex {how}: not found, or the lookup failed", False
+    cand, ids = found
+    name = f'"{(cand.get("title") or "")[:70]}" ({cand.get("year")})'
+    if not source.doi and not _source_confident(source, cand, cfg):
+        return [], f"openalex by title: top hit {name} is a different work", False
+    if not ids:
+        return [], f"openalex {how}: found {name}, no references listed", False
+    refs = openalex_hydrate(ids, cfg)
+    note = f"openalex {how}: found {name}, {len(ids)} references listed, {len(refs)} fetched"
+    return refs, note, len(refs) < len(ids)
+
+
+def _s2_list(source: SourcePaper, cfg: CitationConfig) -> tuple[list[dict], str, bool]:
+    if source.doi or source.arxiv:
+        how = "by DOI" if source.doi else "by arXiv id"
+        hit = s2_paper_id(cfg, doi=source.doi, arxiv=source.arxiv)  # exact -> trusted
+    elif source.title:
+        how = "by title"
+        found = s2_paper_id(cfg, title=source.title)
+        hit = found if found and _source_confident(source, found[1], cfg) else None
+    else:
+        return [], "semanticscholar: no DOI, arXiv id or title to look up", False
+    if hit is None:
+        return [], f"semanticscholar {how}: not found, or the lookup failed", False
+    refs = s2_references(hit[0], cfg)
+    if refs is None:  # found the paper, but its list fetch failed: worth a re-run
+        return [], f"semanticscholar {how}: found, but the list fetch failed", True
+    return refs, f"semanticscholar {how}: {len(refs)} references", False
+
+
+def _describe_reference(extracted: dict, raw_text: str) -> str:
+    """``Boyd 2004 "Convex Optimization"`` -- what was searched, for the per-reference log."""
+    title = extracted.get("title")
+    if not title:
+        return f"(no title extracted) {' '.join(raw_text.split())[:70]!r}"
+    authors = extracted.get("authors") or []
+    who = (authors[0].get("family") or "") if authors else ""
+    year = extracted.get("year") or ""
+    head = " ".join(str(x) for x in (who, year) if x)
+    return f'{head} "{title[:70]}"'.strip()
+
+
+def _describe_outcome(extracted: dict, entry: dict) -> str:
+    if entry.get("verified"):
+        sim = title_similarity(extracted.get("title"), entry.get("title"))
+        return f"verified: {entry.get('match')} ({sim:.2f})"
+    miss = entry.get("near_miss")
+    if miss:
+        return (
+            f"unverified (best: {miss['provider']} {miss['similarity']:.2f} "
+            f'"{(miss.get("title") or "")[:60]}")'
+        )
+    return "unverified (no candidate)" if extracted.get("title") else "unverified (no title)"
 
 
 def format_lookups(counts: Counter[tuple[str, str]]) -> str:
@@ -660,7 +722,9 @@ def resolve_references(
     # Only fetch the S2/OpenAlex source references if the caller pool left gaps -- when papis
     # already covered the whole bibliography we skip the source lookup + fetch entirely.
     provider_bulk = (
-        [] if all(caller_hits) else (_source_references(source, cfg, len(raw_references)) or [])
+        []
+        if all(caller_hits)
+        else (_source_references(source, cfg, len(raw_references), label=label) or [])
     )
 
     # a 937-reference book resolved for 3+ hours with no sign of how far it was (2026-09-24):
@@ -707,6 +771,15 @@ def resolve_references(
             **resolved,
         }
         entry["type"] = infer_type(entry, raw["text"])
+        if cfg.log_each_reference:
+            logger.info(
+                "%s: [%d/%d] %s -> %s",
+                label,
+                i + 1,
+                total,
+                _describe_reference(padded[i], raw["text"]),
+                _describe_outcome(padded[i], entry),
+            )
         report_progress(entry)
         return entry
 

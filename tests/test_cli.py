@@ -590,6 +590,14 @@ def test_parse_maybe_split_content_id_survives_unstable_part_bytes(tmp_path, mon
     assert real_parse_calls == 1  # still 1 -- no re-OCR despite the part file changing
     assert call_count == 2  # split_pdf really was called again (and did produce new bytes)
 
+    # and with every part in its checkpoint, the OCR backend is never even started
+    def no_backend(cfg=None):
+        raise AssertionError("OCR backend started although every part is checkpointed")
+
+    monkeypatch.setattr(cli, "ocr_backend", no_backend)
+    cli._parse_maybe_split(pdf, work_dir, cfg)
+    assert real_parse_calls == 1
+
 
 def test_from_chunk_rechunks_refinery_md_without_running_upstream(tmp_path, monkeypatch):
     pdf = tmp_path / "p.pdf"

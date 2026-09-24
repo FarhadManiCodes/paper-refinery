@@ -200,6 +200,11 @@ class CitationConfig:
     #   than a single lookup: exponential backoff from api_retry_base_delay, ~2 min at the
     #   default, ~4 min at 4.0. After one exhausts its retries, later list calls use
     #   api_retry_attempts until one succeeds; keyless OpenAlex never gets the long wait
+    provider_cooldown_s: float = 600.0
+    #   after 3 lookups in a row end in 429 at one provider, skip it for this long rather
+    #   than making every later lookup wait through its backoff (0 disables)
+    log_each_reference: bool = True
+    #   one log line per reference: what was searched and how it resolved
     search_candidates: int = 5
     #   when a provider's top title-search hit is rejected, look at its next hits up to
     #   this many before moving on: a generic title ("Two-dimensional turbulence") often

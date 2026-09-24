@@ -22,6 +22,10 @@ def _no_extra_candidates(monkeypatch):
     """The multi-hit fallback searches are live HTTP; tests that want them patch them."""
     for name in ("crossref_search_more", "s2_search_more", "openalex_search_more"):
         monkeypatch.setattr(cr, name, lambda t, c, n: [])
+    # the OpenAlex source and DOI lookups are live HTTP too
+    monkeypatch.setattr(cr, "openalex_by_doi", lambda doi, cfg: None)
+    monkeypatch.setattr(cr, "openalex_source", lambda cfg, doi=None, title=None: None)
+    monkeypatch.setattr(cr, "openalex_hydrate", lambda ids, cfg: [])
 
 
 # ---------------------------------------------------------------------------
@@ -564,46 +568,86 @@ def test_source_references_title_accepted_when_confident(monkeypatch):
 
 
 def test_source_references_fills_from_openalex_when_s2_short(monkeypatch):
-    # publisher-elided: S2 serves nothing; OpenAlex (by DOI) fills the pool
+    # default order (S2 before OpenAlex): S2 serves nothing, OpenAlex by DOI fills the pool
     monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "Src"}))
     monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: [])
     oa = [{"title": "OA Ref", "doi": "10.5678/o", "source": "openalex"}]
-    monkeypatch.setattr(cr, "openalex_references", lambda doi, cfg: oa)
-    out = cr._source_references(cr.SourcePaper(doi="10.1/x"), _cfg(), 5)
-    assert out == oa
+    monkeypatch.setattr(
+        cr, "openalex_source", lambda cfg, doi=None, title=None: ({"title": "Src"}, ["W1"])
+    )
+    monkeypatch.setattr(cr, "openalex_hydrate", lambda ids, cfg: oa)
+    assert cr._source_references(cr.SourcePaper(doi="10.1/x"), _cfg(), 5) == oa
 
 
-def test_source_references_no_openalex_when_s2_covers(monkeypatch):
-    s2 = [{"title": f"R{i}"} for i in range(6)]  # len 6 >= n_refs 5 -> S2 covered it
+def test_source_references_stop_once_the_pool_covers_the_bibliography(monkeypatch):
+    s2 = [{"title": f"R{i}"} for i in range(6)]  # 6 >= 5 printed -> OpenAlex not asked
     monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "Src"}))
     monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: s2)
     monkeypatch.setattr(
-        cr, "openalex_references", lambda doi, cfg: pytest.fail("S2 covered it; no OpenAlex")
+        cr, "openalex_source", lambda cfg, **kw: pytest.fail("S2 covered it; no OpenAlex")
     )
     assert len(cr._source_references(cr.SourcePaper(doi="10.1/x"), _cfg(), 5)) == 6
 
 
-def test_source_references_logs_whether_a_list_was_found(monkeypatch, caplog):
+def test_source_references_ask_openalex_first_by_doi_or_title(monkeypatch):
+    # OpenAlex first (paid, keyed): by DOI when known, else by title; S2 never asked
+    cfg = _cfg(title_search_order=["openalex", "crossref"])
+    asked = []
+    monkeypatch.setattr(
+        cr,
+        "openalex_source",
+        lambda cfg, doi=None, title=None: (
+            asked.append(("doi", doi) if doi else ("title", title)),
+            ({"title": "My Precise Book Title", "year": 2020}, ["W1", "W2"]),
+        )[1],
+    )
+    monkeypatch.setattr(cr, "openalex_hydrate", lambda ids, cfg: [{"title": i} for i in ids])
+    monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: pytest.fail("S2 not in the order"))
+    assert len(cr._source_references(cr.SourcePaper(doi="10.1/x"), cfg, 2)) == 2
+    by_title = cr.SourcePaper(title="My Precise Book Title", year=2020)
+    assert len(cr._source_references(by_title, cfg, 2)) == 2
+    assert asked == [("doi", "10.1/x"), ("title", "My Precise Book Title")]
+
+
+def test_source_references_reject_an_openalex_title_hit_for_another_work(monkeypatch):
+    cfg = _cfg(title_search_order=["openalex"])
+    monkeypatch.setattr(
+        cr,
+        "openalex_source",
+        lambda cfg, doi=None, title=None: ({"title": "A Completely Different Book"}, ["W1"]),
+    )
+    monkeypatch.setattr(cr, "openalex_hydrate", lambda ids, cfg: pytest.fail("wrong work"))
+    assert cr._source_references(cr.SourcePaper(title="My Precise Book Title"), cfg, 5) is None
+
+
+def test_source_references_logs_every_step(monkeypatch, caplog):
     # a failed fast path used to fall back silently to per-reference search
     caplog.set_level("INFO", logger=cr.__name__)
     monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "Src"}))
     monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: [{"title": "Ref A"}])
     src = cr.SourcePaper(arxiv="2502.00963")
-    cr._source_references(src, _cfg(), 1)
-    assert "arXiv:2502.00963: source reference list: 1 from S2, OpenAlex not asked" in caplog.text
+    cr._source_references(src, _cfg(), 1, label="p.pdf")
+    assert "p.pdf: reference list: semanticscholar by arXiv id: 1 references" in caplog.text
+    assert "p.pdf: reference list: 1 candidates; matching locally" in caplog.text
 
-    # a throttled list fetch (None) must not read as "S2 has no list"
-    for s2_list, reason in ((None, "S2 list fetch failed"), ([], "S2 lists no references")):
-        caplog.clear()
-        monkeypatch.setattr(cr, "s2_references", lambda pid, cfg, r=s2_list: r)
-        assert cr._source_references(src, _cfg(), 1) is None
-        assert f"unavailable ({reason}; OpenAlex not asked)" in caplog.text
+    # a throttled list fetch (None) must not read as "no list"
+    caplog.clear()
+    monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: None)
+    assert cr._source_references(src, _cfg(), 1, label="p.pdf") is None
+    (warning,) = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "found, but the list fetch failed" in warning.getMessage()
+    assert "reference list: none available; searching each of 1 references" in caplog.text
 
     caplog.clear()
-    monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: None)
-    monkeypatch.setattr(cr, "openalex_references", lambda doi, cfg: None)
-    assert cr._source_references(cr.SourcePaper(doi="10.1/x"), _cfg(), 1) is None
-    assert "unavailable (not found in S2, or the S2 lookup failed; 0 from OpenAlex)" in caplog.text
+    book = cr.SourcePaper(doi="10.1/book")
+    monkeypatch.setattr(
+        cr, "openalex_source", lambda cfg, doi=None, title=None: ({"title": "Book"}, [])
+    )
+    cfg = _cfg(title_search_order=["openalex", "crossref"])
+    assert cr._source_references(book, cfg, 3, label="b.pdf") is None
+    assert 'b.pdf: reference list: openalex by DOI: found "Book" (None), no references' in (
+        caplog.text
+    )
 
 
 def test_dedup_candidates_by_doi_then_title():
@@ -683,7 +727,7 @@ def test_resolve_references_fetches_s2_only_for_caller_gaps(monkeypatch):
     # a ref the caller lacks triggers the S2 fetch (once); the caller-covered ref stays "papis"
     calls = {"s2": 0}
 
-    def fake_source_refs(src, cfg, n):
+    def fake_source_refs(src, cfg, n, **kw):
         calls["s2"] += 1
         return [{"title": "Gamma Study", "doi": "10.3/c", "source": "semanticscholar"}]
 
@@ -776,6 +820,48 @@ def test_format_lookups_lists_answers_then_failed_attempts():
         "openalex 610 ok, 400 cached, 2 missing, 3 failed [429x5]; semanticscholar 0 ok [timeoutx2]"
     )
     assert cr.format_lookups(Counter()) == "none"
+
+
+def test_printed_doi_follows_the_order_openalex_first(monkeypatch):
+    asked = []
+    monkeypatch.setattr(
+        cr,
+        "openalex_by_doi",
+        lambda doi, cfg: (asked.append("openalex"), OPENALEX_PUBLISHED)[1],
+    )
+    monkeypatch.setattr(cr, "s2_by_doi", lambda doi, cfg: pytest.fail("OpenAlex answered"))
+    cfg = _cfg(title_search_order=["openalex", "crossref", "semanticscholar"])
+    out = cr.verify_and_resolve(dict(EXTRACTED), "doi 10.1115/1.3662552", cfg)
+    assert asked == ["openalex"] and out["match"] == "doi"
+
+
+def test_each_reference_is_logged_with_its_outcome(monkeypatch, caplog):
+    caplog.set_level("INFO", logger=cr.__name__)
+
+    def fake(extracted, raw_text, cfg):
+        if raw_text == "1":
+            return {**extracted, "verified": True, "match": "openalex"}
+        return {
+            **extracted,
+            "verified": False,
+            "near_miss": {"provider": "crossref", "similarity": 0.62, "title": "Other"},
+        }
+
+    monkeypatch.setattr(cr, "verify_and_resolve", fake)
+    extracted = [
+        {"title": "Convex Optimization", "year": 2004, "authors": [{"family": "Boyd"}]},
+        {"title": "A Method", "year": 1983, "authors": [{"family": "Nesterov"}]},
+    ]
+    raw = [{"page": 1, "number": str(i), "text": str(i)} for i in (1, 2)]
+    cr.resolve_references(extracted, raw, _cfg(), label="b.pdf")
+    lines = [r.getMessage() for r in caplog.records]
+    assert 'b.pdf: [1/2] Boyd 2004 "Convex Optimization" -> verified: openalex (1.00)' in lines
+    assert 'b.pdf: [2/2] Nesterov 1983 "A Method" -> unverified (best: crossref 0.62 "Other")' in (
+        lines
+    )
+    caplog.clear()
+    cr.resolve_references(extracted, raw, _cfg(log_each_reference=False), label="b.pdf")
+    assert not any("[1/2]" in r.getMessage() for r in caplog.records)
 
 
 def test_resolve_references_fastpath_falls_back_for_unmatched(monkeypatch):

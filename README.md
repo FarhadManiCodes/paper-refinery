@@ -314,12 +314,21 @@ source: SourceMeta = {
 
 - `doi`/`title`/`year`/`authors` strengthen **source identification** for the S2
   bulk-references fast-path (a confidently-identified source ⇒ its whole reference list
-  resolves in one call). Those calls retry longer than a single lookup
-  (`[citation] bulk_retry_attempts`), and the log says whether a list was found and, if
-  not, why. Books rarely have one at any provider, so their references are searched one by
-  one, in `[citation] title_search_order` (default CrossRef, Semantic Scholar, OpenAlex).
-  With an OpenAlex key, `["openalex", "crossref", "semanticscholar"]` avoids most of keyless
-  S2's back-off; S2 is still used for printed DOIs and abstracts of CrossRef matches.
+  resolves in one call). `[citation] title_search_order` (default CrossRef, Semantic
+  Scholar, OpenAlex) sets the order everywhere: the list-capable providers (OpenAlex by DOI
+  or title, S2 by DOI, arXiv id or title) are asked for the list in that order until it
+  covers the printed count; printed DOIs and abstracts of CrossRef matches go to OpenAlex or
+  S2 in that order; and references are searched one by one in that order. List calls retry
+  longer (`[citation] bulk_retry_attempts`). Books rarely have a list anywhere, so their
+  references are searched one by one. With an OpenAlex key, `["openalex", "crossref"]`
+  leaves keyless S2 out entirely. A provider whose lookups end in 429 three times in a row
+  is skipped for `[citation] provider_cooldown_s` (default 10 min).
+- The log (stderr, timestamped) tells each document's story: parts from the OCR checkpoint
+  (the OCR backend starts only for a missing part), figures from cache vs described,
+  citation extraction start and finish, each reference-list step (`reference list: openalex
+  by DOI: found "…" (2009), 0 references listed`), then one line per reference
+  (`[12/937] Boyd 2004 "Convex Optimization" -> verified: openalex (0.98)`; turn off with
+  `[citation] log_each_reference = false`).
 - Resolution logs its progress every 50 references and at the end, with the verified count
   by route and this document's lookups per provider, e.g. `resolved 250/937 references (180
   verified: openalex 150, crossref 30), 12 min; lookups: openalex 610 ok, 3 failed [429x5];

@@ -25,7 +25,9 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import threading
 import unicodedata
+from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -168,6 +170,22 @@ def make_client(cfg: FigureConfig | None = None) -> Client:
     return genai.Client(api_key=api_key)
 
 
+# how figures were described in this process: "cached" (no call) or "described" (a Gemini
+# call); cli.py diffs two snapshots to log one document's figures
+_FIGURE_STATS: Counter[str] = Counter()
+_FIGURE_STATS_LOCK = threading.Lock()
+
+
+def figure_stats() -> Counter[str]:
+    with _FIGURE_STATS_LOCK:
+        return Counter(_FIGURE_STATS)
+
+
+def _count_figure(outcome: str) -> None:
+    with _FIGURE_STATS_LOCK:
+        _FIGURE_STATS[outcome] += 1
+
+
 def describe_figure(
     crops: list[Path],
     number: str,
@@ -193,6 +211,7 @@ def describe_figure(
     if cache:
         data = read_json(cache)  # None on a cache miss or a corrupt entry alike
         if isinstance(data, dict):
+            _count_figure("cached")
             return data or None  # {} is a cached non_figure verdict
 
     if client is None:
@@ -222,6 +241,7 @@ def describe_figure(
     }
     if result["figure_type"] == "non_figure" or not result["description"]:
         result = None
+    _count_figure("described")
     if cache:
         write_json(cache, result or {})
     return result

@@ -241,10 +241,13 @@ def test_source_list_calls_use_the_bulk_retry_budget(monkeypatch, patient):
 
     monkeypatch.setattr(cp, "_get_json", fake)
     cp.s2_paper_id(cfg, arxiv="2502.00963")
-    cp.s2_paper_id(cfg, title="Some Title")
     cp.s2_references("P", cfg)
-    cp.openalex_references("10.1/x", cfg)
+    cp.openalex_references("10.1/x", cfg)  # source lookup + one hydration batch
+    cp.openalex_source(cfg, title="Some Title")
     assert seen == [9] * 5
+    seen.clear()
+    cp.s2_paper_id(cfg, title="Some Title")  # a keyless S2 search: ordinary budget
+    assert seen == [None]
     seen.clear()
     cp.crossref_search("Some Title", cfg)
     assert seen == [None]
@@ -298,11 +301,9 @@ def test_non_retryable_list_failure_keeps_patience(tmp_path, monkeypatch, patien
 @pytest.fixture
 def fresh_stats():
     # reset in place: citation_resolution holds the same PROVIDER_STATS object
-    cp.PROVIDER_STATS.reset()
-    cp._ERROR_CLASSES_WARNED.clear()
+    cp.reset_provider_state()
     yield cp
-    cp.PROVIDER_STATS.reset()
-    cp._ERROR_CLASSES_WARNED.clear()
+    cp.reset_provider_state()
 
 
 def _http_error(url, code, body=b""):
@@ -400,6 +401,49 @@ def test_rejected_openalex_key_warns_once_not_twice(fresh_stats, monkeypatch, ca
     cp._note_failed_attempt(url, _http_error(url, 401), cfg)
     assert caplog.records == []  # left to _warn_once_if_key_rejected
     assert cp.PROVIDER_STATS.snapshot()[("openalex", "4xx")] == 1
+
+
+def test_a_rate_limited_provider_cools_down_then_returns(
+    tmp_path, monkeypatch, fresh_stats, caplog
+):
+    # keyless S2 answering 429 must not make every later lookup sit through backoff
+    caplog.set_level("WARNING", logger=cp.__name__)
+    cfg = _cfg(api_cache_dir=str(tmp_path), api_retry_attempts=1, provider_cooldown_s=60)
+    s2 = f"{cfg.s2_api_base}/paper/search?query="
+    now = [1000.0]
+    monkeypatch.setattr(cp.time, "monotonic", lambda: now[0])
+    fetches = []
+
+    def throttled(req, timeout=None):
+        fetches.append(req.full_url)
+        raise _http_error(req.full_url, 429)
+
+    monkeypatch.setattr(cp.urllib.request, "urlopen", throttled)
+    for q in "abc":
+        assert cp._get_json(s2 + q, cfg) is None
+    assert any("skipping it for 1 min" in r.getMessage() for r in caplog.records)
+    assert cp._get_json(s2 + "d", cfg) is None  # skipped: no request at all
+    assert len(fetches) == 3
+    assert cp.PROVIDER_STATS.snapshot()[("semanticscholar", "skipped")] == 1
+
+    now[0] += 61  # cooldown over: asked again, and a success clears the streak
+    monkeypatch.setattr(cp, "call_with_backoff", lambda fn, attempts, delay: {"data": []})
+    assert cp._get_json(s2 + "e", cfg) == {"data": []}
+    assert cp.PROVIDER_STATS.snapshot()[("semanticscholar", "ok")] == 1
+
+
+def test_a_404_or_success_resets_the_rate_limit_streak(tmp_path, monkeypatch, fresh_stats):
+    cfg = _cfg(api_cache_dir=str(tmp_path), api_retry_attempts=1, provider_cooldown_s=60)
+    s2 = f"{cfg.s2_api_base}/paper/search?query="
+    codes = iter([429, 429, 404, 429, 429])
+
+    def respond(req, timeout=None):
+        raise _http_error(req.full_url, next(codes))
+
+    monkeypatch.setattr(cp.urllib.request, "urlopen", respond)
+    for q in "abcde":
+        cp._get_json(s2 + q, cfg)
+    assert cp.PROVIDER_STATS.snapshot()[("semanticscholar", "skipped")] == 0
 
 
 def test_get_json_counts_ok_cached_and_failed(tmp_path, monkeypatch, fresh_stats):
