@@ -749,6 +749,13 @@ def test_resolve_references_logs_progress(monkeypatch, caplog):
     ]
     assert progress[-1].startswith("hastie: resolved 5/5 references (4 verified), ")
 
+    # a total that is a multiple of the interval still gets exactly one final line
+    caplog.clear()
+    cr.resolve_references([{}] * 4, raw[:4], _cfg(), label="even", progress_every=2)
+    finals = [r.getMessage() for r in caplog.records if "resolved 4/4" in r.getMessage()]
+    assert len(finals) == 1
+    assert caplog.records[0].getMessage() == "even: resolving 4 references"
+
 
 def test_resolve_references_fastpath_falls_back_for_unmatched(monkeypatch):
     bulk = [cr.normalize_s2({"title": "Totally Unrelated Work", "year": 1900, "externalIds": {}})]

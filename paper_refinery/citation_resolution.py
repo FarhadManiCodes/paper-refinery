@@ -623,6 +623,8 @@ def resolve_references(
     call ``extract_references`` itself -- cli.py owns sequencing. Output entries: ``{page,
     number, raw_text, ...resolved fields..., verified, match, type}``, in input order; a
     missing parse-level ``number`` is recovered from the raw text's leading marker.
+    Progress is logged as ``<label>: resolved N/M references`` every ``progress_every``
+    entries (0 disables the intermediate lines) and once at the end.
     """
     if not raw_references:
         return []
@@ -654,7 +656,7 @@ def resolve_references(
         with progress_lock:
             done += 1
             verified += bool(entry.get("verified"))
-            if done % progress_every == 0 or done == total:
+            if done == total or (progress_every > 0 and done % progress_every == 0):
                 logger.info(
                     "%s: resolved %d/%d references (%d verified), %.0f min",
                     label,

@@ -215,7 +215,11 @@ def _merge_doi(source: SourceMeta | None, doi: str | None) -> dict:
 
 
 def _run_citations(
-    parsed: ParseResult, cfg: RefineryConfig, work_dir: Path, source: dict | None = None
+    parsed: ParseResult,
+    cfg: RefineryConfig,
+    work_dir: Path,
+    source: dict | None = None,
+    label: str = "references",
 ) -> tuple[list[dict], list[dict]]:
     """Citation stack on one paper's parse output: extraction (one Gemini call) ->
     resolution (verify/enrich against CrossRef/S2/OpenAlex, disk-cached).
@@ -237,7 +241,7 @@ def _run_citations(
         parsed.references,
         cfg.citation,
         source=source_paper,
-        label=work_dir.name.removesuffix(".refinery"),
+        label=label,
     )
     report = format_resolution_report(extracted, resolved)
     (work_dir / "resolution_report.txt").write_text(report + "\n")
@@ -434,7 +438,7 @@ def _refine_parsed(
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         citations_future = (
-            pool.submit(_run_citations, parsed, cfg, work_dir, source)
+            pool.submit(_run_citations, parsed, cfg, work_dir, source, pdf.name)
             if parsed.references
             else None
         )
