@@ -600,8 +600,12 @@ def test_concurrent_documents_count_their_own_batches(tmp_path):
     docs = {"a": [f"ref {i}" for i in range(6)], "b": [f"ref {i}" for i in range(10, 12)]}
     stats = {name: Counter() for name in docs}
     with ThreadPoolExecutor(max_workers=2) as pool:
-        for name, raws in docs.items():
+        futures = [
             pool.submit(extract_references, raws, cfg, _counting_client(calls), stats[name])
+            for name, raws in docs.items()
+        ]
+    for future in futures:
+        future.result()  # surface a worker's exception directly
     assert stats["a"] == Counter(extracted=3) and stats["b"] == Counter(extracted=1)
 
 
