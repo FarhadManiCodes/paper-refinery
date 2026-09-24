@@ -156,12 +156,44 @@ def _first_family(entry: dict) -> str | None:
     return fold_name(family) if family else None
 
 
+_LATIN_NAME_RE = re.compile(r"[a-z][a-z' .-]*")
+
+
+def _families(entry: dict) -> list[str]:
+    return [fold_name(a["family"]) for a in entry.get("authors") or [] if a.get("family")]
+
+
+def _names_similar(a: str, b: str) -> bool:
+    if a == b or (min(len(a), len(b)) >= 4 and (a in b or b in a)):
+        return True
+    return SequenceMatcher(None, a, b).ratio() >= 0.8
+
+
+def _authors_disagree(extracted: dict, candidate: dict) -> bool:
+    """True only on positive evidence that the two are different works' author lists: both
+    sides list Latin-script surnames and none of the printed ones resembles any of the
+    candidate's.
+
+    Title plus year alone let near-identical titles through (live, 2026-09-24): Baraniuk's
+    and Candès's "Compressive sensing" both resolved to Donoho's "Compressed sensing", and
+    Silver et al.'s "Mastering the game of Go" to a Gomoku paper. Everything that cannot be
+    compared passes: no printed authors (ditto marks such as "——" or ", "), a provider
+    record in another script (Колмогоров), and near spellings (OCR's "Ptluri" for Potluri).
+    """
+    printed = [f for f in _families(extracted) if _LATIN_NAME_RE.fullmatch(f)]
+    listed = _families(candidate)
+    if not printed or not listed or not all(_LATIN_NAME_RE.fullmatch(f) for f in listed):
+        return False
+    return not any(_names_similar(p, c) for p in printed for c in listed)
+
+
 def _acceptable(extracted: dict, candidate: dict, cfg: CitationConfig) -> bool:
     """Two-tier acceptance bar for a title-search hit.
 
     Tier 1: title similarity >= threshold AND year within tolerance (a missing year on
-    either side skips the year check -- can't disprove). Title similarity alone was
-    explicitly rejected as a false-positive risk, hence the AND.
+    either side skips the year check -- can't disprove) AND no positive evidence that the
+    authors disagree (``_authors_disagree``). Title similarity alone was explicitly
+    rejected as a false-positive risk, hence the AND.
 
     Tier 2 (user: the strict bar alone rejects OCR-garbled titles' correct matches):
     weaker title evidence, similarity in [relaxed, threshold), is accepted only with
@@ -175,7 +207,7 @@ def _acceptable(extracted: dict, candidate: dict, cfg: CitationConfig) -> bool:
             year is not None
             and cand_year is not None
             and abs(year - cand_year) > cfg.year_tolerance
-        )
+        ) and not _authors_disagree(extracted, candidate)
     if similarity >= cfg.title_similarity_relaxed:
         family, cand_family = _first_family(extracted), _first_family(candidate)
         return (

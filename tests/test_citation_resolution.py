@@ -674,3 +674,41 @@ def test_resolve_references_fastpath_falls_back_for_unmatched(monkeypatch):
     out = cr.resolve_references([dict(EXTRACTED)], raw, _cfg(), source=cr.SourcePaper(doi="10.1/x"))
     assert seen  # no bulk match -> fell back to the per-entry path
     assert out[0]["verified"] is False
+
+
+# ---------------------------------------------------------------------------
+# tier-1 author check (_authors_disagree)
+# ---------------------------------------------------------------------------
+
+
+def _tier1(extracted_authors, candidate_authors, title="Compressive sensing"):
+    extracted = {"title": title, "year": 2007, "authors": extracted_authors}
+    candidate = {"title": "Compressed sensing", "year": 2006, "authors": candidate_authors}
+    return cr._acceptable(extracted, candidate, _cfg())
+
+
+def test_tier1_rejects_near_identical_title_by_different_authors():
+    # live 2026-09-24: Baraniuk's "Compressive sensing" resolved to Donoho's paper
+    assert cr.title_similarity("Compressive sensing", "Compressed sensing") >= 0.90
+    assert not _tier1([{"family": "Baraniuk"}], [{"family": "Donoho"}])
+
+
+def test_tier1_accepts_when_any_author_matches_in_any_order():
+    assert _tier1([{"family": "Tao"}], [{"family": "Candès"}, {"family": "Tao"}])
+
+
+def test_tier1_author_check_tolerates_ocr_spelling_and_diacritics():
+    assert _tier1([{"family": "Ptluri"}], [{"family": "Potluri"}])
+    assert _tier1([{"family": "Candes"}], [{"family": "Candès"}])
+
+
+@pytest.mark.parametrize(
+    "printed, listed",
+    [
+        ([], [{"family": "Donoho"}]),  # ditto marks: no author printed
+        ([{"family": "Kolmogorov"}], [{"family": "Колмогоров"}]),  # other script
+        ([{"family": "Baraniuk"}], []),  # provider record without authors
+    ],
+)
+def test_tier1_author_check_passes_when_nothing_can_be_compared(printed, listed):
+    assert _tier1(printed, listed)
