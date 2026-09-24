@@ -207,6 +207,36 @@ def _patch_get_json(monkeypatch, result):
     monkeypatch.setattr(cp, "_get_json", lambda *a, **k: result)
 
 
+def test_get_json_attempts_overrides_the_retry_budget(tmp_path, monkeypatch):
+    cfg = _cfg(api_cache_dir=str(tmp_path), api_retry_attempts=2, api_retry_base_delay=0.0)
+    seen = []
+    monkeypatch.setattr(cp, "call_with_backoff", lambda fn, attempts, delay: seen.append(attempts))
+    cp._get_json("https://x.test/a", cfg)
+    cp._get_json("https://x.test/b", cfg, attempts=7)
+    assert seen == [2, 7]
+
+
+def test_source_list_calls_use_the_bulk_retry_budget(monkeypatch):
+    # one reference-list call replaces dozens of searches, so it waits longer;
+    # a single title search keeps the ordinary budget
+    cfg = _cfg(bulk_retry_attempts=9)
+    seen = []
+
+    def fake(url, cfg, headers=None, before_fetch=None, attempts=None):
+        seen.append(attempts)
+        return {"paperId": "P", "title": "T", "data": [], "referenced_works": ["W1"]}
+
+    monkeypatch.setattr(cp, "_get_json", fake)
+    cp.s2_paper_id(cfg, arxiv="2502.00963")
+    cp.s2_paper_id(cfg, title="Some Title")
+    cp.s2_references("P", cfg)
+    cp.openalex_references("10.1/x", cfg)
+    assert seen == [9] * 5
+    seen.clear()
+    cp.crossref_search("Some Title", cfg)
+    assert seen == [None]
+
+
 def test_s2_paper_id_by_doi_returns_id_and_candidate(monkeypatch):
     _patch_get_json(
         monkeypatch,

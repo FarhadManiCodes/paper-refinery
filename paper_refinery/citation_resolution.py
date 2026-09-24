@@ -18,6 +18,7 @@ get one.
 
 from __future__ import annotations
 
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -43,6 +44,8 @@ from .citation_providers import (
 from .config import CitationConfig
 from .references import RawReference
 from .text_utils import fold_name, leading_number
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -336,20 +339,23 @@ def _better_near_miss(
 def _resolve_by_title(
     out: dict, cfg: CitationConfig
 ) -> tuple[dict | None, str | None, dict | None]:
-    """Title-search fallback across CrossRef -> S2 -> OpenAlex under the two-tier bar.
+    """Title-search fallback across the providers in ``cfg.title_search_order`` under the
+    two-tier bar.
 
-    CrossRef leads (user decision, 2026-07-05): S2's records blend preprint and published
-    versions -- published DOI but the *earliest* (arXiv) year, confirmed live on 3 hyco refs
-    pulled back a year -- while CrossRef's ``issued`` is the published record's own date.
-    Published-over-preprint: an acceptable *preprint* hit is remembered but doesn't stop the
-    chain, so a later provider's published version can still win. Returns
+    CrossRef leads by default (user decision, 2026-07-05): S2's records blend preprint and
+    published versions -- published DOI but the *earliest* (arXiv) year, confirmed live on 3
+    hyco refs pulled back a year -- while CrossRef's ``issued`` is the published record's own
+    date. Published-over-preprint: an acceptable *preprint* hit is remembered but doesn't
+    stop the chain, so a later provider's published version can still win -- which is what
+    keeps an OpenAlex-first order (faster with a key) as safe as the default. Returns
     ``(candidate, match, near_miss)``; candidate/match are None when nothing clears the bar.
     """
-    providers = (
-        ("crossref", crossref_search, crossref_search_more, normalize_crossref),
-        ("semanticscholar", s2_search, s2_search_more, normalize_s2),
-        ("openalex", openalex_search, openalex_search_more, normalize_openalex),
-    )
+    by_name = {
+        "crossref": (crossref_search, crossref_search_more, normalize_crossref),
+        "semanticscholar": (s2_search, s2_search_more, normalize_s2),
+        "openalex": (openalex_search, openalex_search_more, normalize_openalex),
+    }
+    providers = [(name, *by_name[name]) for name in cfg.title_search_order if name in by_name]
     preprint_fallback: tuple[str, dict] | None = None
     near_miss: dict | None = None
     for name, search, search_more, normalize in providers:
@@ -389,8 +395,9 @@ def _fill_crossref_abstract(candidate: dict, match: str, cfg: CitationConfig) ->
 
 
 def verify_and_resolve(extracted: dict, raw_text: str, cfg: CitationConfig) -> dict:
-    """Resolve one reference: DOI-first exact lookup, else CrossRef -> S2 -> OpenAlex title
-    search under the two-tier acceptance bar (see ``_resolve_by_doi`` / ``_resolve_by_title``).
+    """Resolve one reference: DOI-first exact lookup, else a title search across
+    ``cfg.title_search_order`` under the two-tier acceptance bar (see ``_resolve_by_doi`` /
+    ``_resolve_by_title``).
 
     Returns the extracted dict merged with the accepted candidate's fields (provider data wins
     wherever it exists, authors included; extractor's guess kept for fields the provider lacks,
@@ -528,10 +535,35 @@ def _source_references(
         if found and _source_confident(source, found[1], cfg):
             hit = found
     s2 = (s2_references(hit[0], cfg) or []) if hit else []
+    openalex: list[dict] = []
+    pool = s2
     if len(s2) < n_refs and source.doi:
         openalex = openalex_references(source.doi, cfg) or []
-        return _dedup_candidates([*s2, *openalex]) or None
-    return s2 or None
+        pool = _dedup_candidates([*s2, *openalex])
+    # the fast path failing silently cost hours (2026-09-24: 14 papers whose S2 list existed
+    # were searched reference by reference after a throttled fetch), so always say which
+    label = _source_label(source)
+    if pool:
+        logger.info(
+            "%s: source reference list: %d from S2, %d from OpenAlex; matching locally",
+            label,
+            len(s2),
+            len(openalex),
+        )
+    else:
+        reason = "not identified in S2" if hit is None else "no list available"
+        logger.info(
+            "%s: source reference list unavailable (%s); searching each reference", label, reason
+        )
+    return pool or None
+
+
+def _source_label(source: SourcePaper) -> str:
+    if source.doi:
+        return f"doi:{source.doi}"
+    if source.arxiv:
+        return f"arXiv:{source.arxiv}"
+    return repr((source.title or "untitled")[:60])
 
 
 def _match_in_bulk(

@@ -192,6 +192,47 @@ def test_provider_chain_order_crossref_s2_openalex(monkeypatch):
     assert out["verified"] and out["match"] == "openalex"
 
 
+OPENALEX_PUBLISHED = {
+    "display_name": EXTRACTED["title"],
+    "publication_year": 1960,
+    "doi": "https://doi.org/10.1115/1.3662552",
+    "type": "article",
+}
+
+
+def test_title_search_order_is_configurable(monkeypatch):
+    # OpenAlex first (fast with a key): an acceptable published hit ends the chain there
+    calls = []
+    monkeypatch.setattr(cr, "crossref_search", lambda t, c: calls.append("crossref"))
+    monkeypatch.setattr(cr, "s2_search", lambda t, c: calls.append("s2"))
+    monkeypatch.setattr(
+        cr, "openalex_search", lambda t, c: (calls.append("openalex"), OPENALEX_PUBLISHED)[1]
+    )
+    cfg = _cfg(title_search_order=["openalex", "crossref", "semanticscholar"])
+    out = cr.verify_and_resolve(dict(EXTRACTED), "no doi here", cfg)
+    assert calls == ["openalex"]
+    assert out["verified"] and out["match"] == "openalex"
+
+
+def test_openalex_first_preprint_still_yields_to_a_published_record(monkeypatch):
+    # the order must not trade accuracy for speed: OpenAlex's arXiv record is only a
+    # fallback, and CrossRef's published record (with its own year) wins
+    preprint = {**OPENALEX_PUBLISHED, "doi": "https://doi.org/10.48550/arXiv.1509.03580"}
+    crossref_published = {
+        "DOI": "10.1115/1.3662552",
+        "title": [EXTRACTED["title"]],
+        "issued": {"date-parts": [[1960]]},
+        "type": "journal-article",
+    }
+    monkeypatch.setattr(cr, "openalex_search", lambda t, c: preprint)
+    monkeypatch.setattr(cr, "crossref_search", lambda t, c: crossref_published)
+    monkeypatch.setattr(cr, "s2_search", lambda t, c: pytest.fail("published hit ends the chain"))
+    cfg = _cfg(title_search_order=["openalex", "crossref", "semanticscholar"])
+    out = cr.verify_and_resolve(dict(EXTRACTED), "no doi", cfg)
+    assert out["verified"] and out["match"] == "crossref"
+    assert out["doi"] == "10.1115/1.3662552"
+
+
 def test_rejects_low_similarity_match(monkeypatch):
     monkeypatch.setattr(
         cr, "s2_search", lambda t, c: {**S2_PAPER, "title": "Completely Unrelated Work"}
@@ -539,6 +580,20 @@ def test_source_references_no_openalex_when_s2_covers(monkeypatch):
         cr, "openalex_references", lambda doi, cfg: pytest.fail("S2 covered it; no OpenAlex")
     )
     assert len(cr._source_references(cr.SourcePaper(doi="10.1/x"), _cfg(), 5)) == 6
+
+
+def test_source_references_logs_whether_a_list_was_found(monkeypatch, caplog):
+    # a failed fast path used to fall back silently to per-reference search
+    caplog.set_level("INFO", logger=cr.__name__)
+    monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "Src"}))
+    monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: [{"title": "Ref A"}])
+    cr._source_references(cr.SourcePaper(arxiv="2502.00963"), _cfg(), 1)
+    assert "arXiv:2502.00963: source reference list: 1 from S2, 0 from OpenAlex" in caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(cr, "s2_paper_id", lambda cfg, **kw: None)
+    assert cr._source_references(cr.SourcePaper(arxiv="2502.00963"), _cfg(), 1) is None
+    assert "unavailable (not identified in S2)" in caplog.text
 
 
 def test_dedup_candidates_by_doi_then_title():

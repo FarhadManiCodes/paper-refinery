@@ -131,6 +131,9 @@ class FigureConfig:
     )
 
 
+TITLE_SEARCH_PROVIDERS = ("crossref", "semanticscholar", "openalex")
+
+
 @dataclass(slots=True)
 class CitationConfig:
     """Citation pipeline: extraction (one Gemini call turns each raw OCR'd reference
@@ -179,6 +182,19 @@ class CitationConfig:
     #   fallback providers exist, so hammering a saturated keyless endpoint (S2's public
     #   search pool 429s persistently under load -- confirmed live) buys nothing and
     #   isn't "mindful" use of a shared resource
+    title_search_order: list[str] = field(
+        default_factory=lambda: ["crossref", "semanticscholar", "openalex"]
+    )
+    #   providers tried, in order, for a per-reference title search. CrossRef leads by
+    #   default: its date is the published record's own, where S2 blends in preprint
+    #   years. With an OpenAlex key, ["openalex", "crossref", "semanticscholar"] is much
+    #   faster, since keyless S2 backs off under load. Order never loosens acceptance: an
+    #   acceptable preprint hit is kept aside and the chain goes on, so a later
+    #   provider's published record still wins.
+    bulk_retry_attempts: int = 7
+    #   retries for the source's own reference list (S2/OpenAlex fast-path): one call
+    #   that replaces dozens of per-reference searches, so it waits longer than a single
+    #   lookup (exponential backoff from api_retry_base_delay: ~2 min at the default)
     search_candidates: int = 5
     #   when a provider's top title-search hit is rejected, look at its next hits up to
     #   this many before moving on: a generic title ("Two-dimensional turbulence") often
@@ -422,4 +438,10 @@ def load_config(path: Path | None = None) -> RefineryConfig:
                     f"{type(value).__name__} ({value!r})"
                 ) from None
             setattr(sub, key, value)
+    unknown = set(cfg.citation.title_search_order) - set(TITLE_SEARCH_PROVIDERS)
+    if unknown or not cfg.citation.title_search_order:
+        raise ValueError(
+            f"{path}: [citation] title_search_order takes a non-empty list of "
+            f"{', '.join(TITLE_SEARCH_PROVIDERS)}; got {cfg.citation.title_search_order!r}"
+        )
     return cfg

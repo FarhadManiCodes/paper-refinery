@@ -99,6 +99,16 @@ def test_load_config_overlays_citation_section(tmp_path):
     assert cfg.citation.retry_attempts == 2
 
 
+def test_load_config_title_search_order(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[citation]\ntitle_search_order = ["openalex", "crossref"]\n')
+    assert load_config(path).citation.title_search_order == ["openalex", "crossref"]
+    for bad in ('["openalex", "google"]', "[]"):
+        path.write_text(f"[citation]\ntitle_search_order = {bad}\n")
+        with pytest.raises(ValueError, match="title_search_order"):
+            load_config(path)
+
+
 def test_load_config_rejects_unknown_section(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text("[bogus]\nx = 1\n")

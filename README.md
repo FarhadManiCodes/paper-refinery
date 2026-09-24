@@ -17,8 +17,8 @@ chunks are plain data, so it works as a front-end for any RAG pipeline, not just
   [z.ai](https://docs.z.ai/guides/vlm/glm-ocr) (~$0.03/M tokens ≈ pennies per paper); see
   [API keys](#api-keys).
 - **`GOOGLE_API_KEY`** — Gemini, for figure descriptions + citation extraction; see
-  [API keys](#api-keys). The citation-resolution providers (CrossRef / Semantic Scholar /
-  OpenAlex) are keyless.
+  [API keys](#api-keys). CrossRef and Semantic Scholar work keyless; OpenAlex needs a free
+  `OPENALEX_API_KEY` (without one its lookups fail with 429).
 - **Optional — a local OCR backend** instead of the cloud: `llama-server` + GLM-OCR GGUF
   weights + a GPU + the `.[local]` install extra. See
   [Local (selfhosted) OCR backend (optional)](#local-selfhosted-ocr-backend-optional).
@@ -88,7 +88,7 @@ Parsing uses GLM-OCR — a small (0.9B) but top-ranked document OCR model — on
 by default, or fully locally via `llama.cpp` + the `glmocr` SDK if you prefer no per-paper cost
 and no network for OCR. Either way it replaces the cloud LlamaParse step this project began
 with. Figure descriptions call Gemini; citation resolution calls CrossRef / Semantic Scholar /
-OpenAlex (keyless, disk-cached).
+OpenAlex (disk-cached; OpenAlex needs a free key).
 
 ## Development setup
 
@@ -185,7 +185,7 @@ client elsewhere), each `KEY=value` (python-dotenv), loaded automatically by `lo
 ```
 
 `ZHIPU_API_KEY` is the SDK's env-var name (z.ai and Zhipu/BigModel are the same provider, same
-key). The citation-resolution providers (CrossRef / Semantic Scholar / OpenAlex) are keyless.
+key). CrossRef and Semantic Scholar are keyless; OpenAlex needs a free `OPENALEX_API_KEY`.
 In selfhosted mode `ZHIPU_API_KEY` isn't needed; in the default maas mode `HF_TOKEN` isn't.
 
 ## Usage
@@ -312,7 +312,11 @@ source: SourceMeta = {
 
 - `doi`/`title`/`year`/`authors` strengthen **source identification** for the S2
   bulk-references fast-path (a confidently-identified source ⇒ its whole reference list
-  resolves in one call).
+  resolves in one call). That call retries longer than a single lookup
+  (`[citation] bulk_retry_attempts`), and the log says whether a list was found. Books
+  rarely have one at any provider, so their references are searched one by one, in
+  `[citation] title_search_order` (default CrossRef, Semantic Scholar, OpenAlex; with an
+  OpenAlex key, `["openalex", "crossref", "semanticscholar"]` avoids keyless S2's back-off).
 - `references` (the paper's own bibliography — refinery's `{title,doi,year,authors}` shape *or*
   CrossRef-reference keys `article-title`/`DOI`/`author`) are matched against the printed
   references **locally, before any network call** (`match="papis"`). If they cover the whole

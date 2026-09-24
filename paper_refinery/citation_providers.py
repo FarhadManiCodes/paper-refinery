@@ -135,7 +135,11 @@ def _cache_path(url: str, cfg: CitationConfig) -> Path | None:
 
 
 def _get_json(
-    url: str, cfg: CitationConfig, headers: dict | None = None, before_fetch=None
+    url: str,
+    cfg: CitationConfig,
+    headers: dict | None = None,
+    before_fetch=None,
+    attempts: int | None = None,
 ) -> dict | None:
     """GET ``url`` as JSON with an on-disk cache and retry/backoff; ``None`` (never
     raising) on final failure.
@@ -146,6 +150,7 @@ def _get_json(
     error must not stick). A reference that can't be verified just stays unverified --
     one provider being down must not fail the whole run. urllib's HTTPError carries the
     status on ``.code``, so retry.is_retryable's 429/5xx-vs-4xx split applies as-is.
+    ``attempts`` overrides ``cfg.api_retry_attempts`` for calls worth waiting longer for.
     """
     cache = _cache_path(url, cfg)
     if cache:
@@ -165,7 +170,9 @@ def _get_json(
     if before_fetch is not None:
         before_fetch()  # e.g. the S2 throttle -- only on a real fetch, never a cache hit
     try:
-        data = call_with_backoff(fetch, cfg.api_retry_attempts, cfg.api_retry_base_delay)
+        data = call_with_backoff(
+            fetch, attempts or cfg.api_retry_attempts, cfg.api_retry_base_delay
+        )
     except Exception as exc:
         _warn_once_if_key_rejected(url, exc, cfg)
         logger.debug("provider fetch failed for %s: %r", _without_mailto(url), exc)
@@ -245,6 +252,7 @@ def s2_paper_id(
             cfg,
             headers=_s2_headers(cfg),
             before_fetch=lambda: _s2_throttle(cfg),
+            attempts=cfg.bulk_retry_attempts,
         )
         cand = normalize_s2(data)
         return (data["paperId"], cand) if (data and data.get("paperId") and cand) else None
@@ -255,6 +263,7 @@ def s2_paper_id(
             cfg,
             headers=_s2_headers(cfg),
             before_fetch=lambda: _s2_throttle(cfg),
+            attempts=cfg.bulk_retry_attempts,
         )
         hits = (data or {}).get("data") or []
         if hits and hits[0].get("paperId"):
@@ -277,7 +286,13 @@ def s2_references(paper_id: str, cfg: CitationConfig) -> list[dict] | None:
         f"{cfg.s2_api_base}/paper/{urllib.parse.quote(paper_id)}/references"
         f"?fields={_S2_FIELDS}&limit=1000"
     )
-    data = _get_json(url, cfg, headers=_s2_headers(cfg), before_fetch=lambda: _s2_throttle(cfg))
+    data = _get_json(
+        url,
+        cfg,
+        headers=_s2_headers(cfg),
+        before_fetch=lambda: _s2_throttle(cfg),
+        attempts=cfg.bulk_retry_attempts,
+    )
     if data is None:
         return None
     candidates: list[dict] = []
@@ -328,7 +343,9 @@ def openalex_references(doi: str, cfg: CitationConfig) -> list[dict] | None:
     when the work isn't found or lists no references.
     """
     src = _get_json(
-        f"{cfg.openalex_api_base}/works/doi:{urllib.parse.quote(doi)}?select=referenced_works", cfg
+        f"{cfg.openalex_api_base}/works/doi:{urllib.parse.quote(doi)}?select=referenced_works",
+        cfg,
+        attempts=cfg.bulk_retry_attempts,
     )
     ids = [w.rsplit("/", 1)[-1] for w in (src or {}).get("referenced_works") or []]
     if not ids:
@@ -342,7 +359,7 @@ def openalex_references(doi: str, cfg: CitationConfig) -> list[dict] | None:
         )
         if mailto := _mailto(cfg, "openalex"):
             url += f"&mailto={urllib.parse.quote(mailto)}"
-        data = _get_json(url, cfg)
+        data = _get_json(url, cfg, attempts=cfg.bulk_retry_attempts)
         for work in (data or {}).get("results") or []:
             cand = normalize_openalex(work)
             if cand:
