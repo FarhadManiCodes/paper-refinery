@@ -80,6 +80,38 @@ def _without_mailto(url: str) -> str:
     return _MAILTO_PARAM_RE.sub("", url)
 
 
+class _KeepCredentialsOnHost(urllib.request.HTTPRedirectHandler):
+    """urllib copies every header, Authorization included, to a redirect target -- even on
+    another host. A keyed request drops the key when a redirect leaves its host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            old_host = urllib.parse.urlsplit(req.full_url).hostname
+            if urllib.parse.urlsplit(newurl).hostname != old_host:
+                new.remove_header("Authorization")
+        return new
+
+
+_KEYED_OPENER = urllib.request.build_opener(_KeepCredentialsOnHost)
+_REJECTED_KEY_WARNED: set[str] = set()
+
+
+def _warn_once_if_key_rejected(url: str, exc: Exception, cfg: CitationConfig) -> None:
+    """A revoked or mistyped key fails every lookup fast and silently (401 is not
+    retried): say so once per process instead of quietly losing a provider."""
+    provider = _provider_of(url, cfg)
+    code = getattr(exc, "code", None)
+    rejected = provider == "openalex" and code in (401, 403) and _auth_headers(url, cfg)
+    if rejected and provider not in _REJECTED_KEY_WARNED:
+        _REJECTED_KEY_WARNED.add(provider)
+        logger.warning(
+            "OpenAlex rejected the API key in $%s (HTTP %s): OpenAlex lookups will fail",
+            cfg.openalex_api_key_env,
+            code,
+        )
+
+
 def _auth_headers(url: str, cfg: CitationConfig) -> dict:
     """OpenAlex's API key as the bearer header its docs recommend -- never in the URL,
     so it cannot reach the cache key, a log line, or any other provider."""
@@ -126,7 +158,8 @@ def _get_json(
 
     def fetch():
         req = urllib.request.Request(url, headers=base_headers)
-        with urllib.request.urlopen(req, timeout=cfg.request_timeout_s) as resp:
+        opener = _KEYED_OPENER.open if "Authorization" in base_headers else urllib.request.urlopen
+        with opener(req, timeout=cfg.request_timeout_s) as resp:
             return json.loads(resp.read())
 
     if before_fetch is not None:
@@ -134,6 +167,7 @@ def _get_json(
     try:
         data = call_with_backoff(fetch, cfg.api_retry_attempts, cfg.api_retry_base_delay)
     except Exception as exc:
+        _warn_once_if_key_rejected(url, exc, cfg)
         logger.debug("provider fetch failed for %s: %r", _without_mailto(url), exc)
         return None
     if cache and data is not None:

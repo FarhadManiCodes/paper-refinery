@@ -398,7 +398,8 @@ def test_openalex_key_never_reaches_a_url_or_another_host(monkeypatch):
         sent.append((req.full_url, req.get_header("Authorization")))
         return Resp()
 
-    monkeypatch.setattr(cp.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(cp.urllib.request, "urlopen", urlopen)  # unkeyed requests
+    monkeypatch.setattr(cp._KEYED_OPENER, "open", urlopen)  # keyed requests
     cfg = CitationConfig()
     cp._get_json("https://api.openalex.org/works?search=T", cfg)
     cp._get_json("https://api.crossref.org/works?q=T", cfg)
@@ -406,3 +407,49 @@ def test_openalex_key_never_reaches_a_url_or_another_host(monkeypatch):
         ("https://api.openalex.org/works?search=T", "Bearer k3y"),
         ("https://api.crossref.org/works?q=T", None),
     ]
+
+
+def test_no_openalex_header_without_a_key(monkeypatch):
+    from paper_refinery import citation_providers as cp
+    from paper_refinery.config import CitationConfig
+
+    monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
+    assert cp._auth_headers("https://api.openalex.org/works?search=T", CitationConfig()) == {}
+
+
+def test_a_redirect_to_another_host_drops_the_key():
+    import io
+    import urllib.request
+
+    from paper_refinery import citation_providers as cp
+
+    req = urllib.request.Request(
+        "https://api.openalex.org/works", headers={"Authorization": "Bearer k"}
+    )
+    handler = cp._KeepCredentialsOnHost()
+    elsewhere = handler.redirect_request(
+        req, io.BytesIO(), 302, "Found", {}, "https://cdn.example.org/x"
+    )
+    same_host = handler.redirect_request(
+        req, io.BytesIO(), 302, "Found", {}, "https://api.openalex.org/y"
+    )
+    assert not elsewhere.has_header("Authorization")
+    assert same_host.get_header("Authorization") == "Bearer k"
+
+
+def test_a_rejected_key_is_reported_once(monkeypatch, caplog):
+    import logging
+    import urllib.error
+
+    from paper_refinery import citation_providers as cp
+    from paper_refinery.config import CitationConfig
+
+    monkeypatch.setenv("OPENALEX_API_KEY", "bad")
+    monkeypatch.setattr(cp, "_REJECTED_KEY_WARNED", set())
+    err = urllib.error.HTTPError("https://api.openalex.org/works", 401, "Unauthorized", {}, None)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            cp._warn_once_if_key_rejected(
+                "https://api.openalex.org/works?search=T", err, CitationConfig()
+            )
+    assert caplog.text.count("OpenAlex rejected the API key") == 1
