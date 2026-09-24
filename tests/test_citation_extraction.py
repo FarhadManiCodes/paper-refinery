@@ -516,3 +516,55 @@ def test_duplicate_row_cannot_fall_through_to_a_skipped_neighbours_position():
         None,
         "Delta flows",
     ]
+
+
+def _counting_client(calls, skip_title=None):
+    import re as _re
+
+    ref_line = _re.compile(r"^L\d+: (ref \d+)$")
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                titles = [m.group(1) for ln in contents.splitlines() if (m := ref_line.match(ln))]
+                calls.append(titles)
+                rows = [ExtractedReference(title=t) for t in titles if t != skip_title]
+                return type("R", (), {"parsed": rows})()
+
+    return FakeClient()
+
+
+def test_a_rerun_of_the_same_references_makes_no_extraction_calls(tmp_path):
+    # extraction was the costly part of re-refining (2026-09-24): an unchanged document
+    # must not pay for it twice
+    from paper_refinery import citation_extraction as ce
+
+    cfg = CitationConfig(extract_batch_size=3, max_workers=2, extraction_cache_dir=str(tmp_path))
+    raws = [f"ref {i}" for i in range(7)]
+    calls: list = []
+    first = extract_references(raws, cfg, client=_counting_client(calls))
+    assert len(calls) == 3
+    before = ce.extraction_stats()
+    again = extract_references(raws, cfg, client=_counting_client(calls))
+    assert len(calls) == 3  # every batch from the cache
+    assert again == first
+    assert (ce.extraction_stats() - before)["cached"] == 3
+
+    other_model = CitationConfig(
+        extract_batch_size=3, max_workers=2, extraction_cache_dir=str(tmp_path), model="other"
+    )
+    extract_references(raws, other_model, client=_counting_client(calls))
+    assert len(calls) == 6  # a different model re-extracts
+
+
+def test_a_batch_with_an_unextracted_line_is_not_cached(tmp_path):
+    cfg = CitationConfig(
+        extract_batch_size=3, max_workers=1, extraction_cache_dir=str(tmp_path), retry_attempts=1
+    )
+    raws = ["ref 0", "ref 1", "ref 2"]
+    calls: list = []
+    extract_references(raws, cfg, client=_counting_client(calls, skip_title="ref 1"))
+    n = len(calls)  # the batch plus its retry of the skipped line
+    extract_references(raws, cfg, client=_counting_client(calls))
+    assert len(calls) == n + 1  # asked again, not frozen with the gap

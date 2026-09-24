@@ -10,16 +10,20 @@ separate concern, deliberately not this file's job.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
+import threading
 import unicodedata
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
 from .config import CitationConfig
+from .disk_cache import cache_path, read_json, write_json
 from .retry import call_with_backoff
 from .text_utils import leading_number
 
@@ -192,6 +196,47 @@ def _align_by_line(rows: list[ExtractedReference], raw_texts: list[str]) -> list
     return out
 
 
+# batches answered from the cache vs by a Gemini call in this process; cli.py diffs two
+# snapshots to log one document's extraction
+_EXTRACTION_STATS: Counter[str] = Counter()
+_EXTRACTION_STATS_LOCK = threading.Lock()
+
+
+def extraction_stats() -> Counter[str]:
+    with _EXTRACTION_STATS_LOCK:
+        return Counter(_EXTRACTION_STATS)
+
+
+def _batch_cache_path(raw_texts: list[str], cfg: CitationConfig):
+    """Key = model + prompt + the batch's exact raw texts: an unchanged document (its OCR is
+    checkpointed, so its reference texts are byte-identical) hits; a new model, a prompt
+    edit or different text naturally re-extracts."""
+    digest = hashlib.sha256()
+    for part in (cfg.model, _PROMPT, *raw_texts):
+        digest.update(part.encode())
+        digest.update(b"\0")
+    return cache_path(cfg.extraction_cache_dir, digest.hexdigest())
+
+
+def _extract_batch_cached(raw_texts: list[str], cfg: CitationConfig, client: Client) -> list[dict]:
+    """``_extract_batch`` behind a disk cache. Only a batch with every line extracted is
+    stored, so a partly failed batch is retried on the next run instead of kept."""
+    cache = _batch_cache_path(raw_texts, cfg)
+    if cache:
+        cached = read_json(cache)
+        items = cached.get("items") if isinstance(cached, dict) else None
+        if isinstance(items, list) and len(items) == len(raw_texts):
+            with _EXTRACTION_STATS_LOCK:
+                _EXTRACTION_STATS["cached"] += 1
+            return items
+    items = _extract_batch(raw_texts, cfg, client)
+    with _EXTRACTION_STATS_LOCK:
+        _EXTRACTION_STATS["extracted"] += 1
+    if cache and items and all(items):
+        write_json(cache, {"items": items})
+    return items
+
+
 def _extract_batch(
     raw_texts: list[str], cfg: CitationConfig, client: Client, retry_missing: bool = True
 ) -> list[dict]:
@@ -285,10 +330,10 @@ def extract_references(
     size = max(1, cfg.extract_batch_size)
     batches = [raw_texts[i : i + size] for i in range(0, len(raw_texts), size)]
     if len(batches) == 1:
-        items = _extract_batch(batches[0], cfg, client)
+        items = _extract_batch_cached(batches[0], cfg, client)
     else:
         with ThreadPoolExecutor(max_workers=cfg.max_workers) as pool:
-            futures = [pool.submit(_extract_batch, b, cfg, client) for b in batches]
+            futures = [pool.submit(_extract_batch_cached, b, cfg, client) for b in batches]
             results: list[list[dict]] = []
             # collect in submission order (not completion order) so the batches
             # re-concatenate in the original reference order; each batch is already

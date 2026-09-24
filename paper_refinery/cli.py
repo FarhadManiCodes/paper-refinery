@@ -37,7 +37,7 @@ from mathunicode import collapse_math_blocks
 
 from .backend import OcrBackend, ocr_backend
 from .chunker import Chunk, chunk_markdown
-from .citation_extraction import extract_references
+from .citation_extraction import extract_references, extraction_stats
 from .citation_linking import link_citations, make_citekey, rewrite_markers
 from .citation_resolution import (
     SourceMeta,
@@ -238,13 +238,18 @@ def _run_citations(
     batches = -(-len(texts) // max(1, cfg.citation.extract_batch_size))
     logger.info("%s: citations: extracting %d references (%d batches)", label, len(texts), batches)
     started = time.monotonic()
+    before = extraction_stats()
     extracted = extract_references(texts, cfg.citation)
+    got = extraction_stats() - before
     logger.info(
-        "%s: citations: extracted %d references in %.1f min (%d without a title)",
+        "%s: citations: extracted %d references in %.1f min (%d without a title; "
+        "%d/%d batches from cache)",
         label,
         len(extracted),
         (time.monotonic() - started) / 60,
         sum(1 for e in extracted if not (e or {}).get("title")),
+        got["cached"],
+        got["cached"] + got["extracted"],
     )
     source_paper = source_from_meta(source, fallback_title=_source_title(parsed.markdown))
     resolved = resolve_references(

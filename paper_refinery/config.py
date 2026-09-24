@@ -222,6 +222,11 @@ class CitationConfig:
     year_tolerance: int = 1
     #   |extracted year - provider year| allowed (confirmed live: S2 reports the arXiv
     #   preprint year for brunton-2016, one year before the published version)
+    extraction_cache_dir: str = "~/.cache/paper-refinery/extraction-cache"
+    #   each fully extracted batch is cached here (key: model, prompt and the batch's raw
+    #   reference texts), so re-refining an unchanged document makes no extraction calls:
+    #   the costly part of a re-run (2026-09-24). A batch with an unextracted line is not
+    #   cached, so it is retried next time. Empty string disables; safe to delete anytime.
     api_cache_dir: str = "~/.cache/paper-refinery/api-cache"
     #   every successful provider response is cached here (key: sha256 of the URL) so
     #   iterating on matching logic never re-hits the keyless APIs; failures are never
