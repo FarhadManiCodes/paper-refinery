@@ -360,7 +360,9 @@ def _resolve_by_title(
         if not _acceptable(out, top, cfg) and cfg.search_candidates > 1:
             # only a rejected top hit costs a second request (a new URL, so uncached once)
             near_miss = _better_near_miss(near_miss, name, out.get("title"), top)
-            more = search_more(out["title"], cfg, cfg.search_candidates)[1:]
+            # all of them: `top` may be a months-old cached answer while this ranking is
+            # fresh, so its first entry need not be `top` (re-checking top is harmless)
+            more = search_more(out["title"], cfg, cfg.search_candidates)
             candidates = [normalize(h) for h in more]
         for hit in candidates:
             if not hit:

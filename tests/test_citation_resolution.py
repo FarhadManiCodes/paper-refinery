@@ -793,3 +793,12 @@ def test_single_hit_search_keeps_its_cached_url(monkeypatch):
         and urls[1].endswith("&rows=1")
         and urls[2].endswith("&per-page=1")
     )
+
+
+def test_fallback_that_finds_nothing_leaves_the_reference_unverified(monkeypatch):
+    wrong = _s2_hit("Two-dimensional turbulence", 2012, "Kraichnan", "Montgomery")
+    monkeypatch.setattr(cr, "crossref_search", lambda t, c: None)
+    monkeypatch.setattr(cr, "openalex_search", lambda t, c: None)
+    monkeypatch.setattr(cr, "s2_search", lambda t, c: wrong)
+    out = cr.verify_and_resolve(dict(TURBULENCE), "no doi", _cfg())  # autouse stub: []
+    assert not out["verified"]
