@@ -177,10 +177,14 @@ def _authors_disagree(extracted: dict, candidate: dict) -> bool:
     Title plus year alone let near-identical titles through (live, 2026-09-24): Baraniuk's
     and Candès's "Compressive sensing" both resolved to Donoho's "Compressed sensing", and
     Silver et al.'s "Mastering the game of Go" to a Gomoku paper. Everything that cannot be
-    compared passes: no printed authors (ditto marks such as "——" or ", "), a provider
-    record in another script (Колмогоров), and near spellings (OCR's "Ptluri" for Potluri).
+    compared passes: no printed authors (ditto marks such as "——" or ", "), organisation
+    authors printed without a given name, a provider record in another script
+    (Колмогоров), and near spellings (OCR's "Ptluri" for Potluri).
     """
-    printed = [f for f in _families(extracted) if _LATIN_NAME_RE.fullmatch(f)]
+    # a printed author with no given name is often an organisation ("OpenAI", "Gemini
+    # Team") that providers list as individuals -- not evidence either way
+    people = {**extracted, "authors": [a for a in extracted.get("authors") or [] if a.get("given")]}
+    printed = [f for f in _families(people) if _LATIN_NAME_RE.fullmatch(f)]
     listed = _families(candidate)
     if not printed or not listed or not all(_LATIN_NAME_RE.fullmatch(f) for f in listed):
         return False

@@ -124,7 +124,7 @@ def build_prompt(number: str, caption: str, context: dict, cfg: FigureConfig) ->
     ref_lines = (
         [f"Caption: FIGURE {number}. {caption}".rstrip(". ") + "."]
         if number
-        else ["Caption: none -- this image has no caption; use the surrounding text."]
+        else ["Caption: none -- this image has no caption."]
     )
     for label, key in (
         ("Title", "title"),

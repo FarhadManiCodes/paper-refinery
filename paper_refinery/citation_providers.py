@@ -284,6 +284,9 @@ def reconstruct_openalex_abstract(inverted_index: dict | None) -> str | None:
 _JATS_TAG_RE = re.compile(r"<[^>]+>")
 
 
+_NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv"}
+
+
 def _split_full_name(full: str | None) -> dict | None:
     """Best-effort {family, given} from a display name ("Steven L. Brunton").
 
@@ -293,6 +296,9 @@ def _split_full_name(full: str | None) -> dict | None:
     the diff report surfaces author replacements so such cases are visible.
     """
     tokens = (full or "").split()
+    # a generational suffix is not the surname: "Martin L. King Jr." -> King
+    while len(tokens) > 1 and tokens[-1].rstrip(".,").lower() in _NAME_SUFFIXES:
+        tokens.pop()
     if not tokens:
         return None
     return {"family": tokens[-1], "given": " ".join(tokens[:-1]) or None}

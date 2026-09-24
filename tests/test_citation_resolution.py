@@ -690,16 +690,16 @@ def _tier1(extracted_authors, candidate_authors, title="Compressive sensing"):
 def test_tier1_rejects_near_identical_title_by_different_authors():
     # live 2026-09-24: Baraniuk's "Compressive sensing" resolved to Donoho's paper
     assert cr.title_similarity("Compressive sensing", "Compressed sensing") >= 0.90
-    assert not _tier1([{"family": "Baraniuk"}], [{"family": "Donoho"}])
+    assert not _tier1([{"family": "Baraniuk", "given": "R. G."}], [{"family": "Donoho"}])
 
 
 def test_tier1_accepts_when_any_author_matches_in_any_order():
-    assert _tier1([{"family": "Tao"}], [{"family": "Candès"}, {"family": "Tao"}])
+    assert _tier1([{"family": "Tao", "given": "T."}], [{"family": "Candès"}, {"family": "Tao"}])
 
 
 def test_tier1_author_check_tolerates_ocr_spelling_and_diacritics():
-    assert _tier1([{"family": "Ptluri"}], [{"family": "Potluri"}])
-    assert _tier1([{"family": "Candes"}], [{"family": "Candès"}])
+    assert _tier1([{"family": "Ptluri", "given": "S."}], [{"family": "Potluri"}])
+    assert _tier1([{"family": "Candes", "given": "E."}], [{"family": "Candès"}])
 
 
 @pytest.mark.parametrize(
@@ -708,7 +708,15 @@ def test_tier1_author_check_tolerates_ocr_spelling_and_diacritics():
         ([], [{"family": "Donoho"}]),  # ditto marks: no author printed
         ([{"family": "Kolmogorov"}], [{"family": "Колмогоров"}]),  # other script
         ([{"family": "Baraniuk"}], []),  # provider record without authors
+        ([{"family": "OpenAI"}], [{"family": "Achiam", "given": "Josh"}]),  # organisation
     ],
 )
 def test_tier1_author_check_passes_when_nothing_can_be_compared(printed, listed):
     assert _tier1(printed, listed)
+
+
+def test_provider_name_suffix_is_not_the_surname():
+    from paper_refinery.citation_providers import _split_full_name
+
+    assert _split_full_name("Martin L. King Jr.") == {"family": "King", "given": "Martin L."}
+    assert _split_full_name("John Smith III")["family"] == "Smith"
