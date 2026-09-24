@@ -93,6 +93,11 @@ class FigureConfig:
     retry_base_delay: float = 4.0  # seconds; doubles each retry (4, 8, 16, ...)
     max_workers: int = 4  # concurrent per-figure describe_figure calls in enrich.py
     context_paragraphs: int = 2  # body paragraphs on each side of the caption sent as context
+    describe_uncaptioned: bool = False
+    #   also describe crops with no "FIGURE N" caption to anchor on. Off by default: in a
+    #   paper they are mostly logos and equation fragments. Worth it for visual books whose
+    #   images carry the content (a canvas-driven design book has hundreds and no captions);
+    #   non_figure verdicts are cached like any other.
     figure_cache_dir: str = "~/.cache/paper-refinery/figure-cache"
     #   every schema-valid description (including a definitive non-figure verdict) is
     #   cached here, keyed by crop bytes + assembled prompt -- re-running an unchanged

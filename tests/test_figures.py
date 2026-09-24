@@ -55,6 +55,13 @@ def test_build_prompt_layers_instructions_taxonomy_and_reference_text():
     assert "Succeeding paragraphs: The succeeding paragraph." in p
 
 
+def test_build_prompt_for_an_uncaptioned_image_invents_no_caption():
+    p = build_prompt("", "", {"before": "Sketch the customer profile."}, _cfg())
+    assert "FIGURE ." not in p and "Caption: FIGURE" not in p
+    assert "Caption: none" in p
+    assert "Preceding paragraphs: Sketch the customer profile." in p
+
+
 def test_build_prompt_omits_empty_context_fields():
     p = build_prompt("2", "A caption.", {"title": "", "abstract": "  "}, _cfg())
     assert "Title:" not in p

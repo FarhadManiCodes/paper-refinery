@@ -121,7 +121,11 @@ def build_prompt(number: str, caption: str, context: dict, cfg: FigureConfig) ->
     prompt IS part of the cache identity, and tests pin its structure.
     """
     types_block = "\n".join(f"- {tid}: attend to {hint}" for tid, hint in _TAXONOMY)
-    ref_lines = [f"Caption: FIGURE {number}. {caption}".rstrip(". ") + "."]
+    ref_lines = (
+        [f"Caption: FIGURE {number}. {caption}".rstrip(". ") + "."]
+        if number
+        else ["Caption: none -- this image has no caption; use the surrounding text."]
+    )
     for label, key in (
         ("Title", "title"),
         ("Abstract", "abstract"),

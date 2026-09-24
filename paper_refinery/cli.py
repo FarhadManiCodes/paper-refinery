@@ -832,6 +832,12 @@ def _setup_logging() -> None:
     help="Resume from a stage, reusing earlier artifacts. 'chunk' re-chunks the saved "
     "refinery.md only (instant; for chunk-policy tuning).",
 )
+@click.option(
+    "--describe-uncaptioned",
+    is_flag=True,
+    help="Also describe images with no 'FIGURE N' caption (one Gemini call each, cached). "
+    "For visual books whose images carry the content; off by default.",
+)
 def main(
     pdf: Path,
     out: Path | None,
@@ -842,10 +848,13 @@ def main(
     force_parse: bool,
     doi: str | None,
     from_stage: str | None,
+    describe_uncaptioned: bool,
 ) -> None:
     """Parse, figure-enrich, citation-verify, and chunk PDF for papis-ask."""
     _setup_logging()
     cfg = load_config()
+    if describe_uncaptioned:
+        cfg.figure.describe_uncaptioned = True
     if model_path is not None:
         cfg.parse.model_path = str(model_path)
     if mmproj_path is not None:
@@ -908,6 +917,12 @@ def main(
     help="Resume from a stage for every paper. 'chunk' re-chunks each saved refinery.md only "
     "(instant, no OCR/network; for library-wide chunk-policy tuning). Ignores --workers etc.",
 )
+@click.option(
+    "--describe-uncaptioned",
+    is_flag=True,
+    help="Also describe images with no 'FIGURE N' caption (one Gemini call each, cached). "
+    "For visual books whose images carry the content; off by default.",
+)
 def main_many(
     pdfs: tuple[Path, ...],
     force_parse: bool,
@@ -915,6 +930,7 @@ def main_many(
     ocr_workers: int,
     meta_map: Path | None,
     from_stage: str | None,
+    describe_uncaptioned: bool,
 ) -> None:
     """Refine many PDFs concurrently, writing each <pdf>.chunks.json / .citations.json.
 
@@ -931,6 +947,8 @@ def main_many(
     """
     _setup_logging()
     cfg = load_config()
+    if describe_uncaptioned:
+        cfg.figure.describe_uncaptioned = True
     if from_stage == "chunk":
         done = _rechunk_many(pdfs, cfg)
     else:

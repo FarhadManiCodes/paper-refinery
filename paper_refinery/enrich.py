@@ -372,6 +372,28 @@ def _build_describe_tasks(
     return tasks
 
 
+def _build_uncaptioned_tasks(
+    md: str, parsed: ParseResult, header: dict, cfg: FigureConfig
+) -> dict[tuple[int, str], tuple[list[Path], _Caption, dict]]:
+    """One describe task per crop still under its ``FIGURE_CROP`` placeholder after the
+    caption pass -- i.e. no caption claimed it. The description is spliced after the
+    placeholder line, the same way a captioned one follows its caption."""
+    tasks: dict[tuple[int, str], tuple[list[Path], _Caption, dict]] = {}
+    for page, crops in parsed.figure_crops.items():
+        for ci, crop in enumerate(crops):
+            start = md.find(f"![FIGURE_CROP {page}:{ci}](")
+            if start < 0:  # renamed by the caption pass, or not in the markdown
+                continue
+            end = md.find("\n", start)
+            end = len(md) if end < 0 else end
+            anchor = _Caption(
+                number="", text="", line=md[start:end], line_end=end, page=page, upper=False
+            )
+            context = {**header, **_neighbor_context(md, anchor, cfg.context_paragraphs)}
+            tasks[(page, f"crop {page}:{ci}")] = ([crop.path], anchor, context)
+    return tasks
+
+
 def _run_describe_tasks(
     tasks: dict[tuple[int, str], tuple[list[Path], _Caption, dict]],
     describe: FigureDescriber,
@@ -428,8 +450,9 @@ def enrich_markdown(
     """Return the markdown with figure descriptions spliced next to their captions.
 
     One describe call per figure (its panels together), run concurrently across
-    figures. A figure that fails (after retries) is left undescribed with a warning;
-    splicing is deterministic.
+    figures. With ``cfg.describe_uncaptioned``, every crop no caption claimed is described
+    too, spliced after its own placeholder. A figure that fails (after retries) is left
+    undescribed with a warning; splicing is deterministic.
     """
     cfg = cfg or FigureConfig()
     describe = describe or _default_describe
@@ -447,5 +470,7 @@ def enrich_markdown(
     by_page = _group_by_page(md, known)
     header = _paper_header(md)
     tasks = _build_describe_tasks(md, by_page, figure_crops, header, cfg)
+    if cfg.describe_uncaptioned:
+        tasks |= _build_uncaptioned_tasks(md, parsed, header, cfg)
     results = _run_describe_tasks(tasks, describe, cfg)
     return _splice_descriptions(md, tasks, results)

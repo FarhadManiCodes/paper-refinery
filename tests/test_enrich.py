@@ -477,3 +477,62 @@ def test_enrich_diagonal_panel_joins_cluster_on_single_caption_page(tmp_path):
 
     enrich_markdown(parsed, describe=fake)
     assert calls == [("3", ["fig_3_1.png", "fig_3_2.png"])]
+
+
+# ---------------------------------------------------------------------------
+# describe_uncaptioned (opt-in)
+# ---------------------------------------------------------------------------
+
+UNCAPTIONED_MD = (
+    "<page_number>1</page_number>\n\n## Customer profile\n\n"
+    "Sketch the jobs, pains, and gains of the customer you are targeting.\n\n"
+    "![FIGURE_CROP 1:0](page_1_fig_0.png)\n\n"
+    "Rank them in order of importance.\n\n"
+    "<page_number>2</page_number>\n\nFIGURE 1. A captioned chart.\n\n"
+)
+UNCAPTIONED_CROPS = {
+    1: [CropRegion(Path("page_1_fig_0.png"))],
+    2: [CropRegion(Path("page_2_fig_0.png"))],
+}
+
+
+def _recording(calls):
+    def fake(crops, number, caption, context, cfg):
+        calls.append((crops[0].name, number, caption, context))
+        return _desc(f"DESC-{crops[0].name}")
+
+    return fake
+
+
+def test_uncaptioned_crops_are_left_alone_by_default():
+    calls = []
+    out = enrich_markdown(
+        ParseResult(UNCAPTIONED_MD, figure_crops=UNCAPTIONED_CROPS), describe=_recording(calls)
+    )
+    assert [c[0] for c in calls] == ["page_2_fig_0.png"]  # only the captioned figure
+    assert "DESC-page_1_fig_0.png" not in out
+
+
+def test_uncaptioned_crop_described_after_its_placeholder_when_enabled():
+    calls = []
+    out = enrich_markdown(
+        ParseResult(UNCAPTIONED_MD, figure_crops=UNCAPTIONED_CROPS),
+        FigureConfig(describe_uncaptioned=True),
+        describe=_recording(calls),
+    )
+    uncaptioned = next(c for c in calls if c[0] == "page_1_fig_0.png")
+    assert uncaptioned[1] == "" and uncaptioned[2] == ""  # no number, no caption
+    assert "jobs, pains, and gains" in uncaptioned[3]["before"]  # surrounding text as context
+    assert "Rank them" in uncaptioned[3]["after"]
+    placeholder = out.index("![FIGURE_CROP 1:0](page_1_fig_0.png)")
+    assert placeholder < out.index("DESC-page_1_fig_0.png") < out.index("Rank them")
+    assert out.index("FIGURE 1.") < out.index("DESC-page_2_fig_0.png")  # captioned unchanged
+
+
+def test_uncaptioned_non_figure_verdict_splices_nothing():
+    out = enrich_markdown(
+        ParseResult(UNCAPTIONED_MD, figure_crops={1: UNCAPTIONED_CROPS[1]}),
+        FigureConfig(describe_uncaptioned=True),
+        describe=lambda *a: None,
+    )
+    assert "Figure description" not in out
