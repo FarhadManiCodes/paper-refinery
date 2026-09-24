@@ -196,6 +196,10 @@ def _scrub(text: str, cfg: CitationConfig) -> str:
     return text
 
 
+_BODY_READ = 2048
+_SECRET_MARGIN = 256  # longer than any contact address or key
+
+
 def _error_detail(exc: BaseException, cfg: CitationConfig) -> str:
     """Status plus the provider's own message (OpenAlex's "Insufficient budget"), short.
     An error page may echo the request, so the contact address and keys are masked."""
@@ -203,9 +207,14 @@ def _error_detail(exc: BaseException, cfg: CitationConfig) -> str:
     body = ""
     if code is not None and hasattr(exc, "read"):
         try:
-            body = exc.read(300).decode("utf-8", "replace")
+            raw = exc.read(_BODY_READ)
         except Exception:
-            body = ""
+            raw = b""
+        # a read that hit the limit may end inside a secret, which then would not match
+        # the mask: drop that tail. Mask before shortening, for the same reason.
+        if len(raw) == _BODY_READ:
+            raw = raw[: _BODY_READ - _SECRET_MARGIN]
+        body = _scrub(raw.decode("utf-8", "replace"), cfg)
     body = " ".join(body.split())[:160]
     head = f"HTTP {code}" if code is not None else type(exc).__name__
     return _scrub(f"{head}: {body}" if body else f"{head} ({exc})", cfg)
@@ -218,7 +227,8 @@ def _note_failed_attempt(url: str, exc: BaseException, cfg: CitationConfig) -> N
     PROVIDER_STATS.add(provider, cls)
     if cls == "missing":
         return  # a 404 is the provider's answer ("no such id"), not a failure
-    if provider == "openalex" and cls == "4xx" and getattr(exc, "code", None) in (401, 403):
+    keyed = bool(_auth_headers(url, cfg))
+    if keyed and cls == "4xx" and getattr(exc, "code", None) in (401, 403):
         return  # _warn_once_if_key_rejected names this one
     with _ERROR_WARN_LOCK:
         if (provider, cls) in _ERROR_CLASSES_WARNED:

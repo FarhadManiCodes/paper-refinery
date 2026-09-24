@@ -371,6 +371,27 @@ def test_error_warning_masks_contact_address_and_keys(fresh_stats, monkeypatch, 
     assert "***" in msg
 
 
+def test_a_secret_crossing_the_cut_is_masked_not_truncated(fresh_stats, caplog):
+    caplog.set_level("WARNING", logger=cp.__name__)
+    cfg = _cfg(mailto="someone.long@example.org")
+    url = f"{cfg.crossref_api_base}/works?query=x"
+    body = b"x" * 150 + b" someone.long@example.org"  # crosses the 160-character cut
+    cp._note_failed_attempt(url, _http_error(url, 502, body), cfg)
+    (msg,) = [r.getMessage() for r in caplog.records]
+    assert "someone" not in msg
+
+
+def test_a_secret_crossing_the_read_limit_is_dropped(fresh_stats, caplog):
+    caplog.set_level("WARNING", logger=cp.__name__)
+    cfg = _cfg(mailto="someone.long@example.org")
+    url = f"{cfg.crossref_api_base}/works?query=x"
+    # mostly whitespace, so collapsing would pull a cut-off secret back into view
+    body = b" " * (cp._BODY_READ - 10) + b"someone.long@example.org"
+    cp._note_failed_attempt(url, _http_error(url, 502, body), cfg)
+    (msg,) = [r.getMessage() for r in caplog.records]
+    assert "someone" not in msg
+
+
 def test_rejected_openalex_key_warns_once_not_twice(fresh_stats, monkeypatch, caplog):
     caplog.set_level("WARNING", logger=cp.__name__)
     monkeypatch.setenv("OPENALEX_API_KEY", "bad")
