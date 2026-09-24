@@ -199,3 +199,12 @@ def test_a_heading_ends_an_index_run():
     md = f"{entries}\n\n## Papers and reviews\n\nReal prose follows here."
     out = _drop_unheaded_runs(md)
     assert "Term3, 13" not in out and "## Papers and reviews" in out and "Real prose" in out
+
+
+def test_a_later_page_marker_supersedes_the_carried_one():
+    entries = "\n\n".join(f"Term{i}, {i + 10}" for i in range(25))
+    tail = "<page_number>302</page_number>\n\n<page_number>303</page_number>\n\n## Next\n\nText."
+    md = f"Body on 299.\n\n<page_number>300</page_number>\n\n{entries}\n\n{tail}"
+    out = _drop_unheaded_runs(md)
+    assert out.count("<page_number>") <= 3 and "Term3" not in out
+    assert out.index("<page_number>303</page_number>") < out.index("## Next")

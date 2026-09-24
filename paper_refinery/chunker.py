@@ -161,9 +161,12 @@ def _emit(out: list[str], item: str, pending: str | None, lines: bool = True) ->
     if pending is None or not item.strip():
         out.append(item)
         return pending
+    if PAGE_MARKER_RE.fullmatch(item.strip()):
+        out.append(item)  # a newer marker supersedes the carried one
+        return None
     gap = [""] if lines else []
-    first_line = item.strip().split("\n", 1)[0]
-    if _HEADING_RE.match(first_line):
+    item = item.strip("\n")
+    if _HEADING_RE.match(item.split("\n", 1)[0]):
         head, _, rest = item.partition("\n")
         out += [head, *gap, pending, *gap] + ([rest] if rest else [])
     else:
