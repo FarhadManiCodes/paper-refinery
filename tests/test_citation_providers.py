@@ -545,6 +545,20 @@ def test_every_failed_attempt_is_counted_through_the_retry_loop(tmp_path, monkey
     assert counts[("crossref", "failed")] == 1
 
 
+def test_openalex_title_searches_drop_wildcards(monkeypatch):
+    # OpenAlex answers 400 to a stemmed search containing ? or *
+    cfg = _cfg()
+    urls = []
+    monkeypatch.setattr(cp, "_get_json", lambda url, cfg, **kw: urls.append(url) or {})
+    cp.openalex_search_more("Robust principal component analysis?", cfg, 5)
+    cp.openalex_source(cfg, title="Can one hear the shape of a drum?")
+    cp.openalex_search_more("Convex Optimization", cfg, 1)
+    assert "search=Robust%20principal%20component%20analysis&" in urls[0]
+    assert "search=Can%20one%20hear%20the%20shape%20of%20a%20drum&" in urls[1]
+    assert "search=Convex%20Optimization&" in urls[2]  # unchanged: its cached URL still hits
+    assert not any("%3F" in u or "%2A" in u for u in urls)
+
+
 def test_s2_paper_id_by_doi_returns_id_and_candidate(monkeypatch):
     _patch_get_json(
         monkeypatch,

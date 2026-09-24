@@ -558,9 +558,22 @@ def crossref_search(title: str, cfg: CitationConfig) -> dict | None:
     return items[0] if items else None
 
 
+_OPENALEX_WILDCARD_RE = re.compile(r"[?*]")
+
+
+def _openalex_query(title: str) -> str:
+    """A title as an OpenAlex search: ``?`` and ``*`` are wildcards there, and the default
+    (stemmed) search rejects them with HTTP 400 ("Robust principal component analysis?",
+    2026-09-24), so they become spaces. A title without them keeps its cached URL."""
+    if not _OPENALEX_WILDCARD_RE.search(title):
+        return title
+    return " ".join(_OPENALEX_WILDCARD_RE.sub(" ", title).split())
+
+
 def openalex_search_more(title: str, cfg: CitationConfig, n: int) -> list[dict]:
     """Top ``n`` hits, best first; ``n=1`` reproduces ``openalex_search``'s cached URL."""
-    url = f"{cfg.openalex_api_base}/works?search={urllib.parse.quote(title)}&per-page={n}"
+    query = urllib.parse.quote(_openalex_query(title))
+    url = f"{cfg.openalex_api_base}/works?search={query}&per-page={n}"
     if mailto := _mailto(cfg, "openalex"):
         url += f"&mailto={urllib.parse.quote(mailto)}"
     data = _get_json(url, cfg)
@@ -596,7 +609,7 @@ def openalex_source(
         )
     elif title:
         url = (
-            f"{cfg.openalex_api_base}/works?search={urllib.parse.quote(title)}"
+            f"{cfg.openalex_api_base}/works?search={urllib.parse.quote(_openalex_query(title))}"
             f"&per-page=1&select={_OPENALEX_SOURCE_FIELDS}"
         )
     else:
