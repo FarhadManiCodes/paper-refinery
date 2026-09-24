@@ -1,0 +1,12 @@
+[
+  {"doc": "nguyen-2025", "figure": "1", "kind": "Venn diagram with annotations"},
+  {"doc": "zhao-2026", "figure": "2", "kind": "line plot with band"},
+  {"doc": "eslami-2026", "figure": "1", "kind": "2-D stability map"},
+  {"doc": "bensalem-2026", "figure": "1", "kind": "architecture block diagram"},
+  {"doc": "hastie-2009", "figure": "2.5", "kind": "classification scatter plot"},
+  {"doc": "nocedal-2006", "figure": "3.3", "kind": "annotated function plot"},
+  {"doc": "brunton-2026", "figure": "1.2", "kind": "geometry schematic"},
+  {"doc": "kirk-2004", "figure": "2", "kind": "scanned 3-D schematic"},
+  {"doc": "dong-2024", "figure": "3", "kind": "two-pipeline workflow diagram"},
+  {"doc": "soroco-2025", "figure": "2", "kind": "schematic with equations"}
+]

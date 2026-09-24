@@ -349,6 +349,25 @@ refinery's resolved references back into the papis/CrossRef `citations:` shape (
 }
 ```
 
+## Choosing models
+
+Models are pinned by exact name (config.toml `[figure] model`, `[citation] model`), never by
+a `-latest` alias: a silent swap can change behaviour this pipeline depends on, such as how
+reliably every reference line is returned. Before changing one, compare candidates on the
+library itself with `scripts/eval_models.py`:
+
+```bash
+.venv/bin/python scripts/eval_models.py check                # pinned vs what the API lists
+.venv/bin/python scripts/eval_models.py extraction OLD NEW   # 400 real references, retries off
+.venv/bin/python scripts/eval_models.py figures OLD NEW      # 10 fixed figures, judged by eye
+```
+
+`check` is free. The other two make a few cents of Gemini calls. `extraction` counts references
+left unplaced and fields not printed in the reference. `figures` writes a Markdown report
+with each image and both descriptions, because hallucinated labels or trends can only be
+judged against the picture. The figure cache is keyed on crop bytes and prompt, not the model,
+so switching the figure model leaves existing descriptions as they are.
+
 ## License
 
 [GPL-3.0-or-later](LICENSE) — copyleft: works that build on paper-refinery must also be
