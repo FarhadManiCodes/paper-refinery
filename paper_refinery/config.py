@@ -192,8 +192,8 @@ class CitationConfig:
     #   acceptable preprint hit is kept aside and the chain goes on), but the first
     #   provider's record is what gets stored: OpenAlex may give a merged work's earliest
     #   year where no year was printed, types proceedings papers "article", and splits
-    #   names on the last token. S2 is still called for printed DOIs and for abstracts of
-    #   CrossRef matches. Each name at most once.
+    #   names on the last token. The same order picks who is asked for the source's
+    #   reference list and for printed DOIs and abstracts (OpenAlex/S2). Each name once.
     bulk_retry_attempts: int = 7
     #   attempts for each call fetching the source's own reference list (S2/OpenAlex
     #   fast-path), which replaces dozens of per-reference searches, so it waits longer
@@ -226,10 +226,11 @@ class CitationConfig:
     #   iterating on matching logic never re-hits the keyless APIs; failures are never
     #   cached. Sibling of the models cache; safe to delete anytime.
     s2_bulk_references: bool = True
-    #   fast-path: when the SOURCE paper is found in S2, fetch its whole reference list in
-    #   ONE call and match each extracted reference against it locally, instead of a
-    #   per-reference provider search (the slow, throttled part). Anything unmatched falls
-    #   back to the per-entry search; set False to force the per-entry path everywhere.
+    #   fast-path (named for its first provider; OpenAlex serves it too): when the SOURCE
+    #   paper is found in OpenAlex or S2, fetch its whole reference list and match each
+    #   extracted reference against it locally, instead of a per-reference provider search
+    #   (the slow part). Anything unmatched falls back to the per-entry search; set False
+    #   to force the per-entry path everywhere.
 
 
 @dataclass(slots=True)

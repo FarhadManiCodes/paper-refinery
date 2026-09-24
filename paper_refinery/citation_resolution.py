@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class SourcePaper:
-    """What we know about the paper being processed, for the S2 bulk-references fast-path.
+    """What we know about the paper being processed, for the reference-list fast-path.
 
     An external id (``doi``/``arxiv``) resolves the source exactly (trusted); ``title`` (+
     ``year``/``authors`` when available -- papis fills them from info.yaml, the CLI has the
@@ -471,7 +471,7 @@ def _source_confident(source: SourcePaper, candidate: dict, cfg: CitationConfig)
 
 def _dedup_candidates(candidates: list[dict]) -> list[dict]:
     """Drop duplicates across bulk sources: same DOI (folded), else same normalized title.
-    First occurrence wins (S2 before OpenAlex)."""
+    First occurrence wins (the earlier provider in the order)."""
     seen_doi: set[str] = set()
     seen_title: set[str] = set()
     out: list[dict] = []
@@ -591,7 +591,7 @@ def _openalex_list(source: SourcePaper, cfg: CitationConfig) -> tuple[list[dict]
         return [], f"openalex {how}: found {name}, no references listed", False
     refs = openalex_hydrate(ids, cfg)
     note = f"openalex {how}: found {name}, {len(ids)} references listed, {len(refs)} fetched"
-    return refs, note, len(refs) < len(ids)
+    return refs, note, not refs  # a few ids may be merged/deleted works: warn only on none
 
 
 def _s2_list(source: SourcePaper, cfg: CitationConfig) -> tuple[list[dict], str, bool]:
@@ -626,8 +626,11 @@ def _describe_reference(extracted: dict, raw_text: str) -> str:
 
 def _describe_outcome(extracted: dict, entry: dict) -> str:
     if entry.get("verified"):
+        match = entry.get("match")
+        if match == "doi" or not extracted.get("title"):
+            return f"verified: {match}"  # a printed DOI needs no title agreement
         sim = title_similarity(extracted.get("title"), entry.get("title"))
-        return f"verified: {entry.get('match')} ({sim:.2f})"
+        return f"verified: {match} ({sim:.2f})"
     miss = entry.get("near_miss")
     if miss:
         return (
@@ -639,12 +642,12 @@ def _describe_outcome(extracted: dict, entry: dict) -> str:
 
 def format_lookups(counts: Counter[tuple[str, str]]) -> str:
     """``openalex 610 ok, 400 cached, 3 failed [429x5]; crossref 90 ok`` from a
-    ``ProviderStats`` diff: answers per provider (``missing`` is a 404: not in that
-    database), then failed attempts by class."""
+    ``ProviderStats`` diff: outcomes per provider (``missing`` is a 404: not in that
+    database; ``skipped`` means cooling down), then failed attempts by class."""
     parts = []
     for provider in sorted({p for p, _ in counts}):
         got = {o: n for (p, o), n in counts.items() if p == provider and n > 0}
-        kinds = ("ok", "cached", "missing", "failed")
+        kinds = ("ok", "cached", "missing", "skipped", "failed")
         answers = [f"{got[o]} {o}" for o in kinds if o in got]
         errors = [f"{o}x{n}" for o, n in sorted(got.items()) if o not in kinds]
         if answers or errors:
@@ -698,9 +701,9 @@ def resolve_references(
 
     The file's one public orchestrator. Each printed ref is resolved locally (no per-ref
     network) against, in order: (1) the caller's OWN references (papis ``citations:``, tagged
-    match="papis"), then (2) the source paper's references fetched ONCE from S2/OpenAlex
-    (match="bulk"); whatever neither covers falls back to a per-entry provider search. The S2
-    fetch is SKIPPED entirely when the caller's references already cover every printed ref --
+    match="papis"), then (2) the source paper's references fetched ONCE from OpenAlex/S2 in
+    ``title_search_order`` (match="bulk"); whatever neither covers falls back to a per-entry
+    provider search. The list fetch is SKIPPED when the caller's references cover every ref --
     so a paper with complete papis citations resolves with zero network. Deliberately does NOT
     call ``extract_references`` itself -- cli.py owns sequencing. Output entries: ``{page,
     number, raw_text, ...resolved fields..., verified, match, type}``, in input order; a

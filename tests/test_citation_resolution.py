@@ -609,6 +609,41 @@ def test_source_references_ask_openalex_first_by_doi_or_title(monkeypatch):
     assert asked == [("doi", "10.1/x"), ("title", "My Precise Book Title")]
 
 
+def test_default_order_asks_openalex_by_title_when_s2_is_short(monkeypatch):
+    # default order (crossref, semanticscholar, openalex): S2 first; with no DOI, OpenAlex
+    # is now asked by title to fill the gap
+    monkeypatch.setattr(
+        cr, "s2_paper_id", lambda cfg, **kw: ("PID", {"title": "My Precise Book Title"})
+    )
+    monkeypatch.setattr(cr, "s2_references", lambda pid, cfg: [])
+    monkeypatch.setattr(
+        cr,
+        "openalex_source",
+        lambda cfg, doi=None, title=None: (
+            ({"title": "My Precise Book Title"}, ["W1"])
+            if title
+            else pytest.fail("no DOI: by title")
+        ),
+    )
+    monkeypatch.setattr(cr, "openalex_hydrate", lambda ids, cfg: [{"title": "Ref"}])
+    out = cr._source_references(cr.SourcePaper(title="My Precise Book Title"), _cfg(), 3)
+    assert out == [{"title": "Ref"}]
+
+
+def test_an_openalex_list_that_hydrates_nothing_is_flagged(monkeypatch, caplog):
+    caplog.set_level("INFO", logger=cr.__name__)
+    cfg = _cfg(title_search_order=["openalex"])
+    monkeypatch.setattr(
+        cr, "openalex_source", lambda cfg, doi=None, title=None: ({"title": "B"}, ["W1", "W2"])
+    )
+    monkeypatch.setattr(cr, "openalex_hydrate", lambda ids, cfg: [{"title": "only one"}])
+    cr._source_references(cr.SourcePaper(doi="10.1/b"), cfg, 5)
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]  # 1 of 2: fine
+    monkeypatch.setattr(cr, "openalex_hydrate", lambda ids, cfg: [])
+    cr._source_references(cr.SourcePaper(doi="10.1/b"), cfg, 5)
+    assert [r for r in caplog.records if r.levelname == "WARNING"]  # none of 2: warn
+
+
 def test_source_references_reject_an_openalex_title_hit_for_another_work(monkeypatch):
     cfg = _cfg(title_search_order=["openalex"])
     monkeypatch.setattr(

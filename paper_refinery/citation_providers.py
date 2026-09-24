@@ -210,6 +210,8 @@ def reset_provider_state() -> None:
     with _cooldown_lock:
         _rate_limited_streak.clear()
         _cooling_until.clear()
+    with _IMPATIENT_LOCK:
+        _IMPATIENT.clear()
     _ERROR_CLASSES_WARNED.clear()
 
 
@@ -308,15 +310,20 @@ def _cache_path(url: str, cfg: CitationConfig) -> Path | None:
     return cache_path(cfg.api_cache_dir, hashlib.sha256(key.encode()).hexdigest())
 
 
-# Reference-list calls get cfg.bulk_retry_attempts, but only while the last such call did not
-# exhaust its retries on a retryable error: a sustained outage then costs one long wait per
-# process, not one per paper. Any successful list call restores the patience.
-_BULK_PATIENCE = threading.Event()
-_BULK_PATIENCE.set()
+# Reference-list calls get cfg.bulk_retry_attempts, per provider, only while that provider's
+# last list call did not exhaust its retries on a retryable error: a sustained outage then
+# costs one long wait per process, not one per paper, and one provider succeeding does not
+# re-arm another's wait. A successful list call from the provider restores its patience.
+_IMPATIENT: set[str] = set()
+_IMPATIENT_LOCK = threading.Lock()
 
 
-def _list_attempts(cfg: CitationConfig) -> int:
-    return cfg.bulk_retry_attempts if _BULK_PATIENCE.is_set() else cfg.api_retry_attempts
+def _list_attempts(cfg: CitationConfig, provider: str) -> int:
+    if provider == "semanticscholar" and cfg.s2_retry_attempts > 0:
+        return cfg.s2_retry_attempts  # asked once (or as set) everywhere, lists included
+    with _IMPATIENT_LOCK:
+        impatient = provider in _IMPATIENT
+    return cfg.api_retry_attempts if impatient else cfg.bulk_retry_attempts
 
 
 def _record_failure(url: str, exc: Exception, cfg: CitationConfig, attempts: int | None) -> None:
@@ -329,9 +336,10 @@ def _record_failure(url: str, exc: Exception, cfg: CitationConfig, attempts: int
     _warn_once_if_key_rejected(url, exc, cfg)
     logger.debug("provider fetch failed for %s: %r", _without_mailto(url), exc)
     if attempts and attempts > cfg.api_retry_attempts and is_retryable(exc):
-        _BULK_PATIENCE.clear()
+        with _IMPATIENT_LOCK:
+            _IMPATIENT.add(_provider_label(url, cfg))
         logger.warning(
-            "%s kept failing after %d attempts; reference-list calls use the ordinary "
+            "%s kept failing after %d attempts; its reference-list calls use the ordinary "
             "retry budget until one succeeds",
             _provider_label(url, cfg),
             attempts,
@@ -370,7 +378,7 @@ def _get_json(
             return cached
 
     provider = _provider_label(url, cfg)
-    if attempts is None and _cooling_down(provider):
+    if _cooling_down(provider):  # list calls too: a cooling provider makes nobody wait
         PROVIDER_STATS.add(provider, "skipped")
         return None
 
@@ -400,7 +408,8 @@ def _get_json(
     if attempts is None:
         _after_lookup(provider, cfg, rate_limited=False)
     else:  # a list call succeeded, whatever its budget
-        _BULK_PATIENCE.set()
+        with _IMPATIENT_LOCK:
+            _IMPATIENT.discard(provider)
     if cache and data is not None:
         write_json(cache, data)
     return data
@@ -484,7 +493,7 @@ def s2_paper_id(
             cfg,
             headers=_s2_headers(cfg),
             before_fetch=lambda: _s2_throttle(cfg),
-            attempts=_list_attempts(cfg),
+            attempts=_list_attempts(cfg, "semanticscholar"),
         )
         cand = normalize_s2(data)
         return (data["paperId"], cand) if (data and data.get("paperId") and cand) else None
@@ -522,7 +531,7 @@ def s2_references(paper_id: str, cfg: CitationConfig) -> list[dict] | None:
         cfg,
         headers=_s2_headers(cfg),
         before_fetch=lambda: _s2_throttle(cfg),
-        attempts=_list_attempts(cfg),
+        attempts=_list_attempts(cfg, "semanticscholar"),
     )
     if data is None:
         return None
@@ -577,7 +586,9 @@ def openalex_source(
     normalized record and the OpenAlex ids of the works it cites. ``None`` on a miss or a
     failed fetch."""
     # keyless OpenAlex answers 429 for lack of budget, which waiting never fixes
-    attempts = _list_attempts(cfg) if os.environ.get(cfg.openalex_api_key_env or "") else None
+    attempts = (
+        _list_attempts(cfg, "openalex") if os.environ.get(cfg.openalex_api_key_env or "") else None
+    )
     if doi:
         url = (
             f"{cfg.openalex_api_base}/works/doi:{urllib.parse.quote(doi)}"
@@ -604,7 +615,9 @@ def openalex_source(
 def openalex_hydrate(ids: list[str], cfg: CitationConfig) -> list[dict]:
     """The works behind OpenAlex ``ids`` as normalized candidates, in batched calls
     (<=100 ids each, OpenAlex's OR-filter cap), abstracts reconstructed."""
-    attempts = _list_attempts(cfg) if os.environ.get(cfg.openalex_api_key_env or "") else None
+    attempts = (
+        _list_attempts(cfg, "openalex") if os.environ.get(cfg.openalex_api_key_env or "") else None
+    )
     candidates: list[dict] = []
     for id_batch in itertools.batched(ids, 100):
         batch = "|".join(id_batch)

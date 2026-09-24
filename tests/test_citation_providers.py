@@ -222,10 +222,10 @@ def test_get_json_attempts_overrides_the_retry_budget(tmp_path, monkeypatch):
 
 @pytest.fixture
 def patient(monkeypatch):
-    # the circuit breaker is process-wide; each test starts patient
-    cp._BULK_PATIENCE.set()
+    # breakers, cooldowns and counts are process-wide; each test starts clean
+    cp.reset_provider_state()
     yield
-    cp._BULK_PATIENCE.set()
+    cp.reset_provider_state()
 
 
 def test_source_list_calls_use_the_bulk_retry_budget(monkeypatch, patient):
@@ -274,7 +274,8 @@ def test_exhausted_list_call_trips_the_breaker_until_one_succeeds(tmp_path, monk
 
     monkeypatch.setattr(cp, "call_with_backoff", failing)
     assert cp.s2_references("P1", cfg) is None
-    assert cp._list_attempts(cfg) == 2  # later list calls: ordinary budget
+    assert cp._list_attempts(cfg, "semanticscholar") == 2  # later S2 list calls: ordinary
+    assert cp._list_attempts(cfg, "openalex") == 7  # other providers keep their patience
 
     seen = []
     monkeypatch.setattr(
@@ -282,7 +283,60 @@ def test_exhausted_list_call_trips_the_breaker_until_one_succeeds(tmp_path, monk
     )
     assert cp.s2_references("P2", cfg) == []
     assert seen == [2]
-    assert cp._list_attempts(cfg) == 7  # a list call succeeding restores the patience
+    assert cp._list_attempts(cfg, "semanticscholar") == 7  # its own success restores it
+
+
+def test_another_providers_success_does_not_rearm_s2s_long_wait(tmp_path, monkeypatch, patient):
+    # a keyed OpenAlex list succeeding must not give S2 back its 7-attempt wait per paper
+    cfg = _cfg(api_cache_dir=str(tmp_path), api_retry_attempts=2, bulk_retry_attempts=7)
+    throttled = _http_error("https://api.semanticscholar.org/x", 429)
+
+    def failing(fn, attempts, delay):
+        raise throttled
+
+    monkeypatch.setattr(cp, "call_with_backoff", failing)
+    cp.s2_references("P1", cfg)
+    monkeypatch.setattr(cp, "call_with_backoff", lambda fn, attempts, delay: {"results": []})
+    cp._get_json(f"{cfg.openalex_api_base}/works?filter=x", cfg, attempts=7)
+    assert cp._list_attempts(cfg, "semanticscholar") == 2
+
+
+def test_s2_list_calls_honour_s2_retry_attempts(monkeypatch, patient):
+    cfg = _cfg(bulk_retry_attempts=7, s2_retry_attempts=1)
+    assert cp._list_attempts(cfg, "semanticscholar") == 1
+    assert cp._list_attempts(cfg, "openalex") == 7
+
+
+def test_cooldown_skips_list_calls_but_serves_the_cache(tmp_path, monkeypatch, patient):
+    cfg = _cfg(api_cache_dir=str(tmp_path), api_retry_attempts=1, provider_cooldown_s=60)
+    s2 = f"{cfg.s2_api_base}/paper/"
+    monkeypatch.setattr(cp, "call_with_backoff", lambda fn, attempts, delay: {"cached": 1})
+    assert cp._get_json(s2 + "cached-one", cfg) == {"cached": 1}  # now in the cache
+
+    def throttled(fn, attempts, delay):
+        raise _http_error(s2, 429)
+
+    monkeypatch.setattr(cp, "call_with_backoff", throttled)
+    for q in "abc":
+        cp._get_json(s2 + "search?query=" + q, cfg)  # three 429s: cooldown starts
+    assert cp._get_json(s2 + "cached-one", cfg) == {"cached": 1}  # cache still served
+    monkeypatch.setattr(cp, "call_with_backoff", lambda *a: pytest.fail("cooling: no request"))
+    assert cp._get_json(s2 + "P/references", cfg, attempts=7) is None  # list call skipped
+
+
+def test_cooldown_zero_disables_it(tmp_path, monkeypatch, patient):
+    cfg = _cfg(api_cache_dir=str(tmp_path), api_retry_attempts=1, provider_cooldown_s=0)
+    s2 = f"{cfg.s2_api_base}/paper/search?query="
+    calls = []
+
+    def throttled(fn, attempts, delay):
+        calls.append(1)
+        raise _http_error(s2, 429)
+
+    monkeypatch.setattr(cp, "call_with_backoff", throttled)
+    for q in "abcde":
+        cp._get_json(s2 + q, cfg)
+    assert len(calls) == 5
 
 
 def test_non_retryable_list_failure_keeps_patience(tmp_path, monkeypatch, patient):
@@ -295,7 +349,7 @@ def test_non_retryable_list_failure_keeps_patience(tmp_path, monkeypatch, patien
 
     monkeypatch.setattr(cp, "call_with_backoff", failing)
     assert cp._get_json("https://api.semanticscholar.org/a", cfg, attempts=7) is None
-    assert cp._list_attempts(cfg) == 7
+    assert cp._list_attempts(cfg, "semanticscholar") == 7
 
 
 @pytest.fixture

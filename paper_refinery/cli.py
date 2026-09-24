@@ -231,7 +231,7 @@ def _run_citations(
     ``extracted`` (below) and builds citekeys from ``resolved``.
 
     The source paper (from the caller's ``source`` bundle if given -- doi/title/year/authors
-    -- else the OCR'd title) drives the S2 bulk-references fast-path in ``resolve_references``;
+    -- else the OCR'd title) drives the reference-list fast-path in ``resolve_references``;
     unidentified/unmatched entries fall back to the per-entry provider search.
     """
     texts = [r["text"] for r in parsed.references]
@@ -943,7 +943,7 @@ def _setup_logging() -> None:
 @click.option(
     "--doi",
     default=None,
-    help="Source paper DOI -- enables the S2 bulk-references fast-path (one call instead "
+    help="Source paper DOI -- enables the reference-list fast-path (one call instead "
     "of a per-reference search). Without it the OCR'd title is tried opportunistically.",
 )
 @click.option(
