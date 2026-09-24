@@ -888,7 +888,7 @@ def test_citation_stage_drops_an_index_block_and_stays_aligned(tmp_path, monkeyp
         {"page": 2, "number": None, "text": f"{n}, A. {i + 1}, {i + 20}"}
         for i, n in enumerate(["Ahn", "Bach", "Cover", "Duda", "Efron", "Fan"])
     ]
-    parsed = ParseResult(markdown="MD", references=[real[0], *index, real[1]])
+    parsed = ParseResult(markdown="MD", references=[*real, *index])
     seen = {}
 
     def fake_extract(texts, cfg, **kw):

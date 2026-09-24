@@ -438,8 +438,13 @@ def test_only_a_run_of_index_lines_is_dropped():
 
     real = [_raw("Hastie, T. (2009). The Elements, Springer.")]
     index = [_raw(f"{name}, A. {i + 1}, {i + 10}") for i, name in enumerate("VWXYZ")]
-    kept, dropped = drop_index_entries(real + index + real)
-    assert kept == real + real and dropped == 5
+    kept, dropped = drop_index_entries(real + index)
+    assert kept == real and dropped == 5
+    # the index must be the list's tail: a yearless block mid-list stays
+    assert drop_index_entries(real + index + real) == (real + index + real, 0)
+    assert drop_index_entries(real + index[:4]) == (real + index[:4], 0)  # 4: too short
+    assert drop_index_entries(index) == ([], 5)
+    assert drop_index_entries([]) == ([], 0)
     # isolated index-like lines, e.g. short references without a year, all stay
     lone = [
         _raw("Knuth, D. The Art of Computer Programming, Vol. 1."),

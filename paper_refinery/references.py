@@ -214,25 +214,20 @@ _MIN_INDEX_RUN = 5
 
 
 def drop_index_entries(references: list[RawReference]) -> tuple[list[RawReference], int]:
-    """The references without back-of-book index blocks, and how many were dropped.
+    """The references without a trailing back-of-book index, and how many were dropped.
 
-    Only a run of at least ``_MIN_INDEX_RUN`` consecutive index-like entries goes: an
-    index is a long block (Hastie's was 538 lines), while a lone short reference without
-    a year ("Knuth, D. The Art of Computer Programming, Vol. 1.") can look like an index
-    line and must stay. Applied at the citation stage, so it also cleans parses restored
-    from an OCR checkpoint."""
-    flags = [is_index_entry(r["text"]) for r in references]
-    drop = [False] * len(flags)
-    start = 0
-    while start < len(flags):
-        end = start
-        while end < len(flags) and flags[end]:
-            end += 1
-        if end - start >= _MIN_INDEX_RUN:
-            drop[start:end] = [True] * (end - start)
-        start = end + 1
-    kept = [r for r, d in zip(references, drop, strict=True) if not d]
-    return kept, len(references) - len(kept)
+    Only a run of at least ``_MIN_INDEX_RUN`` index-like entries that reaches the end of
+    the list goes: an index is a long block after the bibliography (Hastie's was 538
+    lines), while a lone short reference without a year ("Knuth, D. The Art of Computer
+    Programming, Vol. 1."), or even a block of yearless old-style journal references in
+    the middle of a list, can look like index lines and must stay. Applied at the
+    citation stage, so it also cleans parses restored from an OCR checkpoint."""
+    start = len(references)
+    while start > 0 and is_index_entry(references[start - 1]["text"]):
+        start -= 1
+    if len(references) - start < _MIN_INDEX_RUN:
+        return list(references), 0
+    return references[:start], len(references) - start
 
 
 _MAX_TRAILING_BOILERPLATE_CHECK = 3
