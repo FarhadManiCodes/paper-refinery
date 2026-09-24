@@ -65,8 +65,25 @@ def _s2_throttle(cfg: CitationConfig) -> None:
         _s2_last_call = time.monotonic()
 
 
+_MAILTO_PARAM_RE = re.compile(r"&mailto=[^&]*")
+
+
+def _mailto(cfg: CitationConfig) -> str:
+    return cfg.mailto or os.environ.get(cfg.mailto_env or "", "")
+
+
+def _without_mailto(url: str) -> str:
+    """The URL as cached and logged: the contact address is not part of a lookup's identity."""
+    return _MAILTO_PARAM_RE.sub("", url)
+
+
+def _polite(url: str, cfg: CitationConfig) -> bool:
+    return url.startswith((cfg.crossref_api_base, cfg.openalex_api_base))
+
+
 def _cache_path(url: str, cfg: CitationConfig) -> Path | None:
-    return cache_path(cfg.api_cache_dir, hashlib.sha256(url.encode()).hexdigest())
+    key = _without_mailto(url)
+    return cache_path(cfg.api_cache_dir, hashlib.sha256(key.encode()).hexdigest())
 
 
 def _get_json(
@@ -88,7 +105,7 @@ def _get_json(
         if isinstance(cached, dict):
             return cached
 
-    base_headers = {"User-Agent": _user_agent(cfg)}
+    base_headers = {"User-Agent": _user_agent(cfg, url)}
     base_headers.update(headers or {})
 
     def fetch():
@@ -101,17 +118,17 @@ def _get_json(
     try:
         data = call_with_backoff(fetch, cfg.api_retry_attempts, cfg.api_retry_base_delay)
     except Exception as exc:
-        logger.debug("provider fetch failed for %s: %r", url, exc)
+        logger.debug("provider fetch failed for %s: %r", _without_mailto(url), exc)
         return None
     if cache and data is not None:
         write_json(cache, data)
     return data
 
 
-def _user_agent(cfg: CitationConfig) -> str:
+def _user_agent(cfg: CitationConfig, url: str) -> str:
     ua = "paper-refinery/0.1"
-    if cfg.mailto:
-        ua += f" (mailto:{cfg.mailto})"  # CrossRef/OpenAlex polite pool
+    if (mailto := _mailto(cfg)) and _polite(url, cfg):
+        ua += f" (mailto:{mailto})"  # CrossRef/OpenAlex polite pool only
     return ua
 
 
@@ -225,8 +242,8 @@ def crossref_search_more(title: str, cfg: CitationConfig, n: int) -> list[dict]:
     """Top ``n`` hits, best first; ``n=1`` reproduces ``crossref_search``'s cached URL."""
     q = urllib.parse.quote(title)
     url = f"{cfg.crossref_api_base}/works?query.bibliographic={q}&rows={n}"
-    if cfg.mailto:
-        url += f"&mailto={urllib.parse.quote(cfg.mailto)}"
+    if mailto := _mailto(cfg):
+        url += f"&mailto={urllib.parse.quote(mailto)}"
     data = _get_json(url, cfg)
     return ((data or {}).get("message") or {}).get("items") or []
 
@@ -239,8 +256,8 @@ def crossref_search(title: str, cfg: CitationConfig) -> dict | None:
 def openalex_search_more(title: str, cfg: CitationConfig, n: int) -> list[dict]:
     """Top ``n`` hits, best first; ``n=1`` reproduces ``openalex_search``'s cached URL."""
     url = f"{cfg.openalex_api_base}/works?search={urllib.parse.quote(title)}&per-page={n}"
-    if cfg.mailto:
-        url += f"&mailto={urllib.parse.quote(cfg.mailto)}"
+    if mailto := _mailto(cfg):
+        url += f"&mailto={urllib.parse.quote(mailto)}"
     data = _get_json(url, cfg)
     return (data or {}).get("results") or []
 
@@ -273,8 +290,8 @@ def openalex_references(doi: str, cfg: CitationConfig) -> list[dict] | None:
             f"{cfg.openalex_api_base}/works?filter=openalex_id:{batch}"
             f"&per-page=100&select={_OPENALEX_FIELDS}"
         )
-        if cfg.mailto:
-            url += f"&mailto={urllib.parse.quote(cfg.mailto)}"
+        if mailto := _mailto(cfg):
+            url += f"&mailto={urllib.parse.quote(mailto)}"
         data = _get_json(url, cfg)
         for work in (data or {}).get("results") or []:
             cand = normalize_openalex(work)

@@ -161,6 +161,10 @@ class CitationConfig:
     mailto: str = ""
     #   contact email for CrossRef/OpenAlex "polite pool" (better rate limits & support);
     #   optional but recommended -- set it in config.toml, not here
+    mailto_env: str = "REFINERY_MAILTO"
+    #   or keep it out of config files: a secrets *.env setting this variable is used
+    #   when mailto is empty. Either way it is sent to CrossRef and OpenAlex only, never
+    #   to Semantic Scholar, and kept out of cache keys and logs
     request_timeout_s: float = 30.0
     max_workers: int = 4  # concurrent per-reference resolutions
     api_retry_attempts: int = 2

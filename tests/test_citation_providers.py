@@ -304,3 +304,45 @@ def test_openalex_references_hydrates_referenced_works(monkeypatch):
 def test_openalex_references_none_when_no_referenced_works(monkeypatch):
     monkeypatch.setattr(cp, "_get_json", lambda *a, **k: {"referenced_works": []})
     assert cp.openalex_references("10.1/x", _cfg()) is None
+
+
+# ---------------------------------------------------------------------------
+# polite-pool contact (mailto)
+# ---------------------------------------------------------------------------
+
+
+def test_mailto_goes_to_crossref_and_openalex_but_not_semantic_scholar(monkeypatch):
+    from paper_refinery import citation_providers as cp
+    from paper_refinery.config import CitationConfig
+
+    monkeypatch.setenv("REFINERY_MAILTO", "me@example.org")
+    urls = []
+    monkeypatch.setattr(cp, "_get_json", lambda url, cfg, **kw: urls.append(url) or None)
+    cfg = CitationConfig(s2_min_interval_s=0.0)
+    cp.crossref_search("A title", cfg), cp.openalex_search("A title", cfg)
+    cp.s2_search("A title", cfg)
+    crossref, openalex, s2 = urls
+    assert crossref.endswith("&mailto=me%40example.org")
+    assert openalex.endswith("&mailto=me%40example.org")
+    assert "mailto" not in s2
+    assert "me@example.org" in cp._user_agent(cfg, crossref)
+    assert "me@example.org" in cp._user_agent(cfg, openalex)
+    assert "me@example.org" not in cp._user_agent(cfg, s2)
+
+
+def test_config_mailto_wins_over_the_environment(monkeypatch):
+    from paper_refinery import citation_providers as cp
+    from paper_refinery.config import CitationConfig
+
+    monkeypatch.setenv("REFINERY_MAILTO", "env@example.org")
+    assert cp._mailto(CitationConfig(mailto="cfg@example.org")) == "cfg@example.org"
+    assert cp._mailto(CitationConfig()) == "env@example.org"
+
+
+def test_mailto_is_not_part_of_the_cache_key():
+    from paper_refinery import citation_providers as cp
+    from paper_refinery.config import CitationConfig
+
+    cfg = CitationConfig(api_cache_dir="/tmp/x")
+    plain = "https://api.crossref.org/works?query.bibliographic=T&rows=1"
+    assert cp._cache_path(plain, cfg) == cp._cache_path(plain + "&mailto=me%40example.org", cfg)
