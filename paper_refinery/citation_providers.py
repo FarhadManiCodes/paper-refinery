@@ -558,20 +558,33 @@ def crossref_search(title: str, cfg: CitationConfig) -> dict | None:
     return items[0] if items else None
 
 
-_OPENALEX_WILDCARD_RE = re.compile(r"[?*]")
+_OPENALEX_WILDCARD_RE = re.compile(r"[?*~]")
+_OPENALEX_OPERATOR_RE = re.compile(r"\b(AND|OR|NOT)\b")
 
 
 def _openalex_query(title: str) -> str:
-    """A title as an OpenAlex search: ``?`` and ``*`` are wildcards there, and the default
-    (stemmed) search rejects them with HTTP 400 ("Robust principal component analysis?",
-    2026-09-24), so they become spaces. A title without them keeps its cached URL."""
-    if not _OPENALEX_WILDCARD_RE.search(title):
-        return title
-    return " ".join(_OPENALEX_WILDCARD_RE.sub(" ", title).split())
+    """A title as an OpenAlex search, with its search syntax neutralised:
+
+    - ``?``, ``*`` and ``~`` are wildcard/fuzzy operators, which the default (stemmed)
+      search rejects with HTTP 400 ("Robust principal component analysis?", 2026-09-24),
+      so they become spaces;
+    - uppercase AND/OR/NOT are boolean operators, so an all-caps title such as "WHY SGD
+      DOES NOT CONVERGE" would silently exclude the paper; they are lowercased (search is
+      case-insensitive, so only the operator meaning goes).
+
+    A title with none of these keeps its URL, so cached answers still hit."""
+    query = title
+    if _OPENALEX_WILDCARD_RE.search(query):
+        query = " ".join(_OPENALEX_WILDCARD_RE.sub(" ", query).split())
+    if _OPENALEX_OPERATOR_RE.search(query):
+        query = _OPENALEX_OPERATOR_RE.sub(lambda m: m.group(1).lower(), query)
+    return query
 
 
 def openalex_search_more(title: str, cfg: CitationConfig, n: int) -> list[dict]:
     """Top ``n`` hits, best first; ``n=1`` reproduces ``openalex_search``'s cached URL."""
+    if not _openalex_query(title).strip():
+        return []  # a title of wildcards only: nothing to search for
     query = urllib.parse.quote(_openalex_query(title))
     url = f"{cfg.openalex_api_base}/works?search={query}&per-page={n}"
     if mailto := _mailto(cfg, "openalex"):
@@ -607,7 +620,7 @@ def openalex_source(
             f"{cfg.openalex_api_base}/works/doi:{urllib.parse.quote(doi)}"
             f"?select={_OPENALEX_SOURCE_FIELDS}"
         )
-    elif title:
+    elif title and _openalex_query(title).strip():
         url = (
             f"{cfg.openalex_api_base}/works?search={urllib.parse.quote(_openalex_query(title))}"
             f"&per-page=1&select={_OPENALEX_SOURCE_FIELDS}"

@@ -559,6 +559,21 @@ def test_openalex_title_searches_drop_wildcards(monkeypatch):
     assert not any("%3F" in u or "%2A" in u for u in urls)
 
 
+def test_openalex_query_neutralises_search_syntax():
+    q = cp._openalex_query
+    title = "Convex  Optimization"
+    assert q(title) is title  # untouched, byte for byte: cache keys unchanged
+    assert q("What? A study of *stars* ~10 nm") == "What A study of stars 10 nm"
+    assert q("WHY SGD DOES NOT CONVERGE AND OR") == "WHY SGD DOES not CONVERGE and or"
+    assert q("NOTATION FOR ORBITS") == "NOTATION FOR ORBITS"  # whole words only
+
+
+def test_a_title_of_only_wildcards_is_not_searched(monkeypatch):
+    monkeypatch.setattr(cp, "_get_json", lambda *a, **k: pytest.fail("no request"))
+    assert cp.openalex_search_more("???", _cfg(), 5) == []
+    assert cp.openalex_source(_cfg(), title="* *") is None
+
+
 def test_s2_paper_id_by_doi_returns_id_and_candidate(monkeypatch):
     _patch_get_json(
         monkeypatch,
