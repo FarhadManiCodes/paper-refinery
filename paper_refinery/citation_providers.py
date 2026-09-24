@@ -141,8 +141,8 @@ _BULK_PATIENCE = threading.Event()
 _BULK_PATIENCE.set()
 
 
-def _list_attempts(cfg: CitationConfig) -> int | None:
-    return cfg.bulk_retry_attempts if _BULK_PATIENCE.is_set() else None
+def _list_attempts(cfg: CitationConfig) -> int:
+    return cfg.bulk_retry_attempts if _BULK_PATIENCE.is_set() else cfg.api_retry_attempts
 
 
 def _get_json(
@@ -192,11 +192,11 @@ def _get_json(
             logger.warning(
                 "%s kept failing after %d attempts; reference-list calls use the ordinary "
                 "retry budget until one succeeds",
-                _provider_of(url, cfg) or "provider",
+                _provider_of(url, cfg) or urllib.parse.urlsplit(url).hostname,
                 attempts,
             )
         return None
-    if attempts:
+    if attempts is not None:  # a list call succeeded, whatever its budget
         _BULK_PATIENCE.set()
     if cache and data is not None:
         write_json(cache, data)
@@ -364,7 +364,7 @@ def openalex_references(doi: str, cfg: CitationConfig) -> list[dict] | None:
     when the work isn't found or lists no references.
     """
     # keyless OpenAlex answers 429 for lack of budget, which waiting never fixes
-    attempts = _list_attempts(cfg) if os.environ.get(cfg.openalex_api_key_env) else None
+    attempts = _list_attempts(cfg) if os.environ.get(cfg.openalex_api_key_env or "") else None
     src = _get_json(
         f"{cfg.openalex_api_base}/works/doi:{urllib.parse.quote(doi)}?select=referenced_works",
         cfg,

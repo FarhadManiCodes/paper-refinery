@@ -560,7 +560,9 @@ def _source_references(
             reason = "S2 list fetch failed"
         else:
             reason = "S2 lists no references"
-        logger.warning(
+        # books rarely have a list anywhere: only a failed fetch deserves a warning
+        log = logger.warning if hit is not None and s2_list is None else logger.info
+        log(
             "%s: source reference list unavailable (%s; %s); searching each reference",
             label,
             reason,

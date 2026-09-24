@@ -270,12 +270,16 @@ def test_exhausted_list_call_trips_the_breaker_until_one_succeeds(tmp_path, monk
         raise throttled
 
     monkeypatch.setattr(cp, "call_with_backoff", failing)
-    assert cp._get_json("https://api.semanticscholar.org/a", cfg, attempts=7) is None
-    assert cp._list_attempts(cfg) is None  # later list calls: ordinary budget
+    assert cp.s2_references("P1", cfg) is None
+    assert cp._list_attempts(cfg) == 2  # later list calls: ordinary budget
 
-    monkeypatch.setattr(cp, "call_with_backoff", lambda fn, attempts, delay: {"ok": 1})
-    assert cp._get_json("https://api.semanticscholar.org/b", cfg, attempts=2) == {"ok": 1}
-    assert cp._list_attempts(cfg) == 7  # a success restores the patience
+    seen = []
+    monkeypatch.setattr(
+        cp, "call_with_backoff", lambda fn, attempts, delay: seen.append(attempts) or {"data": []}
+    )
+    assert cp.s2_references("P2", cfg) == []
+    assert seen == [2]
+    assert cp._list_attempts(cfg) == 7  # a list call succeeding restores the patience
 
 
 def test_non_retryable_list_failure_keeps_patience(tmp_path, monkeypatch, patient):
