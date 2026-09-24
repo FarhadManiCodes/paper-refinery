@@ -432,6 +432,19 @@ def test_a_rate_limited_provider_cools_down_then_returns(
     assert cp.PROVIDER_STATS.snapshot()[("semanticscholar", "ok")] == 1
 
 
+def test_s2_can_be_asked_once_without_backoff(tmp_path, monkeypatch, fresh_stats):
+    # S2 last in the order, asked once: a 429 costs one request, not a backoff ladder
+    cfg = _cfg(api_cache_dir=str(tmp_path), api_retry_attempts=5, s2_retry_attempts=1)
+    seen = []
+    monkeypatch.setattr(
+        cp, "call_with_backoff", lambda fn, attempts, delay: seen.append(attempts) or {}
+    )
+    cp._get_json(f"{cfg.s2_api_base}/paper/search?query=x", cfg)
+    cp._get_json(f"{cfg.crossref_api_base}/works?query=x", cfg)
+    cp._get_json(f"{cfg.s2_api_base}/paper/P/references", cfg, attempts=7)  # a list call
+    assert seen == [1, 5, 7]
+
+
 def test_a_404_or_success_resets_the_rate_limit_streak(tmp_path, monkeypatch, fresh_stats):
     cfg = _cfg(api_cache_dir=str(tmp_path), api_retry_attempts=1, provider_cooldown_s=60)
     s2 = f"{cfg.s2_api_base}/paper/search?query="

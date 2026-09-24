@@ -200,6 +200,10 @@ class CitationConfig:
     #   than a single lookup: exponential backoff from api_retry_base_delay, ~2 min at the
     #   default, ~4 min at 4.0. After one exhausts its retries, later list calls use
     #   api_retry_attempts until one succeeds; keyless OpenAlex never gets the long wait
+    s2_retry_attempts: int = 0
+    #   attempts for an ordinary Semantic Scholar lookup (0: api_retry_attempts). Keyless S2
+    #   429s under load; 1 asks it once, no backoff, so it can sit last in the order
+    #   without making a run wait
     provider_cooldown_s: float = 600.0
     #   after 3 lookups in a row end in 429 at one provider, skip it for this long rather
     #   than making every later lookup wait through its backoff (0 disables)
@@ -403,6 +407,21 @@ def _coerce_overlay_value(field_type: object, value: object) -> object:
     return _coerce_scalar_value(field_type, value)
 
 
+def _check_citation(c: CitationConfig, path: Path) -> None:
+    """Cross-field checks the type coercion can't express."""
+    order = c.title_search_order
+    if not order or set(order) - set(TITLE_SEARCH_PROVIDERS) or len(set(order)) != len(order):
+        raise ValueError(
+            f"{path}: [citation] title_search_order takes a non-empty list of distinct names "
+            f"from {', '.join(TITLE_SEARCH_PROVIDERS)}; got {order!r}"
+        )
+    for key in ("api_retry_attempts", "bulk_retry_attempts"):
+        if getattr(c, key) < 1:
+            raise ValueError(f"{path}: [citation] {key} must be at least 1")
+    if c.s2_retry_attempts < 0:
+        raise ValueError(f"{path}: [citation] s2_retry_attempts must be 0 (default) or more")
+
+
 def load_config(path: Path | None = None) -> RefineryConfig:
     """Build a RefineryConfig, first loading API keys (see ``_load_secrets``), then
     overlaying values from a TOML file (XDG-style user config).
@@ -448,13 +467,5 @@ def load_config(path: Path | None = None) -> RefineryConfig:
                     f"{type(value).__name__} ({value!r})"
                 ) from None
             setattr(sub, key, value)
-    order = cfg.citation.title_search_order
-    if not order or set(order) - set(TITLE_SEARCH_PROVIDERS) or len(set(order)) != len(order):
-        raise ValueError(
-            f"{path}: [citation] title_search_order takes a non-empty list of distinct names "
-            f"from {', '.join(TITLE_SEARCH_PROVIDERS)}; got {order!r}"
-        )
-    for key in ("api_retry_attempts", "bulk_retry_attempts"):
-        if getattr(cfg.citation, key) < 1:
-            raise ValueError(f"{path}: [citation] {key} must be at least 1")
+    _check_citation(cfg.citation, path)
     return cfg

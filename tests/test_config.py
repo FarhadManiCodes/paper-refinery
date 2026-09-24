@@ -109,6 +109,13 @@ def test_load_config_title_search_order(tmp_path):
             load_config(path)
 
 
+def test_load_config_rejects_negative_s2_retry_attempts(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("[citation]\ns2_retry_attempts = -1\n")
+    with pytest.raises(ValueError, match="s2_retry_attempts"):
+        load_config(path)
+
+
 def test_load_config_rejects_retry_attempts_below_one(tmp_path):
     path = tmp_path / "config.toml"
     for key in ("api_retry_attempts", "bulk_retry_attempts"):

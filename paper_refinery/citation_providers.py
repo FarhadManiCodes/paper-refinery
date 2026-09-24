@@ -338,6 +338,12 @@ def _record_failure(url: str, exc: Exception, cfg: CitationConfig, attempts: int
         )
 
 
+def _ordinary_attempts(provider: str, cfg: CitationConfig) -> int:
+    if provider == "semanticscholar" and cfg.s2_retry_attempts > 0:
+        return cfg.s2_retry_attempts
+    return cfg.api_retry_attempts
+
+
 def _get_json(
     url: str,
     cfg: CitationConfig,
@@ -385,7 +391,7 @@ def _get_json(
         before_fetch()  # e.g. the S2 throttle -- only on a real fetch, never a cache hit
     try:
         data = call_with_backoff(
-            fetch, attempts or cfg.api_retry_attempts, cfg.api_retry_base_delay
+            fetch, attempts or _ordinary_attempts(provider, cfg), cfg.api_retry_base_delay
         )
     except Exception as exc:
         _record_failure(url, exc, cfg, attempts)
