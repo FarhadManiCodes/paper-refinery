@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from collections import Counter
 from pathlib import Path
 
 from .config import CitationConfig
@@ -129,6 +130,91 @@ def _provider_of(url: str, cfg: CitationConfig) -> str | None:
     return None
 
 
+def _provider_label(url: str, cfg: CitationConfig) -> str:
+    """Provider name for logs and counts; unlike ``_provider_of`` (which decides who gets
+    the key and contact address) it also names S2, and falls back to the host."""
+    if url.startswith(cfg.s2_api_base):
+        return "semanticscholar"
+    return _provider_of(url, cfg) or urllib.parse.urlsplit(url).hostname or "unknown"
+
+
+class ProviderStats:
+    """Process-wide, thread-safe lookup counts per provider: ``ok`` and ``cached`` answers,
+    ``failed`` lookups (retries exhausted), and each failed *attempt* by class (``429``,
+    ``5xx``, ``4xx``, ``timeout``, ``error``). Callers diff two ``snapshot()``s to report
+    one document; documents refined concurrently share the counts."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: Counter[tuple[str, str]] = Counter()
+
+    def add(self, provider: str, outcome: str) -> None:
+        with self._lock:
+            self._counts[(provider, outcome)] += 1
+
+    def snapshot(self) -> Counter[tuple[str, str]]:
+        with self._lock:
+            return Counter(self._counts)
+
+
+PROVIDER_STATS = ProviderStats()
+_ERROR_CLASSES_WARNED: set[tuple[str, str]] = set()
+_ERROR_WARN_LOCK = threading.Lock()
+
+
+def _error_class(exc: BaseException) -> str:
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return "429" if code == 429 else "5xx" if code >= 500 else "4xx"
+    reason = getattr(exc, "reason", exc)
+    if isinstance(exc, TimeoutError) or isinstance(reason, TimeoutError):
+        return "timeout"
+    return "error"
+
+
+def _error_detail(exc: BaseException) -> str:
+    """Status plus the provider's own message (OpenAlex's "Insufficient budget"), short.
+    The key travels in a header, so neither the URL nor the body can carry it."""
+    code = getattr(exc, "code", None)
+    body = ""
+    if code is not None and hasattr(exc, "read"):
+        try:
+            body = exc.read(300).decode("utf-8", "replace")
+        except Exception:
+            body = ""
+    body = " ".join(body.split())[:160]
+    head = f"HTTP {code}" if code is not None else type(exc).__name__
+    return f"{head}: {body}" if body else f"{head} ({exc})"
+
+
+def _note_failed_attempt(url: str, exc: BaseException, cfg: CitationConfig) -> None:
+    """Count every failed attempt, and warn the first time each (provider, class) occurs
+    in this process -- rate limits and exhausted budgets used to show only at DEBUG."""
+    provider, cls = _provider_label(url, cfg), _error_class(exc)
+    PROVIDER_STATS.add(provider, cls)
+    with _ERROR_WARN_LOCK:
+        if (provider, cls) in _ERROR_CLASSES_WARNED:
+            return
+        _ERROR_CLASSES_WARNED.add((provider, cls))
+    detail = _error_detail(exc)
+    if provider == "openalex" and cls == "429" and "budget" in detail.lower():
+        logger.warning(
+            "OpenAlex budget exhausted (%s): its lookups fail until the daily budget resets "
+            "or credit is added; later ones are counted in the progress lines",
+            detail,
+        )
+        return
+    logger.warning(
+        "%s lookup failed (%s) for %s; retried up to the budget, and later %s failures "
+        "from %s are counted in the progress lines",
+        provider,
+        detail,
+        _without_mailto(url),
+        cls,
+        provider,
+    )
+
+
 def _cache_path(url: str, cfg: CitationConfig) -> Path | None:
     key = _without_mailto(url)
     return cache_path(cfg.api_cache_dir, hashlib.sha256(key.encode()).hexdigest())
@@ -167,6 +253,7 @@ def _get_json(
     if cache:
         cached = read_json(cache)  # None on a cache miss or a corrupt entry alike
         if isinstance(cached, dict):
+            PROVIDER_STATS.add(_provider_label(url, cfg), "cached")
             return cached
 
     base_headers = {"User-Agent": _user_agent(cfg, url), **_auth_headers(url, cfg)}
@@ -175,8 +262,12 @@ def _get_json(
     def fetch():
         req = urllib.request.Request(url, headers=base_headers)
         opener = _KEYED_OPENER.open if "Authorization" in base_headers else urllib.request.urlopen
-        with opener(req, timeout=cfg.request_timeout_s) as resp:
-            return json.loads(resp.read())
+        try:
+            with opener(req, timeout=cfg.request_timeout_s) as resp:
+                return json.loads(resp.read())
+        except Exception as exc:
+            _note_failed_attempt(url, exc, cfg)
+            raise
 
     if before_fetch is not None:
         before_fetch()  # e.g. the S2 throttle -- only on a real fetch, never a cache hit
@@ -185,6 +276,7 @@ def _get_json(
             fetch, attempts or cfg.api_retry_attempts, cfg.api_retry_base_delay
         )
     except Exception as exc:
+        PROVIDER_STATS.add(_provider_label(url, cfg), "failed")
         _warn_once_if_key_rejected(url, exc, cfg)
         logger.debug("provider fetch failed for %s: %r", _without_mailto(url), exc)
         if attempts and attempts > cfg.api_retry_attempts and is_retryable(exc):
@@ -192,10 +284,11 @@ def _get_json(
             logger.warning(
                 "%s kept failing after %d attempts; reference-list calls use the ordinary "
                 "retry budget until one succeeds",
-                _provider_of(url, cfg) or urllib.parse.urlsplit(url).hostname,
+                _provider_label(url, cfg),
                 attempts,
             )
         return None
+    PROVIDER_STATS.add(_provider_label(url, cfg), "ok")
     if attempts is not None:  # a list call succeeded, whatever its budget
         _BULK_PATIENCE.set()
     if cache and data is not None:

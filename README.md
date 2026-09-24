@@ -320,6 +320,12 @@ source: SourceMeta = {
   one, in `[citation] title_search_order` (default CrossRef, Semantic Scholar, OpenAlex).
   With an OpenAlex key, `["openalex", "crossref", "semanticscholar"]` avoids most of keyless
   S2's back-off; S2 is still used for printed DOIs and abstracts of CrossRef matches.
+- Resolution logs its progress every 50 references and at the end, with the verified count
+  by route and this document's lookups per provider, e.g. `resolved 250/937 references (180
+  verified: openalex 150, crossref 30), 12 min; lookups: openalex 610 ok, 3 failed [429x5];
+  semanticscholar 40 ok [timeoutx2]`. The first failure of each kind per provider (429, 5xx,
+  4xx, timeout) is logged as a warning with the provider's message, so an exhausted OpenAlex
+  budget is named when it happens; later ones are counted in the progress lines.
 - `references` (the paper's own bibliography — refinery's `{title,doi,year,authors}` shape *or*
   CrossRef-reference keys `article-title`/`DOI`/`author`) are matched against the printed
   references **locally, before any network call** (`match="papis"`). If they cover the whole

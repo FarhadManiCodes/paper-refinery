@@ -22,12 +22,14 @@ import logging
 import re
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import TypedDict
 
 from .citation_providers import (
+    PROVIDER_STATS,
     crossref_search,
     crossref_search_more,
     extract_doi,
@@ -573,6 +575,22 @@ def _source_references(
     return pool or None
 
 
+def format_lookups(counts: Counter[tuple[str, str]]) -> str:
+    """``openalex 610 ok, 400 cached, 3 failed [429x5]; crossref 90 ok`` from a
+    ``ProviderStats`` diff: answers per provider, then failed attempts by class."""
+    parts = []
+    for provider in sorted({p for p, _ in counts}):
+        got = {o: n for (p, o), n in counts.items() if p == provider and n > 0}
+        answers = [f"{got[o]} {o}" for o in ("ok", "cached", "failed") if o in got]
+        errors = [f"{o}x{n}" for o, n in sorted(got.items()) if o not in ("ok", "cached", "failed")]
+        if answers or errors:
+            parts.append(
+                f"{provider} {', '.join(answers) or '0 ok'}"
+                + (f" [{', '.join(errors)}]" if errors else "")
+            )
+    return "; ".join(parts) or "none"
+
+
 def _source_label(source: SourcePaper) -> str:
     if source.doi:
         return f"doi:{source.doi}"
@@ -647,7 +665,9 @@ def resolve_references(
     # say how many are done every ``progress_every`` and at the end
     total = len(raw_references)
     started = time.monotonic()
+    lookups_before = PROVIDER_STATS.snapshot()
     done = verified = 0
+    routes: Counter[str] = Counter()
     progress_lock = threading.Lock()
     logger.info("%s: resolving %d references", label, total)
 
@@ -655,15 +675,20 @@ def resolve_references(
         nonlocal done, verified
         with progress_lock:
             done += 1
-            verified += bool(entry.get("verified"))
+            if entry.get("verified"):
+                verified += 1
+                routes[entry.get("match") or "?"] += 1
             if done == total or (progress_every > 0 and done % progress_every == 0):
+                by_route = ", ".join(f"{k} {v}" for k, v in routes.most_common())
                 logger.info(
-                    "%s: resolved %d/%d references (%d verified), %.0f min",
+                    "%s: resolved %d/%d references (%d verified%s), %.0f min; lookups: %s",
                     label,
                     done,
                     total,
                     verified,
+                    f": {by_route}" if by_route else "",
                     (time.monotonic() - started) / 60,
+                    format_lookups(PROVIDER_STATS.snapshot() - lookups_before),
                 )
 
     def resolve_one(i: int) -> dict:

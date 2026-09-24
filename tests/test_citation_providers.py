@@ -295,6 +295,80 @@ def test_non_retryable_list_failure_keeps_patience(tmp_path, monkeypatch, patien
     assert cp._list_attempts(cfg) == 7
 
 
+@pytest.fixture
+def fresh_stats(monkeypatch):
+    monkeypatch.setattr(cp, "PROVIDER_STATS", cp.ProviderStats())
+    monkeypatch.setattr(cp, "_ERROR_CLASSES_WARNED", set())
+    return cp
+
+
+def _http_error(url, code, body=b""):
+    import io
+
+    return urllib.error.HTTPError(url, code, "", {}, io.BytesIO(body))
+
+
+def test_failed_attempts_warn_once_per_provider_and_class(fresh_stats, caplog):
+    # rate limits and exhausted budgets used to be logged only at DEBUG
+    caplog.set_level("WARNING", logger=cp.__name__)
+    cfg = _cfg()
+    s2 = f"{cfg.s2_api_base}/paper/search?query=x"
+    for _ in range(3):
+        cp._note_failed_attempt(s2, _http_error(s2, 429), cfg)
+    cp._note_failed_attempt(s2, TimeoutError("timed out"), cfg)
+    warnings = [r.getMessage() for r in caplog.records]
+    assert len(warnings) == 2
+    assert warnings[0].startswith("semanticscholar lookup failed (HTTP 429")
+    assert "timeout" in warnings[1]
+    counts = cp.PROVIDER_STATS.snapshot()
+    assert counts[("semanticscholar", "429")] == 3
+    assert counts[("semanticscholar", "timeout")] == 1
+
+
+def test_openalex_budget_exhaustion_is_named(fresh_stats, caplog):
+    caplog.set_level("WARNING", logger=cp.__name__)
+    cfg = _cfg(mailto="me@example.org")
+    url = f"{cfg.openalex_api_base}/works?search=x&mailto=me%40example.org"
+    body = b'{"error": "Insufficient budget", "message": "daily budget used"}'
+    cp._note_failed_attempt(url, _http_error(url, 429, body), cfg)
+    (msg,) = [r.getMessage() for r in caplog.records]
+    assert msg.startswith("OpenAlex budget exhausted (HTTP 429: ")
+    assert "Insufficient budget" in msg
+    assert "example.org" not in msg  # the contact address never reaches a log line
+
+
+def test_get_json_counts_ok_cached_and_failed(tmp_path, monkeypatch, fresh_stats):
+    cfg = _cfg(api_cache_dir=str(tmp_path), api_retry_attempts=1)
+    url = f"{cfg.crossref_api_base}/works?query=x"
+    monkeypatch.setattr(cp, "call_with_backoff", lambda fn, attempts, delay: {"ok": 1})
+    cp._get_json(url, cfg)
+    cp._get_json(url, cfg)  # cache hit
+
+    def failing(fn, attempts, delay):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(cp, "call_with_backoff", failing)
+    cp._get_json(f"{cfg.crossref_api_base}/works?query=y", cfg)
+    counts = cp.PROVIDER_STATS.snapshot()
+    assert counts[("crossref", "ok")] == 1
+    assert counts[("crossref", "cached")] == 1
+    assert counts[("crossref", "failed")] == 1
+
+
+def test_every_failed_attempt_is_counted_through_the_retry_loop(tmp_path, monkeypatch, fresh_stats):
+    cfg = _cfg(api_cache_dir=str(tmp_path), api_retry_attempts=3, api_retry_base_delay=0.0)
+    url = f"{cfg.crossref_api_base}/works?query=z"
+
+    def throttled(req, timeout=None):
+        raise _http_error(url, 429)
+
+    monkeypatch.setattr(cp.urllib.request, "urlopen", throttled)
+    assert cp._get_json(url, cfg) is None
+    counts = cp.PROVIDER_STATS.snapshot()
+    assert counts[("crossref", "429")] == 3
+    assert counts[("crossref", "failed")] == 1
+
+
 def test_s2_paper_id_by_doi_returns_id_and_candidate(monkeypatch):
     _patch_get_json(
         monkeypatch,

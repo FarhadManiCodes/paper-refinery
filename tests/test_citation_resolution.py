@@ -735,7 +735,7 @@ def test_resolve_references_logs_progress(monkeypatch, caplog):
     monkeypatch.setattr(
         cr,
         "verify_and_resolve",
-        lambda extracted, raw_text, cfg: {"verified": raw_text != "3", "match": None},
+        lambda extracted, raw_text, cfg: {"verified": raw_text != "3", "match": "openalex"},
     )
     raw = [{"page": 1, "number": str(i), "text": str(i)} for i in range(1, 6)]
     cr.resolve_references([{}] * 5, raw, _cfg(), label="hastie", progress_every=2)
@@ -747,7 +747,8 @@ def test_resolve_references_logs_progress(monkeypatch, caplog):
         "hastie: resolved 4/5",
         "hastie: resolved 5/5",
     ]
-    assert progress[-1].startswith("hastie: resolved 5/5 references (4 verified), ")
+    assert progress[-1].startswith("hastie: resolved 5/5 references (4 verified: openalex 4), ")
+    assert progress[-1].endswith("; lookups: none")  # the stub made no provider calls
 
     # a total that is a multiple of the interval still gets exactly one final line
     caplog.clear()
@@ -755,6 +756,25 @@ def test_resolve_references_logs_progress(monkeypatch, caplog):
     finals = [r.getMessage() for r in caplog.records if "resolved 4/4" in r.getMessage()]
     assert len(finals) == 1
     assert caplog.records[0].getMessage() == "even: resolving 4 references"
+
+
+def test_format_lookups_lists_answers_then_failed_attempts():
+    from collections import Counter
+
+    counts = Counter(
+        {
+            ("openalex", "ok"): 610,
+            ("openalex", "cached"): 400,
+            ("openalex", "failed"): 3,
+            ("openalex", "429"): 5,
+            ("semanticscholar", "timeout"): 2,
+            ("crossref", "ok"): 0,
+        }
+    )
+    assert cr.format_lookups(counts) == (
+        "openalex 610 ok, 400 cached, 3 failed [429x5]; semanticscholar 0 ok [timeoutx2]"
+    )
+    assert cr.format_lookups(Counter()) == "none"
 
 
 def test_resolve_references_fastpath_falls_back_for_unmatched(monkeypatch):
