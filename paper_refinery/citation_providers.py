@@ -80,6 +80,15 @@ def _without_mailto(url: str) -> str:
     return _MAILTO_PARAM_RE.sub("", url)
 
 
+def _auth_headers(url: str, cfg: CitationConfig) -> dict:
+    """OpenAlex's API key as the bearer header its docs recommend -- never in the URL,
+    so it cannot reach the cache key, a log line, or any other provider."""
+    key = os.environ.get(cfg.openalex_api_key_env or "", "")
+    if key and _provider_of(url, cfg) == "openalex":
+        return {"Authorization": f"Bearer {key}"}
+    return {}
+
+
 def _provider_of(url: str, cfg: CitationConfig) -> str | None:
     if url.startswith(cfg.crossref_api_base):
         return "crossref"
@@ -112,7 +121,7 @@ def _get_json(
         if isinstance(cached, dict):
             return cached
 
-    base_headers = {"User-Agent": _user_agent(cfg, url)}
+    base_headers = {"User-Agent": _user_agent(cfg, url), **_auth_headers(url, cfg)}
     base_headers.update(headers or {})
 
     def fetch():

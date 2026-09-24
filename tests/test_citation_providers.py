@@ -361,3 +361,48 @@ def test_mailto_is_not_part_of_the_cache_key():
     cfg = CitationConfig(api_cache_dir="/tmp/x")
     plain = "https://api.crossref.org/works?query.bibliographic=T&rows=1"
     assert cp._cache_path(plain, cfg) == cp._cache_path(plain + "&mailto=me%40example.org", cfg)
+
+
+def test_openalex_key_is_a_bearer_header_for_openalex_only(monkeypatch):
+    from paper_refinery import citation_providers as cp
+    from paper_refinery.config import CitationConfig
+
+    monkeypatch.setenv("OPENALEX_API_KEY", "k3y")
+    cfg = CitationConfig()
+    for url in ("https://api.openalex.org/works?search=T", "https://api.openalex.org/works/doi:1"):
+        assert cp._auth_headers(url, cfg) == {"Authorization": "Bearer k3y"}
+    for other in ("https://api.crossref.org/works?rows=1", "https://api.semanticscholar.org/x"):
+        assert cp._auth_headers(other, cfg) == {}
+
+
+def test_openalex_key_never_reaches_a_url_or_another_host(monkeypatch):
+    from paper_refinery import citation_providers as cp
+    from paper_refinery.config import CitationConfig
+
+    monkeypatch.setenv("OPENALEX_API_KEY", "k3y")
+    sent = []
+    monkeypatch.setattr(cp, "_cache_path", lambda url, cfg: None)
+    monkeypatch.setattr(cp, "call_with_backoff", lambda fn, *a: fn())
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def urlopen(req, timeout):
+        sent.append((req.full_url, req.get_header("Authorization")))
+        return Resp()
+
+    monkeypatch.setattr(cp.urllib.request, "urlopen", urlopen)
+    cfg = CitationConfig()
+    cp._get_json("https://api.openalex.org/works?search=T", cfg)
+    cp._get_json("https://api.crossref.org/works?q=T", cfg)
+    assert sent == [
+        ("https://api.openalex.org/works?search=T", "Bearer k3y"),
+        ("https://api.crossref.org/works?q=T", None),
+    ]

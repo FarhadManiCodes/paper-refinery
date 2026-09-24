@@ -158,6 +158,10 @@ class CitationConfig:
     #   immediate second call 429s) -- calls are globally throttled to this interval
     crossref_api_base: str = "https://api.crossref.org"
     openalex_api_base: str = "https://api.openalex.org"
+    openalex_api_key_env: str = "OPENALEX_API_KEY"
+    #   OpenAlex requires a (free) key since 2026: without one the daily budget is tiny and
+    #   lookups fail with 429. Set it in a secrets *.env; it is sent to OpenAlex only, as
+    #   an Authorization: Bearer header (never in the URL, cache key or logs)
     mailto: str = ""
     #   contact email for CrossRef/OpenAlex "polite pool" (better rate limits & support);
     #   optional but recommended -- set it in config.toml, not here
