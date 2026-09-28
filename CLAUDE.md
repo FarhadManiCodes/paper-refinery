@@ -7,12 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A standalone preprocessor for **papis-ask**: it turns a PDF into section-aware, overlapping
 text chunks (with figure descriptions, page numbers, and standardized `[surname_year]`
 in-text citekeys) that papis-ask ingests via paper-qa's `Docs.aadd_texts` — replacing
-pypdf's blind char-window chunking. Two finals land next to the PDF: `<pdf>.chunks.json`
-(the hand-off) and `<pdf>.citations.json` (verified/enriched bibliography + in-text
-linking map). Everything reviewable or intermediate goes in `<pdf>.refinery/`:
-`refinery.md` (enriched markdown, citekeys already rewritten — the last human-readable
-form before chunking), `references.md` (raw bibliography), `resolution_report.txt`
-(per-reference verification diff), `figures/`.
+pypdf's blind char-window chunking. A full run writes `<stem>.chunks.json` and sibling
+`<stem>.md` (a math-collapsed review copy with one-based physical PDF page markers), plus
+`<stem>.citations.json` when references are found. `<stem>.refinery/refinery.md` is the
+uncollapsed input for `--from chunk`, which does not refresh the review copy. The work
+directory also holds `references.md`, `resolution_report.txt` and `figures/`.
 
 ## Commands
 
@@ -111,7 +110,7 @@ citation_linking.py      layer 4: deterministic (no LLM) in-text marker detectio
 chunker.py                section-aware split + guaranteed soft-overlap + page ranges ->
                           list[Chunk]
 parse_cache.py           parse checkpoint: persist ParseResult + its raw crops to
-                          <pdf>.refinery/parse_cache/ keyed on pdf-hash + parse-config
+                          <stem>.refinery/parse_cache/ keyed on pdf-hash + parse-config
                           signature, so a re-run skips the (~10-min) OCR pass; parse_pdf_cached()
                           wraps parse_pdf, restoring crops on a hit
 typeset.py                markdown -> typeset PDF via pandoc + xelatex (system binaries, not

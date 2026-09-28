@@ -46,13 +46,18 @@ PDF ── parse (GLM-OCR: cloud/local) ┤                            ├──
 
 ### Outputs
 
-Two finals land next to the PDF, plus a work directory holding everything reviewable:
+A full run writes chunks and a review copy beside the PDF, plus citations when references
+are found. The work directory holds pipeline inputs and diagnostics:
 
 | Path | Contents |
 | --- | --- |
-| `<pdf>.chunks.json` | The hand-off papis-ask ingests via `aadd_texts` — chunks with page ranges. |
-| `<pdf>.citations.json` | Verified/enriched bibliography + the in-text linking map. |
-| `<pdf>.refinery/` | `refinery.md` (enriched markdown, citekeys already rewritten — the last human-readable form before chunking), `references.md` (raw bibliography), `resolution_report.txt` (per-reference verification diff), `figures/`, and `parse_cache/` (the OCR checkpoint). |
+| `<stem>.chunks.json` | The hand-off papis-ask ingests via `aadd_texts` — chunks with page ranges. |
+| `<stem>.citations.json` | Verified/enriched bibliography + the in-text linking map, when references are found. |
+| `<stem>.md` | Human-review copy of enriched markdown, with display math collapsed and one-based physical PDF page markers. |
+| `<stem>.refinery/` | `refinery.md` (uncollapsed enriched markdown used by `--from chunk`), `references.md`, `resolution_report.txt`, `figures/`, and `parse_cache/`. |
+
+A full `refinery` run writes `<stem>.md`; `--from chunk` reads the work copy and does not
+refresh the review copy.
 
 ## OCR backend: cloud (default) or local
 
@@ -195,7 +200,7 @@ In selfhosted mode `ZHIPU_API_KEY` isn't needed; in the default maas mode `HF_TO
 ### CLI
 
 ```bash
-refinery path/to/paper.pdf            # one PDF -> paper.chunks.json, .citations.json, .refinery/
+refinery path/to/paper.pdf            # one PDF -> paper.chunks.json, .citations.json, .md, .refinery/
 refinery-batch a.pdf b.pdf c.pdf      # many PDFs, refined concurrently (each -> its own sidecars)
 refinery-export-citations paper.citations.json   # -> papis/CrossRef `citations:` YAML (copy-paste)
 refinery-typeset path/to/paper.pdf    # PDF (or an already-parsed .md) -> a clean typeset PDF
@@ -210,7 +215,7 @@ re-chunks each saved `refinery.md` only (no OCR/network — for library-wide chu
 paper's known metadata — see the **metadata channel** below. A shell wrapper can drive a whole
 papis library, e.g. `refinery-batch $(papis list --file) && papis ask index`.
 
-`refinery-export-citations <pdf>.citations.json` prints the verified references as a
+`refinery-export-citations <stem>.citations.json` prints the verified references as a
 papis/CrossRef `citations:` YAML block (for pasting into an `info.yaml`); `--all` includes
 unverified entries.
 
@@ -218,7 +223,7 @@ unverified entries.
 contents and inline images — no figure-description or citation-verification stages, so it
 only uses the configured OCR backend for PDF input: the default `maas` mode needs
 `ZHIPU_API_KEY` and network access, while `selfhosted` mode runs locally. Point it at an
-already-parsed markdown file (e.g. a previous run's `<pdf>.refinery/refinery.md` or
+already-parsed markdown file (e.g. a previous run's `<stem>.refinery/refinery.md` or
 `parsed.md`) to skip OCR and its API/backend requirements entirely. `--title`/`--author`
 set an optional title page;
 `--out`/`--work-dir`/`--force-parse` mirror the single-PDF flags below. Typography (font,
@@ -235,7 +240,7 @@ Single-PDF options (all optional; outputs default next to the PDF):
 | Flag | Effect |
 | --- | --- |
 | `--doi DOI` | Source paper DOI — enables the citation fast-path (one bulk reference fetch instead of a per-reference provider search). Without it the OCR'd title is tried. |
-| `--force-parse` | Re-run OCR, bypassing the parse checkpoint in `<pdf>.refinery/parse_cache/`. |
+| `--force-parse` | Re-run OCR, bypassing the parse checkpoint in `<stem>.refinery/parse_cache/`. |
 | `--from chunk` | Re-chunk the saved `refinery.md` only (instant); for tuning chunk policy without re-running the expensive upstream stages. |
 | `--describe-uncaptioned` | Also describe images with no "FIGURE N" caption (one Gemini call each, cached); for visual books. |
 | `--overwrite-edits` | Replace a hand-edited `refinery.md` instead of stopping (a copy is kept either way). |
@@ -293,9 +298,9 @@ never fulfilled (an empty parse is caught and treated as a failure, never writte
 | field | meaning |
 | --- | --- |
 | `chunks: list[Chunk]` | the chunks in memory (also written to `chunks_path`) |
-| `chunks_path: Path` | `<pdf>.chunks.json` — the papis-ask hand-off |
-| `citations_path: Path` | `<pdf>.citations.json` (written only when the paper had references) |
-| `work_dir: Path` | `<pdf>.refinery/` — refinery.md, references.md, figures/, parse_cache/ |
+| `chunks_path: Path` | `<stem>.chunks.json` — the papis-ask hand-off |
+| `citations_path: Path` | `<stem>.citations.json` (written only when the paper had references) |
+| `work_dir: Path` | `<stem>.refinery/` — refinery.md, references.md, figures/, parse_cache/ |
 
 ### The metadata channel (optional; papis integration)
 
@@ -350,7 +355,7 @@ refinery's resolved references back into the papis/CrossRef `citations:` shape (
 
 ### Output shapes
 
-`<pdf>.chunks.json`:
+`<stem>.chunks.json`:
 
 ```jsonc
 {
@@ -365,7 +370,7 @@ refinery's resolved references back into the papis/CrossRef `citations:` shape (
 }
 ```
 
-`<pdf>.citations.json`:
+`<stem>.citations.json`:
 
 ```jsonc
 {
