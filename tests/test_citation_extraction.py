@@ -256,7 +256,8 @@ def test_extract_references_batch_failure_degrades_that_batch_only():
             @staticmethod
             def generate_content(model, contents, config):
                 titles = [m.group(1) for ln in contents.splitlines() if (m := ref_line.match(ln))]
-                if "ref 3" in titles:  # the second batch (indices 3,4,5) returns junk
+                if {"ref 3", "ref 4", "ref 5"} & set(titles):  # every line of the second batch
+                    # returns junk, alone or grouped, so splitting cannot rescue any of them
                     return type("R", (), {"parsed": None})()
                 return type("R", (), {"parsed": [ExtractedReference(title=t) for t in titles]})()
 
@@ -272,6 +273,99 @@ def test_extract_references_batch_failure_degrades_that_batch_only():
         None,
         None,
     ]
+
+
+def _refusing_client(refused: set[str], calls: list[list[str]], max_group: int = 1):
+    """Fake Gemini that returns nothing (the RECITATION case: ``parsed`` None) for any
+    request holding a *refused* title among more than *max_group* lines, and numbered rows
+    for everything else."""
+    import re as _re
+
+    ref_line = _re.compile(r"^L(\d+): (ref \d+)$")
+
+    class FakeClient:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                lines = [
+                    (int(m.group(1)), m.group(2))
+                    for ln in contents.splitlines()
+                    if (m := ref_line.match(ln))
+                ]
+                calls.append([t for _, t in lines])
+                if any(t in refused for _, t in lines) and len(lines) > max_group:
+                    return type("R", (), {"parsed": None})()
+                rows = [ExtractedReference(line=n, title=t) for n, t in lines if t not in refused]
+                return type("R", (), {"parsed": rows})()
+
+    return FakeClient()
+
+
+def test_a_batch_refused_as_a_group_is_recovered_by_splitting_it():
+    calls: list[list[str]] = []
+    raws = [f"ref {i}" for i in range(8)]
+    # refused whenever it holds "ref 5" together with anything else; alone it is fine
+    out = extract_references(raws, CitationConfig(), client=_refusing_client({"ref 5"}, calls))
+
+    assert (
+        [item.get("title") for item in out]
+        == [
+            *raws[:5],
+            None,  # "ref 5" is refused even on its own
+            *raws[6:],
+        ]
+    )
+    assert all(len(c) < len(raws) for c in calls[2:])  # after batch + whole retry: only splits
+
+
+def test_splitting_leaves_a_line_the_model_never_returns_empty_without_shifting_others():
+    calls: list[list[str]] = []
+    raws = [f"ref {i}" for i in range(4)]
+    out = extract_references(
+        raws, CitationConfig(), client=_refusing_client({"ref 0", "ref 3"}, calls)
+    )
+
+    assert [item.get("title") for item in out] == [None, "ref 1", "ref 2", None]
+
+
+def test_a_fully_extracted_batch_makes_no_split_calls():
+    calls: list[list[str]] = []
+    raws = [f"ref {i}" for i in range(6)]
+    out = extract_references(raws, CitationConfig(), client=_refusing_client(set(), calls))
+
+    assert [item.get("title") for item in out] == raws
+    assert calls == [raws]
+
+
+def test_a_failing_split_call_keeps_the_rows_already_recovered(caplog):
+    import re as _re
+
+    ref_line = _re.compile(r"^L(\d+): (ref \d+)$")
+    calls: list[list[str]] = []
+
+    class Scripted:
+        class models:
+            @staticmethod
+            def generate_content(model, contents, config):
+                lines = [
+                    (int(m.group(1)), m.group(2))
+                    for ln in contents.splitlines()
+                    if (m := ref_line.match(ln))
+                ]
+                calls.append([t for _, t in lines])
+                if len(calls) == 1:  # the whole batch refused
+                    return type("R", (), {"parsed": None})()
+                if len(calls) == 2:  # the retry recovers only the last two lines
+                    rows = [ExtractedReference(line=n, title=t) for n, t in lines[2:]]
+                    return type("R", (), {"parsed": rows})()
+                raise ValueError("split broke")  # the split calls for the first two lines
+
+    raws = [f"ref {i}" for i in range(4)]
+    with caplog.at_level(logging.WARNING):
+        out = extract_references(raws, CitationConfig(retry_attempts=1), client=Scripted())
+
+    assert [item.get("title") for item in out] == [None, None, "ref 2", "ref 3"]
+    assert "split retry of 1 line(s) failed" in caplog.text
 
 
 def test_extract_references_batch_that_raises_degrades_that_batch_only(caplog):

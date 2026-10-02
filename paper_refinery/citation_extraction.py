@@ -300,9 +300,7 @@ def _extract_batch(
         " -- retrying them once" if retry_missing else "",
     )
     # A wholly unusable response (e.g. parsed is None) is retried too: it is the same
-    # one extra call, and the retry is on the lines that are actually missing. Worst
-    # case is a response truncated at the output-token cap: the retry resends the same
-    # lines and may truncate again -- bounded at 2x calls, and those lines stay {}.
+    # one extra call, and the retry is on the lines that are actually missing.
     if retry_missing:
         try:
             again = _extract_batch([raw_texts[i] for i in missing], cfg, client, False)
@@ -311,6 +309,25 @@ def _extract_batch(
             return items
         for i, item in zip(missing, again, strict=True):
             items[i] = item
+        return items
+    # The retry itself came back short. Resending the same lines gets the same answer when
+    # the model refuses them as a group (confirmed live: Gemini's RECITATION filter returns
+    # nothing at temperature 0 for a 50-line batch of ordinary bibliography entries, yet
+    # accepts most of the same lines in groups of ten). So halve what is still missing and
+    # retry each half, down to single lines -- a line still refused alone stays {}. Costs
+    # ~2*log2(n) extra calls per stubborn line, and only when the lines were not extracted.
+    if len(missing) > 1:
+        mid = len(missing) // 2
+        for part in (missing[:mid], missing[mid:]):
+            try:
+                got = _extract_batch([raw_texts[i] for i in part], cfg, client, False)
+            except Exception as exc:  # same bonus-only rule as the retry above
+                logger.warning(
+                    "extract_references: split retry of %d line(s) failed (%r)", len(part), exc
+                )
+                continue
+            for i, item in zip(part, got, strict=True):
+                items[i] = item
     return items
 
 
