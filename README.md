@@ -57,7 +57,13 @@ are found. The work directory holds pipeline inputs and diagnostics:
 | `<stem>.refinery/` | `refinery.md` (uncollapsed enriched markdown used by `--from chunk`), `references.md`, `resolution_report.txt`, `figures/`, and `parse_cache/`. |
 
 A full `refinery` run writes `<stem>.md`; `--from chunk` reads the work copy and does not
-refresh the review copy.
+refresh the review copy. `--from review` writes only `<stem>.md` from an existing
+`refinery.md`: no config, API keys, network or OCR, and nothing else is touched (`refinery.md`,
+`chunks.json`, `citations.json` stay as they are). It applies the same math-collapsing code as
+a full run, writes atomically, and records no checksum (only `refinery.md` is checksummed, since
+it alone is read back). The page markers are copied from `refinery.md` unchanged, so they are
+only as correct as that file's. It also works through `refinery-batch --from review`, which
+exits non-zero if any paper lacks a `refinery.md`.
 
 ## OCR backend: cloud (default) or local
 
@@ -242,6 +248,7 @@ Single-PDF options (all optional; outputs default next to the PDF):
 | `--doi DOI` | Source paper DOI — enables the citation fast-path (one bulk reference fetch instead of a per-reference provider search). Without it the OCR'd title is tried. |
 | `--force-parse` | Re-run OCR, bypassing the parse checkpoint in `<stem>.refinery/parse_cache/`. |
 | `--from chunk` | Re-chunk the saved `refinery.md` only (instant); for tuning chunk policy without re-running the expensive upstream stages. |
+| `--from review` | Write only the sibling `<stem>.md` review copy from the saved `refinery.md` (instant; no config, keys, network or OCR). |
 | `--describe-uncaptioned` | Also describe images with no "FIGURE N" caption (one Gemini call each, cached); for visual books. |
 | `--overwrite-edits` | Replace a hand-edited `refinery.md` instead of stopping (a copy is kept either way). |
 | `--out` / `--citations-out` / `--work-dir` | Override the individual output locations. |

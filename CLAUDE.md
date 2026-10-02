@@ -10,7 +10,8 @@ in-text citekeys) that papis-ask ingests via paper-qa's `Docs.aadd_texts` — re
 pypdf's blind char-window chunking. A full run writes `<stem>.chunks.json` and sibling
 `<stem>.md` (a math-collapsed review copy with one-based physical PDF page markers), plus
 `<stem>.citations.json` when references are found. `<stem>.refinery/refinery.md` is the
-uncollapsed input for `--from chunk`, which does not refresh the review copy. The work
+uncollapsed input for `--from chunk`, which does not refresh the review copy;
+`--from review` writes only the review copy from it (no config/keys/network; `cli._review_only`). The work
 directory also holds `references.md`, `resolution_report.txt` and `figures/`.
 
 ## Commands
@@ -179,7 +180,7 @@ cli.py                    orchestrate the above (citations run concurrently with
                           (see citation_resolution) -- `doi=`/`dois=` are shorthands folded in.
                           Four console scripts: `refinery` (one PDF; main()), `refinery-batch`
                           (many PDFs; main_many() -> refine_many; --workers/--ocr-workers/
-                          --force-parse/--from chunk/--meta-map FILE={pdf_path: SourceMeta}),
+                          --force-parse/--from chunk|review/--meta-map FILE={pdf_path: SourceMeta}),
                           `refinery-export-citations` (main_export_citations() ->
                           to_papis_citations -> papis citations: YAML), and `refinery-typeset`
                           (main_typeset() -> _typeset() -> typeset.render_pdf; PDF input is

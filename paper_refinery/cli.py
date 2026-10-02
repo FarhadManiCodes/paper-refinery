@@ -273,6 +273,60 @@ def _run_citations(
     return extracted, resolved
 
 
+def _write_review_copy(pdf: Path, enriched: str) -> Path:
+    """Write the sibling ``<stem>.md`` review copy: ``enriched`` with display math collapsed.
+
+    The one place that transformation lives, shared by the full run and ``--from review``
+    so the two cannot drift. Written atomically (temp file in the same directory, then
+    ``os.replace``) so an interruption never leaves a half-written review copy, and left
+    writable like the full run always did: it is read back by nothing in the pipeline, so
+    it records no checksum (only ``refinery.md`` is guarded -- see ``_MD_CHECKSUM``).
+    """
+    review_out = pdf.with_suffix(".md")
+    text = collapse_math_blocks(enriched)
+    tmp = review_out.with_name(review_out.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, review_out)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return review_out
+
+
+def _review_only(pdf: Path, work_dir: Path) -> list[str]:
+    """`--from review`: write only the sibling review copy from the saved refinery.md.
+
+    No config, secrets, network or OCR: refinery.md is read, never written, and nothing
+    but ``<stem>.md`` is touched (chunks.json, citations.json and the checksum file stay as
+    they are), so it also works for a refinery.md that was built or corrected by hand.
+    """
+    md_path = work_dir / "refinery.md"
+    if not md_path.exists():
+        raise click.ClickException(
+            f"--from review needs {md_path}, but it's missing. "
+            f"Run `refinery {pdf.name}` once first."
+        )
+    review_out = _write_review_copy(pdf, md_path.read_text(encoding="utf-8"))
+    return [f"review copy (collapsed math, from {md_path.name}) -> {review_out}"]
+
+
+def _review_many(pdfs: tuple[Path, ...]) -> int:
+    """``--from review`` for the batch: write each paper's review copy from its saved
+    refinery.md. A paper without one is reported and skipped; returns how many were written."""
+    done = 0
+    for pdf in pdfs:
+        try:
+            summary = _review_only(pdf, pdf.with_suffix(".refinery"))
+        except click.ClickException as exc:
+            logger.warning("review copy skipped for %s: %s", pdf.name, exc.message)
+            continue
+        done += 1
+        click.echo("; ".join(summary))
+    click.echo(f"wrote review copy for {done}/{len(pdfs)} papers")
+    return done
+
+
 def _rechunk(pdf: Path, out: Path, work_dir: Path, cfg: RefineryConfig) -> list[str]:
     """`--from chunk`: re-chunk the saved enriched refinery.md, skipping parse/enrich/
     citations entirely. For iterating on chunk policy without paying the (expensive)
@@ -573,8 +627,7 @@ def _refine_parsed(
         # blocks to one line lets Markdown viewers that only conceal single-line
         # math (confirmed for render-markdown.nvim) render it cleanly, without
         # touching the real pipeline input above.
-        review_out = pdf.with_suffix(".md")
-        review_out.write_text(collapse_math_blocks(enriched))
+        review_out = _write_review_copy(pdf, enriched)
         summary.append(f"review copy (collapsed math) -> {review_out}")
 
     chunks = chunk_markdown(enriched, cfg.chunk)
@@ -970,10 +1023,11 @@ def _setup_logging() -> None:
 @click.option(
     "--from",
     "from_stage",
-    type=click.Choice(["chunk"]),
+    type=click.Choice(["chunk", "review"]),
     default=None,
     help="Resume from a stage, reusing earlier artifacts. 'chunk' re-chunks the saved "
-    "refinery.md only (instant; for chunk-policy tuning).",
+    "refinery.md only (instant; for chunk-policy tuning). 'review' writes only the sibling "
+    "<stem>.md review copy from it (no config, keys, network or OCR).",
 )
 @click.option(
     "--describe-uncaptioned",
@@ -1001,6 +1055,9 @@ def main(
 ) -> None:
     """Parse, figure-enrich, citation-verify, and chunk PDF for papis-ask."""
     _setup_logging()
+    if from_stage == "review":  # before load_config: this stage must not load any secrets
+        click.echo("\n".join(_review_only(pdf, work_dir or pdf.with_suffix(".refinery"))))
+        return
     cfg = load_config()
     cfg.overwrite_edits = overwrite_edits
     if describe_uncaptioned:
@@ -1062,10 +1119,12 @@ def main(
 @click.option(
     "--from",
     "from_stage",
-    type=click.Choice(["chunk"]),
+    type=click.Choice(["chunk", "review"]),
     default=None,
     help="Resume from a stage for every paper. 'chunk' re-chunks each saved refinery.md only "
-    "(instant, no OCR/network; for library-wide chunk-policy tuning). Ignores --workers etc.",
+    "(instant, no OCR/network; for library-wide chunk-policy tuning). 'review' writes only "
+    "each sibling <stem>.md review copy (no config, keys, network or OCR; exits non-zero if "
+    "any paper lacks a refinery.md). Both ignore --workers etc.",
 )
 @click.option(
     "--describe-uncaptioned",
@@ -1095,13 +1154,18 @@ def main_many(
     stages run at ``--workers``. Papers print to stdout in completion order; one that fails
     to refine is logged and skipped (so the final count may be less than the PDFs given).
 
-    ``--from chunk`` re-chunks each paper's saved refinery.md instead (no OCR/network).
+    ``--from chunk`` re-chunks each paper's saved refinery.md instead (no OCR/network);
+    ``--from review`` writes only each paper's sibling review copy.
 
     ``--meta-map FILE`` feeds each paper's known metadata (doi/title/year/authors, from a
     papis wrapper) into source identification; without it refinery falls back to the OCR'd
     title. It's optional complementary data -- no papis dependency.
     """
     _setup_logging()
+    if from_stage == "review":  # before load_config: this stage must not load any secrets
+        if _review_many(pdfs) < len(pdfs):
+            raise SystemExit(1)  # unlike chunk, nothing downstream wants a partial result
+        return
     cfg = load_config()
     cfg.overwrite_edits = overwrite_edits
     if describe_uncaptioned:
