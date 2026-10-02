@@ -48,6 +48,7 @@ from typing import cast
 
 from .backend import OcrBackend, ocr_backend
 from .config import ParseConfig, load_config
+from .fences import fence_code
 from .markers import page_marker
 from .reading_order import reading_order, region_bbox
 from .references import (
@@ -176,7 +177,7 @@ _REGION_HANDLERS: dict[str, Callable[[str], tuple[str, str]]] = {
     _REFERENCE_NUMBER_LABEL: lambda c: ("reference_number", c),
     _REFERENCE_LABEL: lambda c: ("reference", c),
     _TABLE_LABEL: lambda c: ("body", html_table_to_markdown(c)),
-    _ALGORITHM_LABEL: lambda c: ("body", f"```\n{c}\n```"),
+    _ALGORITHM_LABEL: lambda c: ("body", fence_code(c)),
     # standalone equation-number region: glmocr folds these into the formula's own content
     # upstream by default (enable_merge_formula_numbers), so under default settings this
     # never fires. If a glmocr_config_overrides caller disables that merge, the number

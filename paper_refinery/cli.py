@@ -30,7 +30,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import click
@@ -49,6 +49,7 @@ from .citation_resolution import (
 )
 from .config import ParseConfig, RefineryConfig, load_config
 from .enrich import enrich_markdown
+from .fences import repair_doubled_fences
 from .figures import describe_figure, figure_stats, make_client
 from .parse import ParseResult
 from .parse_cache import load_checkpoint, parse_pdf_cached, pdf_sha256
@@ -477,6 +478,13 @@ def _refine_parsed(
     still be written.
     """
     summary: list[str] = []
+
+    # a parse checkpoint from before the algorithm-fence fix still holds doubled fences;
+    # repairing here (not in the cache) fixes it without re-running OCR. No-op when clean.
+    repaired = repair_doubled_fences(parsed.markdown)
+    if repaired != parsed.markdown:
+        logger.info("%s: repaired doubled code fences in the cached parse", pdf.name)
+        parsed = replace(parsed, markdown=repaired)
 
     if parsed.references_markdown:
         refs_path = work_dir / "references.md"

@@ -103,6 +103,38 @@ def test_dispatch_algorithm_is_fenced_code_block():
     assert text == "```\nfor i in range(n):\n    do(i)\n```"
 
 
+def _fence_lines(text: str) -> list[str]:
+    return [line for line in text.split("\n") if line.lstrip().startswith(("```", "~~~"))]
+
+
+def test_dispatch_algorithm_already_fenced_is_not_fenced_twice():
+    kind, text = _dispatch_region(_region("algorithm", "```python\nx = 1\n```"))
+    assert kind == "body"
+    assert text == "```python\nx = 1\n```"
+
+
+def test_dispatch_algorithm_already_fenced_without_info_string():
+    _, text = _dispatch_region(_region("algorithm", "```\nx = 1\n```"))
+    assert text == "```\nx = 1\n```"
+
+
+def test_dispatch_algorithm_unclosed_fence_is_closed():
+    # truncated OCR: an opening fence with no closer must still come out balanced
+    _, text = _dispatch_region(_region("algorithm", "```python\nx = 1\ny = 2"))
+    assert text == "```python\nx = 1\ny = 2\n```"
+
+
+def test_dispatch_algorithm_embedded_fence_gets_longer_outer_fence():
+    _, text = _dispatch_region(_region("algorithm", "Listing 1:\n```python\nx = 1\n```"))
+    assert text == "````\nListing 1:\n```python\nx = 1\n```\n````"
+
+
+def test_dispatch_algorithm_fence_parity_is_even():
+    for content in ("a\nb", "```\na\n```", "```python\na", "x\n```\na\n```"):
+        _, text = _dispatch_region(_region("algorithm", content))
+        assert len(_fence_lines(text)) % 2 == 0
+
+
 def test_dispatch_reference_content_is_routed_separately():
     kind, text = _dispatch_region(_region("reference_content", "Smith et al. 2020."))
     assert kind == "reference"
