@@ -61,3 +61,44 @@ def test_repair_keeps_fence_parity_even_across_many_blocks():
 def test_repair_unterminated_block_is_left_untouched():
     text = "```\n```python\nx = 1\n"
     assert repair_doubled_fences(text) == text
+
+
+def test_repair_handles_a_tilde_inner_fence():
+    # the inner tilde block must end at its own ~~~ closer, not at the outer wrapper's fence
+    doubled = (
+        "```\n~~~python\nx = 1\n~~~\n```\n\nprose $a$\n\n```\n```python\ny = 2\n```\n```\n\ntail"
+    )
+    assert repair_doubled_fences(doubled) == (
+        "```python\nx = 1\n```\n\nprose $a$\n\n```python\ny = 2\n```\n\ntail"
+    )
+
+
+def test_repair_handles_a_longer_backtick_inner_fence():
+    doubled = "```\n````\nx = 1\n````\n```\n\nprose $a$\n\n```\n```python\ny = 2\n```\n```\n\ntail"
+    assert repair_doubled_fences(doubled) == (
+        "```\nx = 1\n```\n\nprose $a$\n\n```python\ny = 2\n```\n\ntail"
+    )
+
+
+def test_repair_handles_text_before_a_longer_inner_fence():
+    doubled = "```\nCap\n````python\nx = 1\n````\n```\n\nprose $a$\n\n```\nplain\n```\n\ntail"
+    assert repair_doubled_fences(doubled) == (
+        "`````\nCap\n````python\nx = 1\n````\n`````\n\nprose $a$\n\n```\nplain\n```\n\ntail"
+    )
+
+
+def test_repair_keeps_a_shorter_fence_inside_a_longer_inner_fence_literal():
+    # the ``` lines are text inside the ```` block, not its closer
+    doubled = "```\n````\n```\nnot a closer\n```\n````\n```\n\nafter $a$"
+    assert repair_doubled_fences(doubled) == ("````\n```\nnot a closer\n```\n````\n\nafter $a$")
+
+
+def test_repair_is_idempotent_for_tilde_and_long_fences():
+    doubled = (
+        "```\n~~~\nx\n~~~\n```\n\np\n\n"
+        "```\n````\ny\n````\n```\n\nq\n\n"
+        "```\n```python\nz\n```\n```\n"
+    )
+    once = repair_doubled_fences(doubled)
+    assert repair_doubled_fences(once) == once
+    assert _fence_count(once) % 2 == 0

@@ -51,20 +51,25 @@ def _is_fence_line(line: str) -> bool:
     return _FENCE_LINE_RE.match(line) is not None
 
 
+def _closes(opener: re.Match[str], line: str) -> bool:
+    """Whether ``line`` closes the fence ``opener`` matched: no info string, the same
+    fence character, and at least as many of it (the CommonMark closing rule)."""
+    closer = _FENCE_LINE_RE.match(line)
+    return bool(
+        closer
+        and not closer.group(2)
+        and closer.group(1)[0] == opener.group(1)[0]
+        and len(closer.group(1)) >= len(opener.group(1))
+    )
+
+
 def _skip_clean_fence(lines: list[str], start: int) -> int:
     """Index just past the fenced block opened at ``lines[start]`` (to the end when the
     block never closes)."""
     opener = _FENCE_LINE_RE.match(lines[start])
     assert opener is not None
-    char, size = opener.group(1)[0], len(opener.group(1))
     for j in range(start + 1, len(lines)):
-        closer = _FENCE_LINE_RE.match(lines[j])
-        if (
-            closer
-            and not closer.group(2)
-            and closer.group(1)[0] == char
-            and len(closer.group(1)) >= size
-        ):
+        if _closes(opener, lines[j]):
             return j + 1
     return len(lines)
 
@@ -74,21 +79,23 @@ def _old_wrapper_end(lines: list[str], start: int) -> int | None:
     index of its outer closing fence; None when the block never closes.
 
     The old wrapper put exactly one bare fence before and after each region, so the outer
-    closer is the first bare fence that is not an inner fence's own closer. An inner fence
-    is a fence line directly after the outer opener, or any fence line with a language.
+    closer is the first bare three-backtick line that is not inside an inner fence. An inner
+    fence is a fence line directly after the outer opener, or any fence line met later; it
+    ends at its own closer (same character, at least as long), so tilde and longer-backtick
+    inner fences are tracked by their own opener rather than by the outer wrapper's shape.
     """
-    depth = 0
+    inner: re.Match[str] | None = None
     j = start + 1
-    if j < len(lines) and _is_fence_line(lines[j]):
-        depth, j = 1, j + 1
+    if j < len(lines) and (inner := _FENCE_LINE_RE.match(lines[j])):
+        j += 1
     while j < len(lines):
         line = lines[j]
-        if depth == 0 and line == _BARE_FENCE:
-            return j
-        if depth == 0 and _is_fence_line(line):
-            depth = 1
-        elif depth == 1 and line == _BARE_FENCE:
-            depth = 0
+        if inner is None:
+            if line == _BARE_FENCE:
+                return j
+            inner = _FENCE_LINE_RE.match(line)
+        elif _closes(inner, line):
+            inner = None
         j += 1
     return None
 
