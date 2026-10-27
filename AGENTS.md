@@ -1,6 +1,7 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Repository guidance for coding agents working on paper-refinery. Keep this file as the
+single repository instruction file; update it when implementation contracts change.
 
 ## What this is
 
@@ -16,23 +17,40 @@ directory also holds `references.md`, `resolution_report.txt` and `figures/`.
 
 ## Commands
 
-Tooling lives in `.venv/` (no `uv.lock` — this is a plain venv, Python 3.14). The default
+Tooling lives in `.venv/` (plain venv, Python 3.14). The existing local `uv.lock` is ignored
+by Git; the development workflow uses this environment directly. The default
 install is cloud-only and torch-free: `uv pip install -e ".[dev]"`. Only the optional LOCAL
 OCR backend (`.[local]` extra) pulls torch, and only there does the CPU-only-torch-first
 two-step matter — see README.md's "Development setup" / "Local (selfhosted) OCR backend".
 
+`.envrc` selects this project-local environment. Call tools by their `.venv/bin/` paths;
+do not create another environment or use `uv run` to introduce a lockfile. The package
+supports Python >=3.12; keep syntax compatible with that floor. `mathunicode` is an editable
+sibling dependency at `../mathunicode` (see `[tool.uv.sources]` in `pyproject.toml`).
+
 ```bash
 .venv/bin/pytest                              # full test suite
 .venv/bin/pytest tests/test_parse.py          # one file
-.venv/bin/pytest tests/test_parse.py::test_sort_references_by_number_fixes_scrambled_order  # one test
+.venv/bin/pytest tests/test_references.py::test_sort_references_by_number_fixes_scrambled_order  # one test
 .venv/bin/ruff check .                         # lint (line-length 100)
+.venv/bin/ruff format --check .                # check formatting without changing files
 .venv/bin/ruff format .                        # format
 .venv/bin/refinery path/to/paper.pdf           # run the full pipeline
 ```
 
 The test suite is fully offline: Gemini and the OCR backend are always mocked/injected
 (`describe`/`client` params, hand-built region fixtures). No test needs network, a GPU, or
-`llama-server`.
+`llama-server`. Backend port tests do need permission to open local sockets. The autouse
+fixture in `tests/conftest.py` isolates HOME and clears config/cache overrides so tests do
+not read real secrets or caches. Preserve that isolation and use synthetic fixtures.
+
+Source is in `paper_refinery/`, tests in `tests/test_<module>.py`, and model evaluations in
+`scripts/eval_models.py`. Use four-space indentation, Ruff's import sorting and formatting,
+and descriptive snake_case names. Ruff targets Python 3.12 with a 100-character line limit
+and McCabe complexity <=10; decompose complex functions rather than suppressing the check.
+`pyproject.toml` also defines the BasedPyright standard gate for `paper_refinery`, with
+cross-module private imports reported as errors. Keep public contracts explicit.
+Recent commit subjects use `feat:`, `fix:`, and `chore:` with concise imperative descriptions.
 
 ## Running the pipeline live: two OCR backends (`ParseConfig.mode`)
 
@@ -40,8 +58,7 @@ The test suite is fully offline: Gemini and the OCR backend are always mocked/in
 (`api.z.ai/api/paas/v4/layout_parsing`, model `glm-ocr`) via the glmocr SDK's maas client —
 no GPU, no GGUF, no llama-server. Needs `ZHIPU_API_KEY` (secrets `zai.env`). The SDK's maas
 `json_result` DROPS `native_label`; `parse._normalize_maas_regions` restores it from the raw
-`result._maas_response` and strips the cloud's `<div>` content wrappers (see
-[[feature_maas_cloud_ocr]]).
+`result._maas_response` and strips the cloud's `<div>` content wrappers.
 
 **`mode="selfhosted"`: local.** `parse_pdf` spawns/tears down a `llama-server` (llama.cpp)
 serving GLM-OCR GGUF weights, driven by the glmocr SDK. Needs the `.[local]` install extra
@@ -51,20 +68,27 @@ on PATH, the two GGUF files, and their paths in `config.toml` `[parse]`
 the kill.
 
 **Always test pipeline changes live against real PDFs** — unit tests alone have missed real
-OCR-ordering bugs. See [[feedback_test_live_ocr]].
+OCR-ordering bugs. Use an isolated work directory and the smallest relevant sample; inspect
+page order, captions, references, and output links as appropriate. Reuse checkpoints unless
+the change specifically needs fresh OCR. Documentation-only changes need documentation
+checks rather than paid OCR/API runs. Read the local papers-and-PDFs skill's matching
+reference before expensive conversion or library operations.
 
 ## Architecture
 
 Pipeline stages, each a single-purpose module; `cli.py` owns all wiring (`_refine` parses,
-then `_refine_parsed` runs the post-parse stages), the modules own logic (never call each
-other except `enrich`→`parse` for its result type, `parse`→`references` for bibliography
-repair, `citation_resolution`→`citation_providers` for the actual provider HTTP calls, and
-`parse_cache`→`parse`/`backend` for checkpointed parsing):
+then `_refine_parsed` runs the post-parse stages), and the modules own logic. Keep orchestration
+in `cli.py`; module dependencies serve shared types, stage-specific helpers, provider HTTP
+calls, and checkpointing rather than duplicating pipeline orchestration.
 
 ```
 backend.py               llama-server + GlmOcr lifecycle; ocr_backend() is reusable across PDFs
 parse.py                 PDF -> ParseResult (body markdown + figure crops + raw references)
-references.py            bibliography repair, used only by parse.py: reclaim mislabeled
+reading_order.py         conservative geometric repair within same-column runs; preserve
+                          macro column order and fall back to index order without bboxes
+pdf_split.py             split long PDFs into parts (default <=100 pages), then merge results
+                          with page markers, crops, captions, and references offset correctly
+references.py            bibliography repair used by parse.py: reclaim mislabeled
                           entries, merge page-break splits, drop copyright tails, recover
                           layout-skipped entries from the PDF text layer, contiguity-guarded
                           number sort -- every rule exists because a live paper broke the
@@ -79,21 +103,22 @@ enrich.py                pair crops to captions geometrically (bboxes from parse
                           are missing), rename crops to fig_N.png, assemble per-figure context
                           (title/abstract/neighbor paragraphs), splice descriptions after
                           captions
-citation_extraction.py   layer 1: one Gemini call -> rough structured reference fields
+citation_extraction.py   layer 1: batched Gemini calls -> rough structured reference fields
                           (citation_key/title/authors/year/...); sanitizes Gemini-fabricated
                           numeric citation_keys for markerless bibliographies
 citation_providers.py    HTTP layer for layer 2/3: talks to CrossRef/S2/OpenAlex (one GET
                           each, disk-cached at ~/.cache/paper-refinery/api-cache) and
                           normalizes their very different response shapes into one common
                           candidate shape -- knows how to ask, not what to trust
-citation_resolution.py   layer 2/3: verify/enrich each reference against CrossRef -> S2 ->
-                          OpenAlex (DOI-first shortcut, title-similarity + year-tolerance
+citation_resolution.py   layer 2/3: verify/enrich references in CitationConfig.title_search_order
+                          (default CrossRef -> S2 -> OpenAlex; DOI-first shortcut,
+                          title-similarity + year-tolerance
                           acceptance); a verified year never overwrites *below* the printed
                           one (providers can merge preprint+published and report the
                           earlier year). FAST-PATH: when the SOURCE paper is identified (its
                           DOI or OCR'd title -> SourcePaper), fetch its whole bibliography in
-                          one S2 bulk /references call (filled from OpenAlex referenced_works
-                          when S2 is publisher-elided), match each printed ref locally, and
+                          bulk reference-list calls to list-capable providers (S2/OpenAlex)
+                          in configured order until coverage is sufficient, match locally, and
                           fall back to the per-entry provider search only for what doesn't
                           match -- decides what to trust from citation_providers.py's answers.
                           METADATA CHANNEL: SourceMeta (external-input sibling of SourcePaper)
@@ -102,8 +127,8 @@ citation_resolution.py   layer 2/3: verify/enrich each reference against CrossRe
                           _source_confident is two-tier so year/author never veto a strong
                           title). Caller-supplied `references` (papis citations, any of
                           refinery's or CrossRef-reference shape) are normalized into a local
-                          bulk pool matched FIRST (match="papis"); the S2 fetch is skipped
-                          entirely when they cover every printed ref. to_papis_citations() is
+                          bulk pool matched FIRST (match="papis"); provider list fetches are
+                          skipped entirely when they cover every printed ref. to_papis_citations() is
                           the inverse (resolved refs -> papis/CrossRef citations: shape).
 citation_linking.py      layer 4: deterministic (no LLM) in-text marker detection against
                           the layer-1 EXTRACTED (printed-form) entries, plus the
@@ -114,6 +139,10 @@ parse_cache.py           parse checkpoint: persist ParseResult + its raw crops t
                           <stem>.refinery/parse_cache/ keyed on pdf-hash + parse-config
                           signature, so a re-run skips the (~10-min) OCR pass; parse_pdf_cached()
                           wraps parse_pdf, restoring crops on a hit
+markers.py               single page-marker format and regex
+tables.py / fences.py    HTML-table conversion and OCR code-fence repair
+text_utils.py            shared text/name normalization and leading-number parsing
+disk_cache.py / retry.py shared atomic JSON caching and retry/backoff helpers
 typeset.py                markdown -> typeset PDF via pandoc + xelatex (system binaries, not
                           pip deps): a clean, reflowed reading copy with a TOC and inline
                           images -- no figure-description or citation stages. render_pdf()
@@ -135,7 +164,7 @@ typeset.py                markdown -> typeset PDF via pandoc + xelatex (system b
                           can legitimately repeat many times as real section starts.
                           TypesetConfig.clean_toc_with_llm (opt-in, off by default) adds two
                           sequential batched Gemini calls (reusing CitationConfig's
-                          model/key/retry -- gemini-3.1-flash-lite), not one: classify_real_headings
+                          model/key/retry settings), not one: classify_real_headings
                           first (heading text + what follows it only) catches a printed
                           table-of-contents line mistagged as a heading, inconsistently, so no
                           positional rule catches all of it; classify_chapter_level then runs
@@ -184,8 +213,8 @@ cli.py                    orchestrate the above (citations run concurrently with
                           `refinery-export-citations` (main_export_citations() ->
                           to_papis_citations -> papis citations: YAML), and `refinery-typeset`
                           (main_typeset() -> _typeset() -> typeset.render_pdf; PDF input is
-                          parsed fresh with an absolute work_dir -- parse.py bakes whatever
-                          work_dir Path it's given straight into each crop's markdown link, so
+                          parsed with checkpoint reuse and an absolute work_dir -- parse.py
+                          bakes its work_dir Path straight into each crop's markdown link, so
                           a relative one would resolve against the wrong base once render_pdf
                           runs pandoc/xelatex with cwd=<parsed.md's directory>; markdown input
                           is typeset as-is, e.g. a prior run's refinery.md, already correctly
@@ -204,9 +233,9 @@ cli.py                    orchestrate the above (citations run concurrently with
 - **GLM-OCR is region-level, not page-to-markdown.** `parse.py` rebuilds markdown itself from
   `result.json_result` (not glmocr's `markdown_result`) so it can drop boilerplate, route
   references out of the body, convert HTML tables → markdown, and turn figure/chart regions
-  into placeholders + saved crops. Regions are sorted by PP-DocLayout-V3's `index` field,
-  which is **not always true reading order** — this is the known root cause of body/figure
-  ordering quirks. Numbered bibliographies are re-sorted by their printed number
+  into placeholders + saved crops. `reading_order.py` starts from PP-DocLayout-V3's `index`
+  order, then repairs within-column inversions geometrically without interleaving columns;
+  missing geometry retains index order. Numbered bibliographies are re-sorted by printed number
   (`_sort_references_by_number`) precisely because `index` can't be trusted there.
 - **Figure anchoring is caption-based, not placeholder-based.** Placeholders shift between
   parser runs; the `FIGURE N.M` caption is the stable anchor. When the layout model detected
@@ -216,13 +245,14 @@ cli.py                    orchestrate the above (citations run concurrently with
   them, still pairs — via the bboxes on `CropRegion`/`CaptionRegion`, plus single-caption-page
   cluster growth for diagonal panels; positional pairing only when geometry is missing): a
   multi-panel figure's crops all land on one caption (one Gemini call, names `fig_4.1_1.png`…),
-  and a crop overlapping no caption on either axis (a banner) is never renamed or described.
+  and a crop overlapping no caption on either axis (a banner) is left alone by default.
+  `--describe-uncaptioned` opts into separate descriptions for unmatched images.
   Renaming happens before any Gemini call, so cropping/pairing can be sanity-checked by
   filename alone.
-- **Image links are relativized last.** `parse.py` emits absolute crop paths; `cli._refine`
-  rewrites them relative to the markdown's own directory (`_relativize_image_links`) at the
-  very end, since only `_refine` knows both the crop dir and the final `.md` path. Scratchpad
-  scripts that call `parse_pdf` directly bypass this and will show absolute paths — expected.
+- **Image links are relativized after enrichment.** `parse.py` emits crop paths based on
+  work_dir; `cli._refine_parsed` rewrites them relative to the markdown's own directory
+  (`_relativize_image_links`), since orchestration knows both the crop dir and final `.md`
+  path. Scripts that call `parse_pdf` directly bypass this and retain the original paths.
 - **Citation detection matches the printed form; citekeys come only from verified data.**
   `citation_linking.link_citations` always runs against layer-1 EXTRACTED entries, never
   resolved ones — resolution legitimately moves years/authors off what the paper prints
@@ -232,21 +262,74 @@ cli.py                    orchestrate the above (citations run concurrently with
   citation-shaped text by construction (dictionary-only prompt). `rewrite_markers` then
   builds `[surname_year]` citekeys from resolution-VERIFIED entries only, and only rewrites
   a marker when every reference it points at has one; everything else is left exactly as
-  printed. Citations and figure-enrich still run concurrently in `cli._refine` — only this
+  printed. Citations and figure-enrich run concurrently in `cli._refine_parsed` — only this
   final rewrite pass is serialized after both join.
 
 ### Config & secrets
 
 - `config.py`: dataclass-per-stage (`ParseConfig`, `FigureConfig`, `ChunkConfig`,
-  `CitationConfig`) bundled in `RefineryConfig`. `load_config()` overlays
+  `CitationConfig`, `TypesetConfig`) bundled in `RefineryConfig`. `load_config()` overlays
   `~/.config/paper-refinery/config.toml` — each TOML table maps to a sub-config by name, each
   key must match a dataclass field (unknown section/key raises). Every field has a code
   default; the TOML file is optional and only sets machine-specific values (model paths,
-  `n_gpu_layers`, `glmocr_config_overrides`).
+  `n_gpu_layers`, `glmocr_config_overrides`) and deliberate stage overrides.
+  `XDG_CONFIG_HOME` changes the config base; `PAPER_REFINERY_CONFIG` and
+  `PAPER_REFINERY_SECRETS_DIR` override the individual locations.
 - Secrets load from `~/.config/paper-refinery/secrets/` — **one `*.env` file per service**
-  (`google.env`, `hf.env`), loaded via python-dotenv inside `load_config()` early (before
+  (`google.env`, `hf.env`, `zai.env`, `openalex.env`, `contact.env`, optionally `s2.env`),
+  loaded via python-dotenv inside `load_config()` early (before
   `parse_pdf`, since `HF_TOKEN` must be set for the HF Hub check). This directory is
   deliberately project-owned and never shared with other tools' secrets files — sourcing an
   unrelated tool's env (e.g. papis-ask's `OPENAI_BASE_URL`) would silently redirect glmocr's
   OpenAI-compatible client away from our own `llama-server`. paper-refinery only ever *reads*
   these files; never create, write, or read their contents.
+
+## Cached outputs and hand edits
+
+- Full runs write uncollapsed `refinery.md` as the exact chunking input; keep math collapsing
+  confined to the sibling review copy. `--from chunk` only re-chunks; `--from review` only
+  writes the review copy and bypasses config, keys, OCR, and network. Both work in batch mode.
+- Full runs checksum `refinery.md` in `refinery.md.sha256`. A changed file is backed up and
+  rejected before OCR/API calls unless `--overwrite-edits` is explicitly selected; legacy
+  files without checksums are backed up before replacement. Preserve this guard and never
+  use a full run merely to refresh a review copy of an imported or hand-corrected book.
+- OCR checkpoints use PDF hash plus parse configuration. Long books also cache split parts
+  under `parts/part_N/`, keyed on the original PDF hash. Check existing parts before OCR-ing
+  again; `--force-parse` deliberately bypasses cached parsing.
+- Default chunks target 6000 maximum / 1000 minimum characters with a guaranteed soft
+  overlap window of 300–700 characters (ideal 500). Page ranges describe the chunk body
+  before overlap is prepended. Back matter is excluded by default; references belong in
+  the citation manifest. Preserve manifest schema versioning and plain-data API boundaries.
+- Do not commit sample PDFs, generated manifests, figure crops, evaluation reports, private
+  logs, caches, or credentials. Use ignored `samples/`, `scratch/`, `out/`, or `/tmp` for
+  local validation and scratch work.
+
+## Local entry points and installation
+
+- `refinery` performs OCR, Gemini figure descriptions, and citation lookup. For a general
+  PDF that only needs OCR/markdown or a clean reading PDF, use `refinery-typeset`; PDF input
+  writes `<stem>.refinery/parsed.md` and uses only the OCR backend unless `--clean-toc` is
+  requested. Markdown input skips OCR. Typesetting needs system `pandoc` and `xelatex`.
+- For immediate inspection without OCR or network, use `mutool info` / `mutool draw`.
+  This machine's PDF Read rendering path lacks Poppler; render a selected one-based page
+  range with `mutool draw -q -r 80 -o /tmp/refinery-page-%d.png file.pdf 1-2`, then inspect
+  the images. Text extraction only reads the embedded text layer; scans need OCR.
+- `papis` owns library management and indexing. `pask index` may refine PDFs and index more
+  broadly than its refine query; `--no-refine` and `--raw` embed raw pypdf text rather than
+  merely skipping OCR. Consult the papers-and-PDFs skill's `references/ingest.md` before
+  changing library indexes. Its `references/convert.md` covers conversion and re-chunking.
+- `refinery` on PATH is a non-editable uv tool snapshot, separate from this checkout.
+  Use `.venv/bin/refinery` to exercise source changes. Compare installed/source packages
+  before assuming a change is installed; reinstall only when no refinery process is running:
+  `uv tool install --force --from ~/projects/paper-refinery paper-refinery`.
+  Never install development dependencies into the uv tool environment.
+
+## Model changes
+
+Pin exact model names, never `-latest` aliases. Before changing a model, evaluate candidates
+on the real library with `.venv/bin/python scripts/eval_models.py check|extraction|figures`
+(see README.md for arguments). `check` lists API models without paid generation;
+`extraction` and `figures` make paid Gemini calls. Judge figure descriptions against the
+images, not just their text. The figure cache is keyed on crop bytes and prompt, excluding
+the model, so a model change alone does not regenerate existing descriptions. Changes to
+papis-ask's embedding model require a full re-embed and are outside ordinary refinery edits.

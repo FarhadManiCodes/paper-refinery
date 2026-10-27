@@ -92,7 +92,7 @@ independently, then glued back into one document before figures/citations/chunki
 
 pypdf mangles equations and emits glyph garbage for figures; paper-qa then
 char-chunks the result blindly. paper-refinery produces faithful, semantically
-chunked text instead. See [`CLAUDE.md`](CLAUDE.md) for the architecture and the validated
+chunked text instead. See [`AGENTS.md`](AGENTS.md) for the architecture and the validated
 chunking policy.
 
 Parsing uses GLM-OCR — a small (0.9B) but top-ranked document OCR model — on Zhipu's cloud API
@@ -277,7 +277,7 @@ result: RefineResult = refine(Path("paper.pdf"), source={"doi": "10.1234/abc", "
 # OCR gated separately to `ocr_workers`. Yields each RefineResult in COMPLETION order (not
 # input order) as soon as it is ready, so a caller can index each paper the moment it
 # finishes rather than blocking on the batch.
-for result in refine_many(pdfs, sources=sources):   # sources aligned to pdfs, entries may be None
+for result in refine_many(pdfs, sources=sources):  # sources aligned to pdfs, entries may be None
     index(result)
 ```
 
@@ -318,9 +318,11 @@ gracefully — passing it adds **no dependency**, it's plain data.
 
 ```python
 source: SourceMeta = {
-    "doi": "10.1234/abc", "title": "…", "year": 2022,
+    "doi": "10.1234/abc",
+    "title": "…",
+    "year": 2022,
     "authors": [{"family": "Smith", "given": "J"}],
-    "references": [ ... ],   # the paper's own bibliography (papis info.yaml `citations:`)
+    "references": [...],  # the paper's own bibliography (papis info.yaml `citations:`)
 }
 ```
 
